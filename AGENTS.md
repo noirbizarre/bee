@@ -6,15 +6,29 @@ Notes for anyone — human or otherwise — changing this repository.
 
 A minimal, headless Rust agent runtime implementing ACPv2.
 
-<!-- Replace this with the one paragraph that, if someone read only it, would -->
-<!-- stop them proposing the wrong thing. Then list the invariants below.     -->
+Bee is the agent side of an ACPv2 connection: the agentic loop and LLM provider
+integration, usable with any ACPv2 client. It is **not** an orchestration
+platform, has no UI of its own, and is not tied to Hive or any one client. MCP
+configuration and orchestration are the client's concern, reached through the
+ACPv2 client-agent contract. Do not propose a TUI, a web frontend, a plugin
+framework or a provider abstraction ahead of a concrete need.
+
+The repository is at the bootstrap stage: ACPv2, the agentic loop and provider
+integrations are planned, not implemented. Documentation must keep saying so
+until that changes.
 
 ## Non-negotiable invariants
 
 Each of these should be enforced by a hook or a test. An invariant nothing
 checks is a comment, and it will be violated.
 
-<!-- 1. **...** — enforced by `tests/....rs`. -->
+1. **A build without ACPv2 never reports success.** `bee::run()` returns
+   `Error::NotImplemented` until the protocol exists, so a client cannot mistake
+   it for a working agent — enforced by `tests/cli.rs` and the unit test in
+   `src/lib.rs`. Remove both together with the real implementation.
+2. **Not published to crates.io.** The `bee` crate name belongs to an unrelated
+   project, so `publish = false` stays in `.config/git.tpl.toml` — enforced by
+   the template, which renders it into `Cargo.toml`.
 
 ## Layout
 
@@ -24,7 +38,12 @@ src/
 ├── main.rs     the bee binary
 ├── cli.rs      argument types only
 └── error.rs    the crate's error type
+tests/
+└── cli.rs      the binary's observable contract
 ```
+
+New modules for the ACPv2 protocol, the agent loop, providers, sessions and
+configuration are added when the code that needs them is, not before.
 
 Dependencies point inward. Nothing in the library knows a command exists.
 

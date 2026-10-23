@@ -15,13 +15,13 @@ pub mod error;
 
 pub use error::{Error, Result};
 
-/// Run the thing.
+/// Run the agent.
 ///
 /// # Errors
 ///
-/// Returns [`Error`] when there is nothing to do.
+/// Always returns [`Error::NotImplemented`] until the ACPv2 integration lands.
 pub fn run() -> Result<()> {
-    Ok(())
+    Err(Error::NotImplemented)
 }
 
 #[cfg(test)]
@@ -29,7 +29,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn running_with_nothing_to_do_succeeds() {
-        assert!(run().is_ok());
+    fn running_before_acpv2_exists_reports_it_instead_of_pretending_to_succeed() {
+        assert!(matches!(run(), Err(Error::NotImplemented)));
     }
 }

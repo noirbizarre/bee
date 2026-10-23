@@ -9,18 +9,14 @@ use miette::MietteHandlerOpts;
 
 mod cli;
 
-use cli::{Cli, Command};
+use cli::Cli;
 
 fn main() -> ExitCode {
     let args = Cli::parse();
     let verbose = args.verbose > 0 || std::env::var_os("RUST_BACKTRACE").is_some();
     install_miette_hook(verbose);
 
-    let result = match args.command {
-        Command::Run => bee::run(),
-    };
-
-    match result {
+    match bee::run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             // Rendered here rather than returned as `miette::Result`, so the

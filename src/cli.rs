@@ -4,26 +4,18 @@
 //! another, and keeping them apart is what lets the library be used without
 //! the CLI.
 
-use clap::{Parser, Subcommand};
+use clap::Parser;
 
 /// A minimal, headless Rust agent runtime implementing ACPv2.
+// No subcommands yet: how an ACPv2 client launches the agent (stdio, flags,
+// configuration) is decided by the protocol task, and a placeholder interface
+// would only have to be broken then.
 #[derive(Debug, Parser)]
 #[command(name = "bee", version, about, long_about = None)]
 pub struct Cli {
     /// Increase verbosity. Repeat for more.
     #[arg(short, long, global = true, action = clap::ArgAction::Count)]
     pub verbose: u8,
-
-    /// The subcommand to run.
-    #[command(subcommand)]
-    pub command: Command,
-}
-
-/// The subcommands.
-#[derive(Debug, Subcommand)]
-pub enum Command {
-    /// Do the thing.
-    Run,
 }
 
 #[cfg(test)]
