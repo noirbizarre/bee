@@ -39,6 +39,15 @@ immediately, this only shows once a real turn takes time. `session/resume` canno
 
 The "Scope" and "Non-goals" sections describe the intended design, not current behaviour.
 
+## Configuration
+
+Bee merges up to three TOML files, lowest precedence first: the global
+`$XDG_CONFIG_HOME/bee/config.toml` (or `~/.config/bee/config.toml`, on every platform), the file named by
+`BEE_CONFIG`, and the project's `.config/bee.toml`. Tables merge key by key, higher layers win for scalars, and arrays
+are replaced rather than extended. A malformed or unreadable file, or a missing `BEE_CONFIG` file, stops Bee at launch
+with an actionable error that never repeats the file's contents. No setting is read yet. See the
+[documentation](https://noirbizarre.github.io/bee/#configuration).
+
 ## Scope
 
 Bee is meant to be the agent side of an ACPv2 connection: it runs the agentic loop and talks to LLM providers, and

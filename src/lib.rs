@@ -12,6 +12,7 @@
 #![warn(missing_docs)]
 
 pub mod acp;
+pub mod config;
 pub mod error;
 pub mod session;
 
@@ -23,8 +24,22 @@ pub use error::{Error, Result};
 ///
 /// # Errors
 ///
-/// Returns [`Error::Connection`] if the connection ends with an error.
+/// Returns a configuration error if a configuration file is unreadable,
+/// malformed or conflicts with another layer, [`Error::Io`] if the working
+/// directory cannot be determined, and [`Error::Connection`] if the connection
+/// ends with an error.
 pub fn run() -> Result<()> {
+    // Loaded before the first byte of protocol traffic so a bad file fails the
+    // launch with a diagnostic on stderr, where the user sees it, rather than
+    // surfacing mid-session. Nothing reads the settings yet: provider and model
+    // selection (#7) will. Project configuration is read from the launch
+    // directory only; per-session loading waits for a consumer (ADR-006).
+    let project_dir = std::env::current_dir().map_err(|source| Error::Io {
+        path: ".".to_owned(),
+        source,
+    })?;
+    let _config = config::Config::load(&config::Environment::from_process(), &project_dir)?;
+
     // The one place an executor is chosen. The SDK does its stdio on its own
     // thread pool, so a plain executor suffices and the library stays free of
     // an async runtime (ADR-003).

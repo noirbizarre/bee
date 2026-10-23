@@ -33,7 +33,10 @@ checks is a comment, and it will be violated.
    `tests/cli.rs`.
 2. **Not published to crates.io.** The `bee` crate name belongs to an unrelated
    project, so `publish = false` stays in `.config/git.tpl.toml` — enforced by
-   the template, which renders it into `Cargo.toml`.
+    the template, which renders it into `Cargo.toml`.
+3. **Configuration values never reach a diagnostic or `Debug` output.** Files
+   are where users keep API keys, so errors carry paths, positions and types,
+   never contents — enforced by `tests/config.rs` and `tests/cli.rs`.
 
 ## Layout
 
@@ -44,6 +47,7 @@ src/
 ├── acp.rs      the ACPv2 boundary: the only module that imports the SDK;
 │               the agent core, and `serve` over any transport
 ├── session.rs  session state, free of the SDK
+├── config.rs   layered XDG configuration (ADR-006), free of the SDK
 ├── cli.rs      argument types only
 └── error.rs    the crate's error type
 tests/
@@ -52,10 +56,11 @@ tests/
 ├── acp.rs      the agent core, in-process
 ├── session.rs  the session and prompt lifecycle, in-process
 ├── cancel.rs   cancellation, failed turns and error mapping, in-process
+├── config.rs   the configuration layers, merge rules and errors, in-process
 └── mcp.rs      the MCP-over-ACP spike (ADR-002)
 ```
 
-New modules for the agent loop, providers and configuration are added when the code that needs them is, not before.
+New modules for the agent loop and providers are added when the code that needs them is, not before.
 
 Dependencies point inward. Nothing in the library knows a command exists.
 

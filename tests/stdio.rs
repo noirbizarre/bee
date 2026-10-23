@@ -25,7 +25,16 @@ struct Agent {
 
 impl Agent {
     fn spawn() -> Self {
+        // An empty directory as home, config home and working directory, so a
+        // developer's real configuration (or a malformed one) cannot change
+        // what these tests observe. Leaked deliberately: the child outlives
+        // this function and the OS temp cleaner owns it.
+        let isolated = tempfile::tempdir().expect("a temp directory").keep();
         let mut child = Command::new(env!("CARGO_BIN_EXE_bee"))
+            .env("HOME", &isolated)
+            .env("XDG_CONFIG_HOME", isolated.join("xdg"))
+            .env_remove("BEE_CONFIG")
+            .current_dir(&isolated)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

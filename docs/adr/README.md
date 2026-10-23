@@ -26,3 +26,4 @@ by editing the old one. The history is the value.
 - [ADR-003](003-stdio-transport.md) — Serve ACPv2 over the SDK's stdio transport, behind a transport-agnostic seam
 - [ADR-004](004-session-and-prompt-lifecycle.md) — Serve the baseline session lifecycle with a placeholder turn
 - [ADR-005](005-prompt-cancellation-and-error-mapping.md) — Run turns off the dispatch loop so prompts can be cancelled
+- [ADR-006](006-layered-xdg-configuration.md) — Layer configuration from the XDG directory, `BEE_CONFIG` and the project

@@ -104,9 +104,14 @@ agent-client-protocol = { version = "=3.5.0", features = ["stdio", "unstable_pro
 # tree through the SDK; this only makes it a direct dependency.
 futures = { version = "0.3", default-features = false, features = ["std", "executor"] }
 
+# Layered configuration (ADR-006). Only the generic `Table`/`Value` types are
+# used, which sit behind the `serde` feature; `display` (serialization) is not
+# needed because Bee never writes configuration.
+toml = { version = "1", default-features = false, features = ["std", "serde", "parse"] }
+
 # `console`, `demand`, `serde` and `serde_json` are deliberately absent: nothing
 # in the library uses them. Add each with the code that needs it
-# (configuration will want serde; ACPv2 framing is the SDK's job).
+# (a typed configuration schema will want serde; ACPv2 framing is the SDK's job).
 
 [dev-dependencies]
 # Only for `#[tokio::test]`: the SDK is runtime-agnostic and neither the library

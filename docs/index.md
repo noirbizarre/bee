@@ -15,6 +15,25 @@ or `session/close`, and a prompt sent while one is running is refused. Because t
 immediately, this only shows once a real turn takes time. `session/resume` cannot replay history, and prompts accept
 `text` and `resource_link` content only. There is no agentic loop either.
 
+## Configuration
+
+Bee reads TOML configuration from up to three files, merged in this order, lowest precedence first:
+
+1. **Global:** `$XDG_CONFIG_HOME/bee/config.toml`, or `~/.config/bee/config.toml` when `XDG_CONFIG_HOME` is unset. The
+   same on every platform, macOS included.
+2. **`BEE_CONFIG`:** the file named by that environment variable, for settings chosen per client or workspace.
+3. **Project:** `.config/bee.toml` in the directory Bee is launched from. Parent directories are not searched.
+
+The global and project files are optional. A `BEE_CONFIG` file that does not exist is an error, and so is any file
+that exists but cannot be read or parsed: Bee exits before speaking the protocol and says which file and, for syntax
+errors, which line and column. Diagnostics never repeat the contents of a file, since they may hold API keys.
+
+Tables merge key by key, and for a scalar the higher layer wins. An array in a higher layer **replaces** the lower one
+instead of extending it. Giving one key different types in two layers (a string over an integer, say) is an error that
+names the key and both files. See [ADR-006](adr/006-layered-xdg-configuration.md).
+
+No setting is read yet: providers and models are not integrated, so the files are validated but have no effect.
+
 ## Scope
 
 Bee is the agent side of an ACPv2 connection. It runs the agentic loop and talks to LLM providers; presentation and
