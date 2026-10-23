@@ -65,3 +65,28 @@ async fn the_sdk_negotiates_a_v2_agent_up_from_a_v1_request() -> Result<(), Erro
         })
         .await
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn serve_runs_the_agent_over_any_transport_the_sdk_can_connect() {
+    // `Channel` is not stdio: this is what shows the agent core is not coupled
+    // to the transport `run()` picks.
+    let (client_side, agent_side) = agent_client_protocol::Channel::duplex();
+
+    let client = Client.v2().connect_with(client_side, async |connection| {
+        let response = connection
+            .send_request(v2::InitializeRequest::new(
+                ProtocolVersion::V2,
+                v2::Implementation::new("bee-test", "0"),
+            ))
+            .block_task()
+            .await?;
+        assert_eq!(response.info.name, "bee");
+        Ok(())
+    });
+
+    let (client, served) = tokio::join!(client, bee::acp::serve(agent_side));
+
+    client.expect("the client completes its exchange");
+    // The client leaving is a normal end of the connection, not an error.
+    served.expect("serve ends cleanly when the peer disconnects");
+}

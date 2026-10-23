@@ -94,15 +94,23 @@ clap = { version = "4", features = ["derive", "env", "wrap_help"] }
 # `unstable_protocol_v2` feature, so a minor release may break it. The exact pin
 # turns every upgrade into a deliberate, reviewed change instead of a surprise
 # from `cargo update`. Only `src/acp.rs` imports this crate; see ADR-001.
-agent-client-protocol = { version = "=3.5.0", features = ["unstable_protocol_v2"] }
+#
+# `stdio` is the SDK's native stdin/stdout transport (ADR-003).
+agent-client-protocol = { version = "=3.5.0", features = ["stdio", "unstable_protocol_v2"] }
 
-# `console`, `demand`, `serde` and `serde_json` are deliberately absent: the
-# bootstrap uses none of them. Add each with the code that needs it
+# The executor that drives the stdio connection from `bee::run()`. The SDK is
+# runtime-agnostic and does its own blocking I/O on a thread pool, so a plain
+# executor is enough and the binary needs no tokio (ADR-003). Already in the
+# tree through the SDK; this only makes it a direct dependency.
+futures = { version = "0.3", default-features = false, features = ["std", "executor"] }
+
+# `console`, `demand`, `serde` and `serde_json` are deliberately absent: nothing
+# in the library uses them. Add each with the code that needs it
 # (configuration will want serde; ACPv2 framing is the SDK's job).
 
 [dev-dependencies]
-# Only for `#[tokio::test]`: the SDK is runtime-agnostic and the library does not
-# depend on tokio. The runtime for the binary is decided with the stdio entry point.
+# Only for `#[tokio::test]`: the SDK is runtime-agnostic and neither the library
+# nor the binary depends on tokio; the binary runs on `futures::executor`.
 tokio = { version = "1", features = ["macros", "rt", "sync"] }
 # The client side of the MCP-over-ACP spike (tests/mcp.rs, ADR-002). The SDK core
 # has no tool builder, so a test client needs this companion crate to host a tool.

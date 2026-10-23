@@ -3,12 +3,44 @@
 //! Keeping the SDK behind one file means an upgrade, which is likely while v2
 //! is a draft, touches one file instead of the whole crate.
 //!
-//! This is a feasibility spike (ADR-001), not the agent. It is deliberately not
-//! wired to [`crate::run`] or the binary, so Bee still reports ACPv2 as not
-//! implemented.
+//! Two layers, so the agent never learns which transport carries it (ADR-003):
+//! [`agent`] is the transport-free core, [`serve`] runs it over any transport
+//! the SDK can connect, and [`serve_stdio`] picks stdin/stdout. A remote
+//! transport later supplies another [`ConnectTo`] and changes nothing else.
 
 use agent_client_protocol::schema::v2;
-use agent_client_protocol::{Agent, Client, ConnectTo, Responder, V2ConnectionTo};
+use agent_client_protocol::{Agent, Client, ConnectTo, Responder, Stdio, V2ConnectionTo};
+
+use crate::{Error, Result};
+
+/// Run the agent over `transport` until the peer disconnects.
+///
+/// # Errors
+///
+/// Returns [`Error::Connection`] if the connection ends with a protocol or
+/// transport error. A peer that simply closes its end is not an error.
+pub async fn serve(transport: impl ConnectTo<Agent>) -> Result<()> {
+    // `agent()` is `ConnectTo<Client>`, and the transport is the client's end,
+    // so it is the transport that the agent connects to.
+    agent()
+        .connect_to(transport)
+        .await
+        .map_err(|error| Error::Connection {
+            // Stringified so the SDK's error type stays inside this module.
+            reason: error.to_string(),
+        })
+}
+
+/// Run the agent over the process's stdin and stdout.
+///
+/// # Errors
+///
+/// As [`serve`].
+pub async fn serve_stdio() -> Result<()> {
+    // No debug callback on purpose: stdout carries protocol traffic only, and a
+    // trace line written there would corrupt the client's JSON-RPC stream.
+    serve(Stdio::new()).await
+}
 
 /// Build the ACPv2 agent side of a connection, able to answer `initialize`.
 ///

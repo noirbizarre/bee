@@ -26,11 +26,13 @@ fn the_help_flag_describes_bee_as_an_acpv2_runtime() {
 }
 
 #[test]
-fn a_bare_run_fails_with_the_not_implemented_diagnostic() {
-    // Guards against a bootstrap build exiting 0, which a client would read as
-    // a healthy agent.
+fn a_bare_run_exits_cleanly_when_the_client_closes_stdin() {
+    // An empty stdin is a client that connected and left. Hanging here would
+    // leave an orphaned agent behind every client crash.
     bee()
+        .write_stdin("")
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("bee::error::not_implemented"));
+        .success()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::is_empty());
 }

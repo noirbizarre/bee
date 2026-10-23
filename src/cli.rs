@@ -7,11 +7,17 @@
 use clap::Parser;
 
 /// A minimal, headless Rust agent runtime implementing ACPv2.
-// No subcommands yet: how an ACPv2 client launches the agent (stdio, flags,
-// configuration) is decided by the protocol task, and a placeholder interface
-// would only have to be broken then.
+// No subcommands: a client launches `bee` and speaks ACPv2 on stdin/stdout.
+// More launch options wait for the configuration work that needs them.
 #[derive(Debug, Parser)]
-#[command(name = "bee", version, about, long_about = None)]
+#[command(
+    name = "bee",
+    version,
+    about,
+    long_about = "A minimal, headless Rust agent runtime implementing ACPv2.\n\n\
+                  Started by an ACPv2 client, Bee speaks the protocol on stdin and \
+                  stdout. Stdout carries protocol traffic only; diagnostics go to stderr."
+)]
 pub struct Cli {
     /// Increase verbosity. Repeat for more.
     #[arg(short, long, global = true, action = clap::ArgAction::Count)]

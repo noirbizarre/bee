@@ -17,18 +17,21 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, Error, Diagnostic)]
 #[non_exhaustive]
 pub enum Error {
-    /// The ACPv2 integration does not exist yet.
-    // Returned instead of `Ok(())` so a bootstrap build can never be mistaken
-    // for a working agent by a client that launches it and waits for a handshake.
-    #[error("bee does not implement ACPv2 yet")]
+    /// The ACPv2 connection ended with an error.
+    // Holds the SDK error's text, not the SDK error: this module must not
+    // import the SDK, or an upgrade would leak out of `acp.rs` (ADR-001).
+    #[error("the ACPv2 connection failed: {reason}")]
     #[diagnostic(
-        code(bee::error::not_implemented),
+        code(bee::acp::connection),
         help(
-            "this build is a project bootstrap with no protocol support; \
-             use a release that implements ACPv2 once one is published"
+            "the client probably disconnected abnormally or sent traffic that is \
+             not ACPv2; re-run with `-v` and check the client's own log"
         )
     )]
-    NotImplemented,
+    Connection {
+        /// What the SDK reported.
+        reason: String,
+    },
 
     /// Reading or writing a file failed.
     #[error("failed to access `{path}`")]

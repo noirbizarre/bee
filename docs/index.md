@@ -5,9 +5,9 @@ and LLM provider integration, allowing it to work with any compatible ACPv2 clie
 
 ## Status
 
-Bee is at the **bootstrap stage**: the repository, tooling, CI and release automation exist, but there is no ACPv2
-implementation, agentic loop or LLM provider integration yet. The `bee` binary reports its version and help, and exits
-with an error when run.
+Bee is at the **bootstrap stage**: the repository, tooling, CI and release automation exist, and the `bee` binary
+serves ACPv2 over stdio, so a client can start it and complete the `initialize` handshake. That is all it does: Bee
+advertises no capabilities, and there are no sessions, agentic loop or LLM provider integration yet.
 
 ## Scope
 
@@ -38,6 +38,9 @@ Bee is not published to crates.io (the `bee` crate name is taken by an unrelated
 platform from the [latest release](https://github.com/noirbizarre/bee/releases/latest) once one is published.
 
 ## Usage
+
+An ACPv2 client launches `bee` as a subprocess and speaks the protocol on its stdin and stdout. Stdout carries protocol
+traffic only; diagnostics go to stderr. Closing stdin ends the session and Bee exits with status 0.
 
 ```bash
 bee --help

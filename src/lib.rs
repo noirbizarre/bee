@@ -16,21 +16,16 @@ pub mod error;
 
 pub use error::{Error, Result};
 
-/// Run the agent.
+/// Run the agent over stdin and stdout until the client disconnects.
+///
+/// Stdout is reserved for protocol traffic; nothing here may print to it.
 ///
 /// # Errors
 ///
-/// Always returns [`Error::NotImplemented`] until the ACPv2 integration lands.
+/// Returns [`Error::Connection`] if the connection ends with an error.
 pub fn run() -> Result<()> {
-    Err(Error::NotImplemented)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn running_before_acpv2_exists_reports_it_instead_of_pretending_to_succeed() {
-        assert!(matches!(run(), Err(Error::NotImplemented)));
-    }
+    // The one place an executor is chosen. The SDK does its stdio on its own
+    // thread pool, so a plain executor suffices and the library stays free of
+    // an async runtime (ADR-003).
+    futures::executor::block_on(acp::serve_stdio())
 }

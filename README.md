@@ -27,9 +27,9 @@ loop and LLM provider integration, allowing it to work with any compatible ACPv2
 
 ## Status
 
-Bee is at the **bootstrap stage**. The repository, tooling, CI and release automation are in place, but the agent
-itself is not: there is no ACPv2 implementation, no agentic loop and no LLM provider integration yet. The `bee` binary
-only reports its version and help, and exits with an error when run, rather than pretending to be an agent.
+Bee is at the **bootstrap stage**. The repository, tooling, CI and release automation are in place, and the `bee`
+binary serves ACPv2 over stdio: a client can start it and complete the `initialize` handshake. That is all it does.
+Bee advertises no capabilities, and there are no sessions, no agentic loop and no LLM provider integration yet.
 
 The "Scope" and "Non-goals" sections describe the intended design, not current behaviour.
 
@@ -77,6 +77,9 @@ Or download a binary for your platform from the
 The Homebrew and AUR packages only exist once the first release has been published.
 
 ## Usage
+
+An ACPv2 client launches `bee` as a subprocess and speaks the protocol on its stdin and stdout. Stdout carries protocol
+traffic only; diagnostics go to stderr. Closing stdin ends the session.
 
 ```bash
 bee --help

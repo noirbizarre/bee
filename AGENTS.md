@@ -13,19 +13,21 @@ configuration and orchestration are the client's concern, reached through the
 ACPv2 client-agent contract. Do not propose a TUI, a web frontend, a plugin
 framework or a provider abstraction ahead of a concrete need.
 
-The repository is at the bootstrap stage: ACPv2, the agentic loop and provider
-integrations are planned, not implemented. Documentation must keep saying so
-until that changes.
+The repository is at the bootstrap stage: Bee serves ACPv2 over stdio and
+answers `initialize`, advertising no capabilities. Sessions, the agentic loop
+and provider integrations are planned, not implemented. Documentation must keep
+saying so until that changes.
 
 ## Non-negotiable invariants
 
 Each of these should be enforced by a hook or a test. An invariant nothing
 checks is a comment, and it will be violated.
 
-1. **A build without ACPv2 never reports success.** `bee::run()` returns
-   `Error::NotImplemented` until the protocol exists, so a client cannot mistake
-   it for a working agent — enforced by `tests/cli.rs` and the unit test in
-   `src/lib.rs`. Remove both together with the real implementation.
+1. **Stdout carries ACPv2 protocol traffic only.** A stray line from a log or a
+   debug print corrupts the client's JSON-RPC stream, so diagnostics go to
+   stderr and nothing in the library prints to stdout — enforced by
+   `tests/stdio.rs` (`stdout_carries_only_json_rpc_messages`) and
+   `tests/cli.rs`.
 2. **Not published to crates.io.** The `bee` crate name belongs to an unrelated
    project, so `publish = false` stays in `.config/git.tpl.toml` — enforced by
    the template, which renders it into `Cargo.toml`.
@@ -36,11 +38,15 @@ checks is a comment, and it will be violated.
 src/
 ├── lib.rs      the library surface
 ├── main.rs     the bee binary
-├── acp.rs      the ACPv2 boundary: the only module that imports the SDK
+├── acp.rs      the ACPv2 boundary: the only module that imports the SDK;
+│               the agent core, and `serve` over any transport
 ├── cli.rs      argument types only
 └── error.rs    the crate's error type
 tests/
-└── cli.rs      the binary's observable contract
+├── cli.rs      the binary's observable contract
+├── stdio.rs    the stdio transport, through the real binary
+├── acp.rs      the agent core, in-process
+└── mcp.rs      the MCP-over-ACP spike (ADR-002)
 ```
 
 New modules for the ACPv2 protocol, the agent loop, providers, sessions and
