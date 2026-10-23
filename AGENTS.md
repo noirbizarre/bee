@@ -36,8 +36,9 @@ checks is a comment, and it will be violated.
     the template, which renders it into `Cargo.toml`.
 3. **Configuration values never reach a diagnostic or `Debug` output.** Files
    are where users keep API keys, so errors carry paths, positions and types,
-   never contents — enforced by `tests/config.rs`, `tests/provider.rs` and
-   `tests/cli.rs`.
+   never contents — enforced by `tests/config.rs`, `tests/provider.rs`,
+   `tests/auth.rs` and `tests/cli.rs`. That covers the credential file, the
+   authorization code, the PKCE verifier and the key a provider returns.
 
 ## Layout
 
@@ -50,7 +51,11 @@ src/
 ├── session.rs  session state, free of the SDK
 ├── config.rs   layered XDG configuration (ADR-006), free of the SDK
 ├── provider.rs provider profiles from the configuration (ADR-007), free of the SDK
+├── auth.rs     credential sources, the 0600 store and secret handling (ADR-008), free of the SDK
+├── login.rs    OpenRouter's browser sign-in (PKCE), free of the SDK
+├── http.rs     the one HTTP seam, so flows are tested against a fake
 ├── cli.rs      argument types only
+├── commands.rs what `bee auth` does and prints (binary only)
 └── error.rs    the crate's error type
 tests/
 ├── cli.rs      the binary's observable contract
@@ -61,12 +66,14 @@ tests/
 ├── config.rs   the configuration layers, merge rules and errors, in-process
 ├── provider.rs provider profiles, validation and secret handling, in-process
 ├── selection.rs provider and model selection over ACPv2, in-process
+├── auth.rs     credentials, the store and the sign-in flows, in-process
 └── mcp.rs      the MCP-over-ACP spike (ADR-002)
 ```
 
 New modules for the agent loop and providers are added when the code that needs them is, not before.
 
-Dependencies point inward. Nothing in the library knows a command exists.
+Dependencies point inward. Nothing in the library knows a command exists, and
+nothing in it prints: `commands.rs` owns what `bee auth` shows.
 
 ## Style
 

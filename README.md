@@ -49,6 +49,15 @@ with an actionable error that never repeats the file's contents. Provider profil
 URL, model, credential reference, headers) are validated and selectable per ACPv2 session, but no LLM is called yet.
 See the [documentation](https://noirbizarre.github.io/bee/#configuration).
 
+## Authentication
+
+A profile's `credential` names an environment variable (`{ env = "KEY" }`) or Bee's credential store
+(`{ store = true }`, optionally with `login = "openrouter"` for a browser sign-in). `bee auth login`, `logout` and
+`status` manage the store, which is a `0600` file under `$XDG_DATA_HOME/bee`. OpenRouter's sign-in returns an API key;
+Cloudflare uses a scoped API token and not Wrangler's login; remote MCP server authorization is a separate audience and
+is not implemented. No LLM is called yet, so stored credentials are not used for requests. See the
+[documentation](https://noirbizarre.github.io/bee/#authentication).
+
 ## Scope
 
 Bee is meant to be the agent side of an ACPv2 connection: it runs the agentic loop and talks to LLM providers, and
@@ -61,8 +70,9 @@ leaves everything about presentation and orchestration to the client. The planne
 - configuration and credential handling
 - error handling and observability
 
-Most of these do not exist as code yet: only the protocol integration, the session lifecycle with cancellation, and
-protocol error mapping do. They are boundaries to grow into, not modules to scaffold ahead of need.
+Most of these do not exist as code yet: only the protocol integration, the session lifecycle with cancellation,
+protocol error mapping, configuration and credential handling do. They are boundaries to grow into, not modules to
+scaffold ahead of need.
 
 ## Non-goals
 
@@ -72,8 +82,8 @@ protocol error mapping do. They are boundaries to grow into, not modules to scaf
 - MCP configuration and orchestration are not Bee-specific responsibilities. Bee should use the capabilities provided
   through the ACPv2 client-agent contract, where the protocol supports them.
 - WebAssembly-based extensions are a possible future direction, not an initial requirement.
-- Provider authentication, OAuth flows and model selection will be designed around the actual provider integrations
-  and protocol capabilities. Bee does not assume ACPv2 provides a universal implementation of these features.
+- Bee does not assume ACPv2 provides a universal implementation of provider authentication. Each browser sign-in is a
+  provider-specific adapter, not a generic OAuth client.
 
 ## Installation
 

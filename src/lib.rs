@@ -12,8 +12,11 @@
 #![warn(missing_docs)]
 
 pub mod acp;
+pub mod auth;
 pub mod config;
 pub mod error;
+pub mod http;
+pub mod login;
 pub mod provider;
 pub mod session;
 

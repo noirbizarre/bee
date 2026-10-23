@@ -109,9 +109,25 @@ futures = { version = "0.3", default-features = false, features = ["std", "execu
 # needed because Bee never writes configuration.
 toml = { version = "1", default-features = false, features = ["std", "serde", "parse"] }
 
-# `console`, `demand`, `serde` and `serde_json` are deliberately absent: nothing
-# in the library uses them. Add each with the code that needs it
-# (a typed configuration schema will want serde; ACPv2 framing is the SDK's job).
+# Provider authentication (ADR-008). A blocking HTTP client, because the library
+# has no async runtime (ADR-003): `ureq` needs no tokio. `rustls` rather than
+# the system's OpenSSL, so the musl targets need no C library to link against.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+# PKCE (RFC 7636) is a SHA-256 of a random verifier, base64url encoded. Each is
+# the smallest crate that does exactly that; no OAuth framework, since the one
+# flow Bee has is OpenRouter's and a generic client would erase what differs.
+sha2 = "0.11"
+base64 = "0.23"
+# The operating system's CSPRNG, for the PKCE verifier and `state`.
+getrandom = "0.4"
+# The credential store file and the OpenRouter exchange are JSON. Read by hand
+# over `Value`, never derived: serde's error text quotes the offending value, and
+# this file is where keys live (the reason `provider.rs` avoids it for TOML).
+serde_json = "1"
+
+# `console`, `demand` and `serde` are deliberately absent: nothing in the
+# library uses them. Add each with the code that needs it (a typed configuration
+# schema will want serde; ACPv2 framing is the SDK's job).
 
 [dev-dependencies]
 # Only for `#[tokio::test]`: the SDK is runtime-agnostic and neither the library
@@ -126,7 +142,6 @@ agent-client-protocol-rmcp = { version = "=4.0.5", features = ["unstable_protoco
 # Tool input and output types for `tool_fn` must be serde-able and carry a schema.
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 assert_cmd = "2"
 predicates = "3"
 tempfile = "3"

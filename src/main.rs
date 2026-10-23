@@ -8,15 +8,23 @@ use clap::Parser;
 use miette::MietteHandlerOpts;
 
 mod cli;
+mod commands;
 
-use cli::Cli;
+use cli::{Cli, Command};
 
 fn main() -> ExitCode {
     let args = Cli::parse();
     let verbose = args.verbose > 0 || std::env::var_os("RUST_BACKTRACE").is_some();
     install_miette_hook(verbose);
 
-    match bee::run() {
+    // Without a subcommand a client launched Bee: serve ACPv2. `auth` is the
+    // only thing a person runs by hand, and it never speaks the protocol.
+    let result = match args.command {
+        None => bee::run(),
+        Some(Command::Auth(command)) => commands::run_auth(command),
+    };
+
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             // Rendered here rather than returned as `miette::Result`, so the

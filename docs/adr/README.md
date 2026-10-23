@@ -29,3 +29,5 @@ by editing the old one. The history is the value.
 - [ADR-006](006-layered-xdg-configuration.md) — Layer configuration from the XDG directory, `BEE_CONFIG` and the project
 - [ADR-007](007-provider-profiles-and-model-selection.md) — Describe providers as named profiles that sessions select
   among
+- [ADR-008](008-provider-authentication.md) — Authenticate providers through credential sources, with one browser
+  sign-in per provider that has one

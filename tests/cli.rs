@@ -45,7 +45,10 @@ fn isolated(dir: &std::path::Path) -> Command {
     command
         .env("HOME", dir)
         .env("XDG_CONFIG_HOME", dir.join("xdg"))
+        // Where credentials are kept: never the developer's own.
+        .env("XDG_DATA_HOME", dir.join("data"))
         .env_remove("BEE_CONFIG")
+        .env_remove("BEE_TEST_KEY")
         .current_dir(dir);
     command
 }
@@ -124,4 +127,200 @@ fn an_invalid_provider_profile_fails_startup_without_echoing_secrets() {
         .stderr(predicate::str::contains("bee::provider::invalid"))
         .stderr(predicate::str::contains("providers.p.base_url"))
         .stderr(predicate::str::contains(SECRET).not());
+}
+
+// ---- `bee auth` ---------------------------------------------------------------
+
+const AUTH_CONFIG: &str = r#"
+provider = "stored"
+
+[providers.stored]
+protocol = "openai-chat"
+credential = { store = true }
+
+[providers.browser]
+protocol = "openai-chat"
+credential = { store = true, login = "openrouter" }
+
+[providers.env]
+protocol = "anthropic-messages"
+credential = { env = "BEE_TEST_KEY" }
+
+[providers.local]
+protocol = "openai-chat"
+base_url = "http://localhost:11434/v1"
+"#;
+
+/// A project directory configured with [`AUTH_CONFIG`].
+fn configured() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join(".config/bee.toml");
+    std::fs::create_dir_all(project.parent().unwrap()).unwrap();
+    std::fs::write(&project, AUTH_CONFIG).unwrap();
+    dir
+}
+
+#[test]
+fn a_token_can_be_stored_checked_and_forgotten_without_it_ever_being_printed() {
+    let dir = configured();
+    let file = dir.path().join("data/bee/credentials.json");
+
+    isolated(dir.path())
+        .args(["auth", "login", "--with-token"])
+        .write_stdin(format!("{SECRET}\n"))
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains(
+            "Stored the API token for `stored`",
+        ))
+        .stderr(predicate::str::contains(SECRET).not());
+    assert!(file.exists());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the credential file must be private");
+    }
+
+    isolated(dir.path())
+        .args(["auth", "status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("stored credential present"))
+        .stdout(predicate::str::contains(SECRET).not())
+        .stderr(predicate::str::is_empty());
+
+    isolated(dir.path())
+        .args(["auth", "logout"])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("Removed the stored credential"));
+    assert!(!file.exists(), "the last credential takes the file with it");
+
+    isolated(dir.path())
+        .args(["auth", "status", "stored"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("no stored credential"));
+}
+
+#[test]
+fn status_lists_every_profile_and_the_state_of_its_environment_variable() {
+    let dir = configured();
+
+    isolated(dir.path())
+        .env("BEE_TEST_KEY", SECRET)
+        .args(["auth", "status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("`BEE_TEST_KEY` is set"))
+        .stdout(predicate::str::contains("unauthenticated endpoint"))
+        .stdout(predicate::str::contains("browser sign-in"))
+        .stdout(predicate::str::contains("(default)"))
+        .stdout(predicate::str::contains(SECRET).not());
+
+    isolated(dir.path())
+        .args(["auth", "status", "env"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("is NOT set"));
+}
+
+#[test]
+fn an_empty_token_is_refused_and_nothing_is_stored() {
+    let dir = configured();
+
+    isolated(dir.path())
+        .args(["auth", "login", "stored", "--with-token"])
+        .write_stdin("\n")
+        .assert()
+        .failure()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("bee::auth::empty_token"));
+    assert!(!dir.path().join("data/bee/credentials.json").exists());
+}
+
+#[test]
+fn a_profile_that_does_not_use_the_store_cannot_be_logged_in() {
+    let dir = configured();
+
+    isolated(dir.path())
+        .args(["auth", "login", "env", "--with-token"])
+        .write_stdin(format!("{SECRET}\n"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("bee::auth::not_stored"))
+        .stderr(predicate::str::contains(SECRET).not());
+}
+
+#[test]
+fn a_browser_sign_in_needs_a_login_flow_on_the_profile() {
+    let dir = configured();
+
+    isolated(dir.path())
+        .args(["auth", "login", "stored"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("bee::auth::no_login_flow"));
+}
+
+#[test]
+fn an_unknown_profile_lists_the_defined_ones() {
+    let dir = configured();
+
+    isolated(dir.path())
+        .args(["auth", "status", "nope"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("bee::auth::unknown_profile"))
+        .stderr(predicate::str::contains("browser"));
+}
+
+#[test]
+fn the_flags_that_exclude_each_other_are_refused_by_the_parser() {
+    let dir = configured();
+
+    isolated(dir.path())
+        .args(["auth", "login", "--with-token", "--paste-code"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used with"));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_credential_file_others_can_read_stops_every_auth_command() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = configured();
+    isolated(dir.path())
+        .args(["auth", "login", "--with-token"])
+        .write_stdin(format!("{SECRET}\n"))
+        .assert()
+        .success();
+    let file = dir.path().join("data/bee/credentials.json");
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    isolated(dir.path())
+        .args(["auth", "status"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("bee::auth::insecure_permissions"))
+        .stderr(predicate::str::contains(SECRET).not());
+}
+
+#[test]
+fn auth_with_no_configured_profile_says_so_instead_of_failing() {
+    let dir = tempfile::tempdir().unwrap();
+
+    isolated(dir.path())
+        .args(["auth", "status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "No provider profiles are configured",
+        ));
 }

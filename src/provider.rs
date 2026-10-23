@@ -8,8 +8,8 @@
 //!
 //! Profiles are read from the merged [`Config`] (ADR-006) under `provider`
 //! (the default profile) and `providers.<name>`. Nothing is sent anywhere yet:
-//! this module only describes endpoints. Credentials are named, not resolved
-//! (#12).
+//! this module only describes endpoints. A credential is a *reference* to where
+//! the secret lives; resolving it is `auth` (ADR-008).
 //!
 //! The validation is written by hand over the generic TOML value instead of
 //! derived with serde: serde's error text quotes the offending value, and
@@ -86,15 +86,63 @@ impl Protocol {
 
 /// Where a profile's credential comes from.
 ///
-/// Only a reference: resolving it, and any secret handling, is #12's. Adding
-/// a source kind later is a new variant and a new accepted key.
-// `Debug` is safe to derive: the payload is a variable *name*, which validation
-// guarantees is not a pasted key.
+/// Only a reference: resolving it, and any secret handling, is `auth`'s
+/// (ADR-008). It says *where* the secret is, never how a request presents it:
+/// that is the protocol's business. Adding a source kind later is a new variant
+/// and a new accepted key.
+// `Debug` is safe to derive: the payloads are a variable *name* (which
+// validation guarantees is not a pasted key) and a flow name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CredentialSource {
     /// The environment variable with this name.
     Env(String),
+    /// Bee's credential store, written by `bee auth login`.
+    Store {
+        /// The browser sign-in `bee auth login` may run, if the provider has
+        /// one. Without it, only a pasted token can be stored.
+        login: Option<LoginFlow>,
+    },
+}
+
+impl CredentialSource {
+    /// A short word for the source's kind, safe to print: never a value.
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Env(_) => "env",
+            Self::Store { .. } => "store",
+        }
+    }
+}
+
+/// A provider's own browser sign-in.
+///
+/// One variant per provider that has such a flow, because the flows differ in
+/// what they return and how it is refreshed: there is no universal OAuth
+/// client to configure (ADR-008).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum LoginFlow {
+    /// OpenRouter's PKCE authorization, which returns an API key.
+    OpenRouter,
+}
+
+impl LoginFlow {
+    /// Every flow, in the order diagnostics list them.
+    pub const ALL: [Self; 1] = [Self::OpenRouter];
+
+    /// The name used in configuration.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::OpenRouter => "openrouter",
+        }
+    }
+
+    fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|flow| flow.name() == name)
+    }
 }
 
 /// The field that carries the output limit in an OpenAI-compatible request.
@@ -176,10 +224,7 @@ impl fmt::Debug for Profile {
             .field("models", &self.models)
             .field(
                 "credential",
-                &self
-                    .credential
-                    .as_ref()
-                    .map(|CredentialSource::Env(_)| "env"),
+                &self.credential.as_ref().map(CredentialSource::kind),
             )
             .field(
                 "header_names",
@@ -541,26 +586,73 @@ impl Reader<'_> {
 
     fn credential(&self, key: &str, value: &Value) -> Result<CredentialSource> {
         let table = self.table(key, value)?;
-        self.only_keys(key, table, &["env"])?;
-        let Some(env) = table.get("env") else {
-            return Err(self.invalid(key, "name exactly one credential source: `env`"));
-        };
-        let env_key = format!("{key}.env");
-        let name = self.string(&env_key, env)?;
-        // A variable *name*, so anything else is a mistake, and the likeliest
-        // one is a pasted key. Refusing it without echoing it keeps the key out
-        // of the diagnostic and out of the file's next commit.
-        let is_name = !name.is_empty()
-            && !name.starts_with(|c: char| c.is_ascii_digit())
-            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-        if !is_name {
-            return Err(self.invalid(
-                &env_key,
-                "`env` must be the name of an environment variable (letters, digits and \
-                 underscores), not the credential itself",
-            ));
+        self.only_keys(key, table, &["env", "store", "login"])?;
+        let login = table
+            .get("login")
+            .map(|value| self.login_flow(&format!("{key}.login"), value))
+            .transpose()?;
+        match (table.get("env"), table.get("store")) {
+            (None, None) => {
+                Err(self.invalid(key, "name exactly one credential source: `env` or `store`"))
+            }
+            (Some(_), Some(_)) => Err(self.invalid(
+                key,
+                "name exactly one credential source: `env` or `store`, not both",
+            )),
+            (Some(env), None) => {
+                // A sign-in stores what it obtains, so it only makes sense
+                // with the store.
+                if login.is_some() {
+                    return Err(self.invalid(
+                        &format!("{key}.login"),
+                        "`login` signs in to the credential store, so it needs `store = true`, not `env`",
+                    ));
+                }
+                let env_key = format!("{key}.env");
+                let name = self.string(&env_key, env)?;
+                // A variable *name*, so anything else is a mistake, and the
+                // likeliest one is a pasted key. Refusing it without echoing it
+                // keeps the key out of the diagnostic and out of the file's next
+                // commit.
+                let is_name = !name.is_empty()
+                    && !name.starts_with(|c: char| c.is_ascii_digit())
+                    && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+                if !is_name {
+                    return Err(self.invalid(
+                        &env_key,
+                        "`env` must be the name of an environment variable (letters, digits and \
+                         underscores), not the credential itself",
+                    ));
+                }
+                Ok(CredentialSource::Env(name.to_owned()))
+            }
+            (None, Some(store)) => {
+                let store_key = format!("{key}.store");
+                let Value::Boolean(enabled) = store else {
+                    return Err(self.wrong_type(&store_key, "a boolean", store));
+                };
+                // `store = false` would read as "no stored credential", which
+                // is what leaving `credential` out already means; accepting it
+                // would give one meaning two spellings.
+                if !enabled {
+                    return Err(self.invalid(
+                        &store_key,
+                        "`store` can only be `true`; leave `credential` out to go without one",
+                    ));
+                }
+                Ok(CredentialSource::Store { login })
+            }
         }
-        Ok(CredentialSource::Env(name.to_owned()))
+    }
+
+    fn login_flow(&self, key: &str, value: &Value) -> Result<LoginFlow> {
+        // Not echoed when unknown: the likeliest mistake is a pasted token.
+        LoginFlow::from_name(self.string(key, value)?).ok_or_else(|| {
+            self.invalid(
+                key,
+                "`login` names a browser sign-in Bee does not implement (supported: openrouter)",
+            )
+        })
     }
 
     fn headers(&self, key: &str, value: &Value) -> Result<Vec<(String, String)>> {

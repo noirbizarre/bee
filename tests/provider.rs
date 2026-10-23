@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 
 use bee::Error;
 use bee::config::{Config, Environment, project_config_path};
-use bee::provider::{CredentialSource, MaxTokensField, Protocol, ProtocolOptions, Providers};
+use bee::provider::{
+    CredentialSource, LoginFlow, MaxTokensField, Protocol, ProtocolOptions, Providers,
+};
 use pretty_assertions::assert_eq;
 use rstest::rstest;
 use tempfile::TempDir;
@@ -199,6 +201,36 @@ fn a_credential_is_a_named_environment_variable() {
     );
 }
 
+#[rstest]
+#[case::token_only("{ store = true }", None)]
+#[case::browser_sign_in(
+    "{ store = true, login = \"openrouter\" }",
+    Some(LoginFlow::OpenRouter)
+)]
+fn a_credential_can_live_in_the_store(#[case] credential: &str, #[case] login: Option<LoginFlow>) {
+    let providers = load(&format!(
+        "[providers.p]\nprotocol = \"openai-chat\"\ncredential = {credential}"
+    ))
+    .unwrap();
+
+    assert_eq!(
+        providers.get("p").unwrap().credential(),
+        Some(&CredentialSource::Store { login })
+    );
+}
+
+#[test]
+fn the_debug_output_names_the_kind_of_credential_and_nothing_else() {
+    let providers =
+        load("[providers.p]\nprotocol = \"openai-chat\"\ncredential = { env = \"GATEWAY_KEY\" }")
+            .unwrap();
+
+    let debug = format!("{providers:?}");
+
+    assert!(debug.contains("credential: Some(\"env\")"), "{debug}");
+    assert!(!debug.contains("GATEWAY_KEY"), "{debug}");
+}
+
 #[test]
 fn a_single_profile_is_the_default_without_naming_it() {
     let providers = load("[providers.only]\nprotocol = \"openai-chat\"").unwrap();
@@ -344,6 +376,30 @@ fn a_project_can_add_a_profile_and_choose_it_as_the_default() {
     "[providers.p]\nprotocol = \"openai-chat\"\ncredential = { env = \"sk-abc-123\" }",
     "bee::provider::invalid"
 )]
+#[case::credential_with_two_sources(
+    "[providers.p]\nprotocol = \"openai-chat\"\ncredential = { env = \"K\", store = true }",
+    "bee::provider::invalid"
+)]
+#[case::credential_store_disabled(
+    "[providers.p]\nprotocol = \"openai-chat\"\ncredential = { store = false }",
+    "bee::provider::invalid"
+)]
+#[case::credential_store_of_the_wrong_type(
+    "[providers.p]\nprotocol = \"openai-chat\"\ncredential = { store = \"yes\" }",
+    "bee::provider::wrong_type"
+)]
+#[case::login_without_the_store(
+    "[providers.p]\nprotocol = \"openai-chat\"\ncredential = { env = \"K\", login = \"openrouter\" }",
+    "bee::provider::invalid"
+)]
+#[case::login_alone(
+    "[providers.p]\nprotocol = \"openai-chat\"\ncredential = { login = \"openrouter\" }",
+    "bee::provider::invalid"
+)]
+#[case::login_that_is_unknown(
+    "[providers.p]\nprotocol = \"openai-chat\"\ncredential = { store = true, login = \"cloudflare\" }",
+    "bee::provider::invalid"
+)]
 #[case::option_of_the_other_protocol(
     "[providers.p]\nprotocol = \"openai-chat\"\n[providers.p.options]\nmax_tokens = 5",
     "bee::provider::unknown_key"
@@ -406,6 +462,8 @@ fn an_unknown_protocol_lists_the_supported_ones() {
 #[case::protocol(format!("[providers.p]\nprotocol = \"{SECRET}\""))]
 #[case::base_url(format!("[providers.p]\nprotocol = \"openai-chat\"\nbase_url = \"https://u:{SECRET}@x.example\""))]
 #[case::credential(format!("[providers.p]\nprotocol = \"openai-chat\"\ncredential = {{ env = \"{SECRET}\" }}"))]
+#[case::login(format!("[providers.p]\nprotocol = \"openai-chat\"\ncredential = {{ store = true, login = \"{SECRET}\" }}"))]
+#[case::store(format!("[providers.p]\nprotocol = \"openai-chat\"\ncredential = {{ store = \"{SECRET}\" }}"))]
 #[case::header(format!("[providers.p]\nprotocol = \"openai-chat\"\nheaders = {{ \"Bad Name\" = \"{SECRET}\" }}"))]
 #[case::header_value(format!("[providers.p]\nprotocol = \"openai-chat\"\nheaders = {{ \"X-A\" = \"{SECRET}\\n\" }}"))]
 #[case::wrong_type_key(format!("[providers.p]\nprotocol = \"openai-chat\"\nmodel = [\"{SECRET}\"]"))]

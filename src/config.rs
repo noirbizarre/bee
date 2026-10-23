@@ -32,11 +32,46 @@ pub const BEE_CONFIG_VAR: &str = "BEE_CONFIG";
 /// Taken as values instead of read on demand so a test can describe any
 /// environment without mutating the process's own, which is `unsafe` in
 /// edition 2024 and races with every other test thread.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct Environment {
     xdg_config_home: Option<PathBuf>,
+    xdg_data_home: Option<PathBuf>,
     home: Option<PathBuf>,
     bee_config: Option<PathBuf>,
+    variables: Variables,
+}
+
+/// Where credential variables (`OPENROUTER_API_KEY`...) are looked up.
+#[derive(Clone, PartialEq, Eq)]
+enum Variables {
+    /// The process's own environment.
+    Process,
+    /// Exactly these, so a test never depends on the machine it runs on.
+    Fixed(BTreeMap<String, String>),
+}
+
+impl Default for Variables {
+    fn default() -> Self {
+        Self::Fixed(BTreeMap::new())
+    }
+}
+
+// Written by hand: a variable's *value* is a credential, and `Environment` ends
+// up in `{:?}` and in assertion failures. Names are enough to debug with.
+impl fmt::Debug for Environment {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug = f.debug_struct("Environment");
+        debug
+            .field("xdg_config_home", &self.xdg_config_home)
+            .field("xdg_data_home", &self.xdg_data_home)
+            .field("home", &self.home)
+            .field("bee_config", &self.bee_config);
+        match &self.variables {
+            Variables::Process => debug.field("variables", &"<process>"),
+            Variables::Fixed(map) => debug.field("variable_names", &map.keys().collect::<Vec<_>>()),
+        };
+        debug.finish()
+    }
 }
 
 impl Environment {
@@ -51,6 +86,10 @@ impl Environment {
         bee_config: Option<PathBuf>,
     ) -> Self {
         Self {
+            xdg_data_home: None,
+            // No variables: a hermetic description holds only what it is given
+            // (see `with_variable`).
+            variables: Variables::default(),
             // The XDG specification says a relative `XDG_CONFIG_HOME` is
             // invalid and must be ignored: honouring it would make the global
             // file depend on whatever directory the client launched Bee from.
@@ -71,6 +110,68 @@ impl Environment {
             std::env::var_os("HOME").map(PathBuf::from),
             std::env::var_os(BEE_CONFIG_VAR).map(PathBuf::from),
         )
+        .with_xdg_data_home(std::env::var_os("XDG_DATA_HOME").map(PathBuf::from))
+        .with_process_variables()
+    }
+
+    /// Set `XDG_DATA_HOME`, where the credential store lives.
+    ///
+    /// Interpreted like `XDG_CONFIG_HOME`: empty counts as unset and a
+    /// relative value is ignored.
+    #[must_use]
+    pub fn with_xdg_data_home(mut self, xdg_data_home: Option<PathBuf>) -> Self {
+        self.xdg_data_home = non_empty(xdg_data_home).filter(|path| path.is_absolute());
+        self
+    }
+
+    /// Look credential variables up in the process environment.
+    #[must_use]
+    pub fn with_process_variables(mut self) -> Self {
+        self.variables = Variables::Process;
+        self
+    }
+
+    /// Define a credential variable. Switches to a fixed set of variables,
+    /// dropping any lookup in the process environment.
+    #[must_use]
+    pub fn with_variable(mut self, name: &str, value: &str) -> Self {
+        let mut map = match self.variables {
+            Variables::Fixed(map) => map,
+            Variables::Process => BTreeMap::new(),
+        };
+        map.insert(name.to_owned(), value.to_owned());
+        self.variables = Variables::Fixed(map);
+        self
+    }
+
+    /// The value of the variable `name`, if set and not empty.
+    ///
+    /// An empty variable counts as unset: `export KEY=` is what a shell
+    /// leaves behind when a secret manager failed, and sending an empty bearer
+    /// token would be a confusing 401 instead of a clear "not set".
+    #[must_use]
+    pub fn variable(&self, name: &str) -> Option<String> {
+        let value = match &self.variables {
+            Variables::Process => std::env::var(name).ok(),
+            Variables::Fixed(map) => map.get(name).cloned(),
+        };
+        value.filter(|value| !value.is_empty())
+    }
+
+    /// The credential store file, if a base directory can be determined.
+    ///
+    /// Under the XDG *data* directory, not the configuration one: it is state
+    /// Bee writes, and keeping it out of `~/.config` keeps it out of the
+    /// dotfile repositories that directory is often committed to. `None`
+    /// means neither `XDG_DATA_HOME` nor `HOME` is usable.
+    #[must_use]
+    pub fn credentials_path(&self) -> Option<PathBuf> {
+        let base = match (&self.xdg_data_home, &self.home) {
+            (Some(xdg), _) => xdg.clone(),
+            (None, Some(home)) => home.join(".local").join("share"),
+            (None, None) => return None,
+        };
+        Some(base.join("bee").join("credentials.json"))
     }
 
     /// The global configuration file, if a base directory can be determined.

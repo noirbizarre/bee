@@ -107,6 +107,60 @@ fn an_invalid_xdg_config_home_is_ignored(#[case] xdg: &str) {
 }
 
 #[test]
+fn credentials_live_under_the_xdg_data_directory() {
+    let env = Environment::new(None, Some("/home/user".into()), None)
+        .with_xdg_data_home(Some("/custom/data".into()));
+
+    assert_eq!(
+        env.credentials_path(),
+        Some(PathBuf::from("/custom/data/bee/credentials.json"))
+    );
+}
+
+#[rstest]
+#[case::unset(None)]
+#[case::empty(Some(""))]
+#[case::relative(Some("relative/data"))]
+fn without_a_valid_xdg_data_home_credentials_live_under_the_home(#[case] xdg: Option<&str>) {
+    let env = Environment::new(None, Some("/home/user".into()), None)
+        .with_xdg_data_home(xdg.map(Into::into));
+
+    assert_eq!(
+        env.credentials_path(),
+        Some(PathBuf::from(
+            "/home/user/.local/share/bee/credentials.json"
+        ))
+    );
+}
+
+#[test]
+fn without_home_or_xdg_there_is_nowhere_to_keep_credentials() {
+    assert_eq!(Environment::new(None, None, None).credentials_path(), None);
+}
+
+#[test]
+fn a_described_environment_knows_only_the_variables_it_was_given() {
+    let env = Environment::new(None, None, None)
+        .with_variable("PRESENT", "value")
+        .with_variable("EMPTY", "");
+
+    assert_eq!(env.variable("PRESENT").as_deref(), Some("value"));
+    assert_eq!(env.variable("EMPTY"), None, "an empty variable is unset");
+    // `PATH` is set in any real process; a described environment must not see it.
+    assert_eq!(env.variable("PATH"), None);
+}
+
+#[test]
+fn the_debug_output_of_an_environment_lists_variable_names_only() {
+    let env = Environment::new(None, None, None).with_variable("MY_KEY", SECRET);
+
+    let debug = format!("{env:?}");
+
+    assert!(debug.contains("MY_KEY"), "{debug}");
+    assert!(!debug.contains(SECRET), "{debug}");
+}
+
+#[test]
 fn without_home_or_xdg_the_global_layer_is_skipped() {
     let env = Environment::new(None, None, None);
 
