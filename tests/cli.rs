@@ -87,10 +87,14 @@ fn valid_layered_configuration_does_not_disturb_stdout() {
     let dir = tempfile::tempdir().unwrap();
     let global = dir.path().join("xdg/bee/config.toml");
     std::fs::create_dir_all(global.parent().unwrap()).unwrap();
-    std::fs::write(&global, "[provider]\nname = \"x\"\n").unwrap();
+    std::fs::write(
+        &global,
+        "[providers.gw]\nprotocol = \"openai-chat\"\nmodel = \"x\"\n",
+    )
+    .unwrap();
     let project = dir.path().join(".config/bee.toml");
     std::fs::create_dir_all(project.parent().unwrap()).unwrap();
-    std::fs::write(&project, "[provider]\nmodel = \"y\"\n").unwrap();
+    std::fs::write(&project, "[providers.gw]\nmodel = \"y\"\n").unwrap();
 
     isolated(dir.path())
         .write_stdin("")
@@ -98,4 +102,26 @@ fn valid_layered_configuration_does_not_disturb_stdout() {
         .success()
         .stdout(predicate::str::is_empty())
         .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn an_invalid_provider_profile_fails_startup_without_echoing_secrets() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join(".config/bee.toml");
+    std::fs::create_dir_all(project.parent().unwrap()).unwrap();
+    std::fs::write(
+        &project,
+        format!("[providers.p]\nprotocol = \"openai-chat\"\nbase_url = \"https://u:{SECRET}@x.example\"\n"),
+    )
+    .unwrap();
+
+    isolated(dir.path())
+        .write_stdin("")
+        .assert()
+        .failure()
+        // Stdout is protocol-only, so a failed launch must leave it empty.
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("bee::provider::invalid"))
+        .stderr(predicate::str::contains("providers.p.base_url"))
+        .stderr(predicate::str::contains(SECRET).not());
 }

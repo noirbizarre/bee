@@ -36,7 +36,8 @@ checks is a comment, and it will be violated.
     the template, which renders it into `Cargo.toml`.
 3. **Configuration values never reach a diagnostic or `Debug` output.** Files
    are where users keep API keys, so errors carry paths, positions and types,
-   never contents — enforced by `tests/config.rs` and `tests/cli.rs`.
+   never contents — enforced by `tests/config.rs`, `tests/provider.rs` and
+   `tests/cli.rs`.
 
 ## Layout
 
@@ -48,6 +49,7 @@ src/
 │               the agent core, and `serve` over any transport
 ├── session.rs  session state, free of the SDK
 ├── config.rs   layered XDG configuration (ADR-006), free of the SDK
+├── provider.rs provider profiles from the configuration (ADR-007), free of the SDK
 ├── cli.rs      argument types only
 └── error.rs    the crate's error type
 tests/
@@ -57,6 +59,8 @@ tests/
 ├── session.rs  the session and prompt lifecycle, in-process
 ├── cancel.rs   cancellation, failed turns and error mapping, in-process
 ├── config.rs   the configuration layers, merge rules and errors, in-process
+├── provider.rs provider profiles, validation and secret handling, in-process
+├── selection.rs provider and model selection over ACPv2, in-process
 └── mcp.rs      the MCP-over-ACP spike (ADR-002)
 ```
 

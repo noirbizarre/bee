@@ -18,7 +18,8 @@ use agent_client_protocol::schema::v2;
 use agent_client_protocol::{Agent, Client, ConnectTo, Responder, Stdio, V2ConnectionTo};
 use futures::future::{AbortHandle, AbortRegistration, Abortable, FutureExt};
 
-use crate::session::{SessionError, Sessions};
+use crate::provider::Providers;
+use crate::session::{SessionError, Sessions, Settings};
 use crate::{Error, Result};
 
 /// What every prompt is answered with, until an LLM is integrated.
@@ -93,14 +94,17 @@ async fn placeholder(reply: Reply) -> std::result::Result<(), TurnFailure> {
 
 /// Run the agent over `transport` until the peer disconnects.
 ///
+/// `providers` are the configured provider profiles the sessions choose among
+/// (ADR-007).
+///
 /// # Errors
 ///
 /// Returns [`Error::Connection`] if the connection ends with a protocol or
 /// transport error. A peer that simply closes its end is not an error.
-pub async fn serve(transport: impl ConnectTo<Agent>) -> Result<()> {
+pub async fn serve(transport: impl ConnectTo<Agent>, providers: Providers) -> Result<()> {
     // `agent()` is `ConnectTo<Client>`, and the transport is the client's end,
     // so it is the transport that the agent connects to.
-    agent()
+    agent_with_providers(providers)
         .connect_to(transport)
         .await
         .map_err(|error| Error::Connection {
@@ -114,10 +118,10 @@ pub async fn serve(transport: impl ConnectTo<Agent>) -> Result<()> {
 /// # Errors
 ///
 /// As [`serve`].
-pub async fn serve_stdio() -> Result<()> {
+pub async fn serve_stdio(providers: Providers) -> Result<()> {
     // No debug callback on purpose: stdout carries protocol traffic only, and a
     // trace line written there would corrupt the client's JSON-RPC stream.
-    serve(Stdio::new()).await
+    serve(Stdio::new(), providers).await
 }
 
 /// Build the ACPv2 agent side of a connection.
@@ -133,7 +137,17 @@ pub async fn serve_stdio() -> Result<()> {
 /// drive it in-process without a subprocess. Each call builds its own session
 /// registry, so two connections never share a session.
 pub fn agent() -> impl ConnectTo<Client> {
-    agent_with(placeholder)
+    agent_with_providers(Providers::default())
+}
+
+/// [`agent`], with sessions that choose among `providers`.
+///
+/// Each session is offered a `provider` and a `model` configuration option,
+/// and `session/set_config_option` changes them for that session only. The
+/// choice is a session setting; the profile's endpoint, headers and credential
+/// are configuration, and no request can change them (ADR-007).
+pub fn agent_with_providers(providers: Providers) -> impl ConnectTo<Client> {
+    build(providers, placeholder)
 }
 
 /// [`agent`], with `body` as the turn that answers every prompt.
@@ -148,8 +162,29 @@ where
     F: Fn(Reply) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = std::result::Result<(), TurnFailure>> + Send + 'static,
 {
+    build(Providers::default(), body)
+}
+
+/// [`agent_with`], with sessions that choose among `providers`.
+///
+/// Not part of the stable API, for the same reason as [`agent_with`]: a test of
+/// changing settings mid-turn needs a turn that does not end.
+#[doc(hidden)]
+pub fn agent_configured<F, Fut>(providers: Providers, body: F) -> impl ConnectTo<Client>
+where
+    F: Fn(Reply) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = std::result::Result<(), TurnFailure>> + Send + 'static,
+{
+    build(providers, body)
+}
+
+fn build<F, Fut>(providers: Providers, body: F) -> impl ConnectTo<Client>
+where
+    F: Fn(Reply) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = std::result::Result<(), TurnFailure>> + Send + 'static,
+{
     let body = Arc::new(body);
-    let sessions = Arc::new(Mutex::new(Sessions::new()));
+    let sessions = Arc::new(Mutex::new(Sessions::with_providers(providers)));
 
     // `Agent.v2()`, not `Agent.builder()`: the latter is the stable v1 surface.
     Agent
@@ -186,8 +221,11 @@ where
                             _connection: V2ConnectionTo<Client>| {
                     // `mcp_servers` is accepted and ignored: Bee advertises no
                     // MCP capability, and wiring them up is a later issue.
-                    let id = lock(&sessions).create(request.cwd.into_inner());
-                    responder.respond(v2::NewSessionResponse::new(id))
+                    // One guard, so the options describe the session just made.
+                    let mut sessions = lock(&sessions);
+                    let id = sessions.create(request.cwd.into_inner());
+                    let options = config_options(sessions.settings(&id).ok().flatten());
+                    responder.respond(v2::NewSessionResponse::new(id).config_options(options))
                 }
             },
             agent_client_protocol::on_receive_request!(),
@@ -231,13 +269,57 @@ where
                     }
                     let id = request.session_id.to_string();
                     let cwd: &Path = request.cwd.as_ref();
-                    if let Err(error) = lock(&sessions).resume(&id, cwd) {
-                        return responder.respond_with_error(session_error(error));
-                    }
+                    let options = {
+                        let mut sessions = lock(&sessions);
+                        if let Err(error) = sessions.resume(&id, cwd) {
+                            return responder.respond_with_error(session_error(error));
+                        }
+                        // The session keeps what the client chose before it
+                        // was closed, so the options report that, not the defaults.
+                        config_options(sessions.settings(&id).ok().flatten())
+                    };
                     // The protocol requires a current-state snapshot before the
                     // response: the response alone does not imply idle.
                     send_update(&connection, &request.session_id, idle(None))?;
-                    responder.respond(v2::ResumeSessionResponse::new())
+                    responder.respond(v2::ResumeSessionResponse::new().config_options(options))
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let sessions = Arc::clone(&sessions);
+                async move |request: v2::SetSessionConfigOptionRequest,
+                            responder: Responder<v2::SetSessionConfigOptionResponse>,
+                            _connection: V2ConnectionTo<Client>| {
+                    // Every option Bee offers is a selector. Anything else is a
+                    // client that did not read the options it was given.
+                    let Some(value) = request.value.as_id() else {
+                        return responder.respond_with_error(invalid_params(
+                            "this option takes a selected value (`type: \"id\"`), not a boolean",
+                        ));
+                    };
+                    let value = value.to_string();
+                    let id = request.session_id.to_string();
+
+                    // One guard from the change to the snapshot, so the reply
+                    // describes exactly the state this request produced.
+                    let mut sessions = lock(&sessions);
+                    let changed = match &*request.config_id.to_string() {
+                        PROVIDER_OPTION => sessions.set_provider(&id, &value),
+                        MODEL_OPTION => sessions.set_model(&id, &value),
+                        other => {
+                            return responder.respond_with_error(invalid_params(format!(
+                                "unknown configuration option `{other}`; \
+                                 Bee offers `{PROVIDER_OPTION}` and `{MODEL_OPTION}`"
+                            )));
+                        }
+                    };
+                    if let Err(error) = changed {
+                        return responder.respond_with_error(session_error(error));
+                    }
+                    let options = config_options(sessions.settings(&id).ok().flatten());
+                    responder.respond(v2::SetSessionConfigOptionResponse::new(options))
                 }
             },
             agent_client_protocol::on_receive_request!(),
@@ -381,6 +463,59 @@ where
         )
 }
 
+/// The id of the option that selects the provider profile.
+const PROVIDER_OPTION: &str = "provider";
+
+/// The id of the option that selects the model.
+const MODEL_OPTION: &str = "model";
+
+/// The configuration options a session offers, from its effective settings.
+///
+/// Empty without a provider: an option nothing can act on is a promise Bee
+/// cannot keep. The model selector lists the profile's suggestions, but
+/// `session/set_config_option` accepts any well-formed id, so a model absent
+/// from every list is still usable.
+fn config_options(settings: Option<Settings>) -> Vec<v2::SessionConfigOption> {
+    let Some(settings) = settings else {
+        return Vec::new();
+    };
+    let select = |names: &[String]| -> Vec<v2::SessionConfigSelectOption> {
+        names
+            .iter()
+            .map(|name| v2::SessionConfigSelectOption::new(name.as_str(), name.as_str()))
+            .collect()
+    };
+
+    let mut options = vec![
+        v2::SessionConfigOption::select(
+            PROVIDER_OPTION,
+            "Provider",
+            settings.provider.as_str(),
+            select(&settings.providers),
+        )
+        .description("The configured provider profile that answers this session's prompts.")
+        // No spec category fits a connection profile; `_` marks it custom, as
+        // the protocol requires for non-spec categories.
+        .category(v2::SessionConfigOptionCategory::Other(
+            "_provider".to_owned(),
+        )),
+    ];
+    // A selector needs a current value; a profile with no model has none to show.
+    if let Some(model) = &settings.model {
+        options.push(
+            v2::SessionConfigOption::select(
+                MODEL_OPTION,
+                "Model",
+                model.as_str(),
+                select(&settings.models),
+            )
+            .description("The model id sent to the provider. Any id may be set, listed or not.")
+            .category(v2::SessionConfigOptionCategory::Model),
+        );
+    }
+    options
+}
+
 /// Run one turn to its terminal state.
 ///
 /// Always returns `Ok`: the SDK shuts the whole connection down when a spawned
@@ -494,7 +629,7 @@ fn session_error(error: SessionError) -> agent_client_protocol::Error {
     match error {
         // A well-formed request, sent at a moment it cannot be honoured: not a
         // problem with its parameters, so not `-32602`.
-        SessionError::Busy(_) => {
+        SessionError::Busy(_) | SessionError::SettingsBusy(_) => {
             agent_client_protocol::Error::invalid_request().data(error.to_string())
         }
         // Everything else names a session or directory the client got wrong.

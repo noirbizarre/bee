@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
+use crate::provider::{Providers, check_model_id};
+
 /// Why a session operation was refused.
 ///
 /// These become JSON-RPC error data for the client, never CLI output, so they
@@ -44,6 +46,53 @@ pub enum SessionError {
          or stop it with `session/cancel`, before prompting again"
     )]
     Busy(String),
+
+    /// A setting change arrived while the session's turn was running.
+    // A turn uses the settings it started with; changing them underneath would
+    // make the answer's provider and model depend on timing.
+    #[error(
+        "session `{0}` is running a turn; wait for it to go idle, or stop it \
+         with `session/cancel`, before changing its settings"
+    )]
+    SettingsBusy(String),
+
+    /// The client chose a provider profile that is not configured.
+    #[error("unknown provider `{name}`; the configured providers are: {available}")]
+    UnknownProvider {
+        /// What the client asked for.
+        name: String,
+        /// The configured profiles, comma separated.
+        available: String,
+    },
+
+    /// The client chose a model id that cannot be one.
+    #[error("invalid model id: {0}")]
+    InvalidModel(&'static str),
+
+    /// A provider or model was chosen but no provider profile is configured.
+    #[error(
+        "no provider is configured, so there is nothing to select; \
+         define one under `[providers]` in Bee's configuration"
+    )]
+    NoProvider,
+}
+
+/// A session's provider and model, as the client sees and may change them.
+///
+/// These are *session settings*, chosen over ACP, and distinct from provider
+/// *configuration* (endpoint, headers, credential), which only the
+/// configuration files set (ADR-007).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Settings {
+    /// The effective provider profile.
+    pub provider: String,
+    /// Every configured profile name, sorted.
+    pub providers: Vec<String>,
+    /// The effective model, if the profile or the client gave one.
+    pub model: Option<String>,
+    /// The model ids to suggest: the profile's, plus the client's choice if it
+    /// is not among them. A suggestion, never a limit.
+    pub models: Vec<String>,
 }
 
 /// The identifiers of one prompt turn.
@@ -85,6 +134,10 @@ struct Session {
     /// The turn in flight, if any, and how to stop it. Whoever takes it out of
     /// here is the only one that reports the turn's terminal state.
     active: Option<ActiveTurn>,
+    /// The profile the client chose, if it overrode the configured default.
+    provider: Option<String>,
+    /// The model the client chose, if it overrode the profile's.
+    model: Option<String>,
 }
 
 struct ActiveTurn {
@@ -109,13 +162,122 @@ impl std::fmt::Debug for ActiveTurn {
 pub struct Sessions {
     created: u64,
     by_id: HashMap<String, Session>,
+    providers: Providers,
 }
 
 impl Sessions {
-    /// An empty registry.
+    /// An empty registry with no provider configured.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// An empty registry whose sessions choose among `providers`.
+    #[must_use]
+    pub fn with_providers(providers: Providers) -> Self {
+        Self {
+            providers,
+            ..Self::default()
+        }
+    }
+
+    /// The provider and model `id` would use for its next turn.
+    ///
+    /// Precedence: the client's choice for this session, then the
+    /// configuration's default, then (for the provider) the only profile.
+    /// `None` when no provider is configured at all.
+    ///
+    /// # Errors
+    ///
+    /// [`SessionError::Unknown`]. A closed session is still described, so a
+    /// resume can report it.
+    pub fn settings(&self, id: &str) -> Result<Option<Settings>, SessionError> {
+        let session = self
+            .by_id
+            .get(id)
+            .ok_or_else(|| SessionError::Unknown(id.to_owned()))?;
+        Ok(Self::describe(&self.providers, session))
+    }
+
+    fn describe(providers: &Providers, session: &Session) -> Option<Settings> {
+        let name = session
+            .provider
+            .as_deref()
+            .or_else(|| providers.default_name())?;
+        let profile = providers.get(name)?;
+        let mut models: Vec<String> = profile
+            .suggested_models()
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let model = session
+            .model
+            .clone()
+            .or_else(|| profile.default_model().map(str::to_owned));
+        if let Some(chosen) = &model
+            && !models.contains(chosen)
+        {
+            models.push(chosen.clone());
+        }
+        Some(Settings {
+            provider: name.to_owned(),
+            providers: providers.names().map(str::to_owned).collect(),
+            model,
+            models,
+        })
+    }
+
+    /// Choose the provider profile `id` uses. Choosing another provider drops
+    /// the session's model choice: model ids belong to a provider.
+    ///
+    /// # Errors
+    ///
+    /// [`SessionError::NoProvider`], [`SessionError::UnknownProvider`],
+    /// [`SessionError::Unknown`], [`SessionError::Closed`] or
+    /// [`SessionError::SettingsBusy`].
+    pub fn set_provider(&mut self, id: &str, name: &str) -> Result<(), SessionError> {
+        if self.providers.is_empty() {
+            return Err(SessionError::NoProvider);
+        }
+        if self.providers.get(name).is_none() {
+            return Err(SessionError::UnknownProvider {
+                name: name.to_owned(),
+                available: self.providers.names().collect::<Vec<_>>().join(", "),
+            });
+        }
+        let current = self.settings(id)?.map(|settings| settings.provider);
+        let session = self.settable_session(id)?;
+        if current.as_deref() != Some(name) {
+            session.model = None;
+        }
+        session.provider = Some(name.to_owned());
+        Ok(())
+    }
+
+    /// Choose the model `id` uses. Any well-formed id is accepted, listed or
+    /// not: catalog presence is never required.
+    ///
+    /// # Errors
+    ///
+    /// [`SessionError::NoProvider`], [`SessionError::InvalidModel`],
+    /// [`SessionError::Unknown`], [`SessionError::Closed`] or
+    /// [`SessionError::SettingsBusy`].
+    pub fn set_model(&mut self, id: &str, model: &str) -> Result<(), SessionError> {
+        if self.providers.is_empty() {
+            return Err(SessionError::NoProvider);
+        }
+        check_model_id(model).map_err(SessionError::InvalidModel)?;
+        self.settable_session(id)?.model = Some(model.to_owned());
+        Ok(())
+    }
+
+    /// An open session with no turn running.
+    fn settable_session(&mut self, id: &str) -> Result<&mut Session, SessionError> {
+        let session = self.open_session(id)?;
+        if session.active.is_some() {
+            return Err(SessionError::SettingsBusy(id.to_owned()));
+        }
+        Ok(session)
     }
 
     /// Open a session in `cwd` and return its id.
@@ -130,6 +292,8 @@ impl Sessions {
                 turns: 0,
                 created: self.created,
                 active: None,
+                provider: None,
+                model: None,
             },
         );
         id
@@ -493,5 +657,132 @@ mod tests {
         sessions.finish_turn(&id, turn.token);
 
         assert!(!called.load(Ordering::SeqCst));
+    }
+
+    /// Registry with the providers a TOML document defines.
+    fn with(toml: &str) -> Sessions {
+        let dir = tempfile::tempdir().unwrap();
+        let file = crate::config::project_config_path(dir.path());
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, toml).unwrap();
+        let config = crate::config::Config::load(
+            &crate::config::Environment::new(None, None, None),
+            dir.path(),
+        )
+        .unwrap();
+        Sessions::with_providers(Providers::from_config(&config).unwrap())
+    }
+
+    const TWO: &str = "provider = \"a\"\n\
+        [providers.a]\nprotocol = \"openai-chat\"\nmodel = \"m1\"\nmodels = [\"m2\"]\n\
+        [providers.b]\nprotocol = \"openai-chat\"\nmodel = \"n1\"\n";
+
+    #[test]
+    fn without_providers_a_session_has_no_settings_and_nothing_to_select() {
+        let mut sessions = Sessions::new();
+        let id = sessions.create("/a");
+
+        assert_eq!(sessions.settings(&id), Ok(None));
+        assert_eq!(sessions.set_model(&id, "m"), Err(SessionError::NoProvider));
+        assert_eq!(
+            sessions.set_provider(&id, "p"),
+            Err(SessionError::NoProvider)
+        );
+    }
+
+    #[test]
+    fn the_configured_defaults_apply_until_the_client_chooses() {
+        let mut sessions = with(TWO);
+        let id = sessions.create("/a");
+
+        let settings = sessions.settings(&id).unwrap().unwrap();
+
+        assert_eq!(settings.provider, "a");
+        assert_eq!(settings.model.as_deref(), Some("m1"));
+        assert_eq!(settings.models, ["m1", "m2"]);
+        assert_eq!(settings.providers, ["a", "b"]);
+    }
+
+    #[test]
+    fn a_model_the_profile_never_listed_is_accepted_and_suggested_back() {
+        let mut sessions = with(TWO);
+        let id = sessions.create("/a");
+
+        sessions.set_model(&id, "my/private-finetune").unwrap();
+
+        let settings = sessions.settings(&id).unwrap().unwrap();
+        assert_eq!(settings.model.as_deref(), Some("my/private-finetune"));
+        assert_eq!(settings.models, ["m1", "m2", "my/private-finetune"]);
+    }
+
+    #[test]
+    fn choosing_another_provider_drops_the_model_choice_but_the_same_one_keeps_it() {
+        let mut sessions = with(TWO);
+        let id = sessions.create("/a");
+        sessions.set_model(&id, "custom").unwrap();
+
+        sessions.set_provider(&id, "a").unwrap();
+        assert_eq!(
+            sessions.settings(&id).unwrap().unwrap().model.as_deref(),
+            Some("custom")
+        );
+
+        sessions.set_provider(&id, "b").unwrap();
+        let settings = sessions.settings(&id).unwrap().unwrap();
+        assert_eq!(settings.provider, "b");
+        assert_eq!(settings.model.as_deref(), Some("n1"));
+    }
+
+    #[test]
+    fn one_sessions_choice_never_reaches_another() {
+        let mut sessions = with(TWO);
+        let first = sessions.create("/a");
+        let second = sessions.create("/a");
+
+        sessions.set_provider(&first, "b").unwrap();
+
+        assert_eq!(sessions.settings(&second).unwrap().unwrap().provider, "a");
+    }
+
+    #[test]
+    fn an_unknown_provider_and_a_blank_model_are_refused() {
+        let mut sessions = with(TWO);
+        let id = sessions.create("/a");
+
+        assert!(matches!(
+            sessions.set_provider(&id, "zzz"),
+            Err(SessionError::UnknownProvider { .. })
+        ));
+        assert!(matches!(
+            sessions.set_model(&id, " "),
+            Err(SessionError::InvalidModel(_))
+        ));
+    }
+
+    #[test]
+    fn settings_cannot_change_while_a_turn_runs() {
+        let mut sessions = with(TWO);
+        let id = sessions.create("/a");
+        sessions.begin_turn(&id, || {}).unwrap();
+
+        assert_eq!(
+            sessions.set_model(&id, "x"),
+            Err(SessionError::SettingsBusy(id.clone()))
+        );
+        assert_eq!(
+            sessions.set_provider(&id, "b"),
+            Err(SessionError::SettingsBusy(id))
+        );
+    }
+
+    #[test]
+    fn a_resumed_session_keeps_its_choice() {
+        let mut sessions = with(TWO);
+        let id = sessions.create("/a");
+        sessions.set_provider(&id, "b").unwrap();
+        sessions.close(&id).unwrap();
+        sessions.resume(&id, Path::new("/a")).unwrap();
+
+        assert_eq!(sessions.settings(&id).unwrap().unwrap().provider, "b");
     }
 }

@@ -94,7 +94,10 @@ async fn serve_runs_the_agent_over_any_transport_the_sdk_can_connect() {
         Ok(())
     });
 
-    let (client, served) = tokio::join!(client, bee::acp::serve(agent_side));
+    let (client, served) = tokio::join!(
+        client,
+        bee::acp::serve(agent_side, bee::provider::Providers::default())
+    );
 
     client.expect("the client completes its exchange");
     // The client leaving is a normal end of the connection, not an error.

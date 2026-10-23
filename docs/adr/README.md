@@ -27,3 +27,5 @@ by editing the old one. The history is the value.
 - [ADR-004](004-session-and-prompt-lifecycle.md) — Serve the baseline session lifecycle with a placeholder turn
 - [ADR-005](005-prompt-cancellation-and-error-mapping.md) — Run turns off the dispatch loop so prompts can be cancelled
 - [ADR-006](006-layered-xdg-configuration.md) — Layer configuration from the XDG directory, `BEE_CONFIG` and the project
+- [ADR-007](007-provider-profiles-and-model-selection.md) — Describe providers as named profiles that sessions select
+  among

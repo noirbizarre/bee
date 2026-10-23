@@ -106,6 +106,119 @@ pub enum Error {
         higher_type: &'static str,
     },
 
+    /// A provider setting has the wrong TOML type.
+    // Names the key, the file and the types, never the value: the value may be
+    // a secret someone put in the wrong place.
+    #[error("provider setting `{key}` in `{path}` must be {expected}, not {found}")]
+    #[diagnostic(
+        code(bee::provider::wrong_type),
+        help(
+            "change `{key}` to {expected}; the offending value is not echoed in case it is a secret"
+        )
+    )]
+    ProviderType {
+        /// The dotted key.
+        key: String,
+        /// The file that set it.
+        path: String,
+        /// The type the setting needs.
+        expected: &'static str,
+        /// The type it has.
+        found: &'static str,
+    },
+
+    /// A provider profile names a protocol Bee does not implement.
+    #[error("provider setting `{key}` in `{path}` names a protocol Bee does not support")]
+    #[diagnostic(
+        code(bee::provider::unknown_protocol),
+        help(
+            "`protocol` selects how Bee talks to the endpoint, not who runs it; use one of: {supported}"
+        )
+    )]
+    ProviderUnknownProtocol {
+        /// The dotted key.
+        key: String,
+        /// The file that set it.
+        path: String,
+        /// The protocols Bee supports, comma separated.
+        supported: String,
+    },
+
+    /// A provider table holds a key Bee does not know.
+    // Rejected instead of kept: a mistyped `base_ulr` would otherwise send
+    // traffic to the protocol's default endpoint without a word.
+    #[error("unknown provider setting `{key}` in `{path}`")]
+    #[diagnostic(
+        code(bee::provider::unknown_key),
+        help("check the spelling; this table accepts: {allowed}")
+    )]
+    ProviderUnknownKey {
+        /// The dotted key.
+        key: String,
+        /// The file that set it.
+        path: String,
+        /// The keys the table accepts, comma separated.
+        allowed: String,
+    },
+
+    /// A provider profile lacks a required key.
+    #[error("provider profile `{profile}` has no `{key}`")]
+    #[diagnostic(
+        code(bee::provider::missing_key),
+        help(
+            "add `{key}` to `[providers.{profile}]`; it is needed to know how to reach the endpoint"
+        )
+    )]
+    ProviderMissingKey {
+        /// The profile name.
+        profile: String,
+        /// The missing key.
+        key: &'static str,
+        /// The file that defines the profile.
+        path: String,
+    },
+
+    /// A provider setting has the right type but an unusable value.
+    // `reason` is always fixed text from this crate, never derived from the
+    // value, so it cannot repeat a secret.
+    #[error("invalid provider setting `{key}` in `{path}`: {reason}")]
+    #[diagnostic(
+        code(bee::provider::invalid),
+        help("fix the value; it is not echoed in case it is a secret")
+    )]
+    ProviderInvalid {
+        /// The dotted key.
+        key: String,
+        /// The file that set it.
+        path: String,
+        /// What is wrong with it.
+        reason: &'static str,
+    },
+
+    /// `provider` names a profile that is not defined.
+    #[error("the default `provider` does not name a defined profile (defined: {available})")]
+    #[diagnostic(
+        code(bee::provider::unknown_default),
+        help(
+            "set `provider` to one of the profiles under `[providers]`, or define the one you meant"
+        )
+    )]
+    ProviderUnknownDefault {
+        /// The defined profiles, comma separated.
+        available: String,
+    },
+
+    /// Several profiles exist and none is the default.
+    #[error("several provider profiles are defined ({available}) but no default `provider` is set")]
+    #[diagnostic(
+        code(bee::provider::no_default),
+        help("set `provider = \"<profile>\"` at the top of the configuration to pick the default")
+    )]
+    ProviderNoDefault {
+        /// The defined profiles, comma separated.
+        available: String,
+    },
+
     /// Reading or writing a file failed.
     #[error("failed to access `{path}`")]
     #[diagnostic(code(bee::error::io))]

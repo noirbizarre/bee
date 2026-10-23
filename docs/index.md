@@ -32,7 +32,38 @@ Tables merge key by key, and for a scalar the higher layer wins. An array in a h
 instead of extending it. Giving one key different types in two layers (a string over an integer, say) is an error that
 names the key and both files. See [ADR-006](adr/006-layered-xdg-configuration.md).
 
-No setting is read yet: providers and models are not integrated, so the files are validated but have no effect.
+### Providers and models
+
+A provider is a named connection profile, separate from the protocol it speaks and from the model:
+
+```toml
+provider = "work"                  # the default profile (optional when there is only one)
+
+[providers.work]                   # any name; it is a label, never looked up
+protocol = "openai-chat"           # required: "openai-chat" or "anthropic-messages"
+base_url = "https://gateway.corp.example/v1"   # optional; defaults per protocol
+model = "corp/ft-2026"             # optional default model: any id, listed anywhere or not
+models = ["corp/base"]             # optional suggestions for model selectors, not a limit
+credential = { env = "GATEWAY_KEY" }           # optional: names an environment variable
+headers = { "X-Team" = "infra" }   # optional, sent only to this profile
+
+[providers.work.options]           # settings specific to the profile's protocol
+max_tokens_field = "max_completion_tokens"
+```
+
+Several profiles can use the same protocol, so a gateway, a local server and a vendor API are just three profiles.
+Layers merge as above: a project file can override one header or the model of a global profile. Unknown keys,
+unsupported protocols and malformed URLs, headers or models stop Bee at launch with an error that names the key and
+the file and never the value. A `credential` only *names* where the secret lives; do not put a key in the file.
+
+When a provider is configured, Bee offers each ACPv2 session a `provider` and a `model` configuration option and
+handles `session/set_config_option`. These are session settings and differ from the configuration above: the client
+chooses among configured profiles and can name any model id, but cannot change a profile's endpoint, headers or
+credential. The provider is the client's choice, else `provider`, else the only profile; the model is the client's
+choice, else the profile's `model`, else the first of its `models`. Choosing another provider resets the model, and
+settings cannot change while a turn is running. See [ADR-007](adr/007-provider-profiles-and-model-selection.md).
+
+Profiles are validated and selectable, but no LLM is called yet: they have no effect on the placeholder reply.
 
 ## Scope
 
