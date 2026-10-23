@@ -15,8 +15,9 @@ framework or a provider abstraction ahead of a concrete need.
 
 The repository is at the bootstrap stage: Bee serves ACPv2 over stdio and
 implements the baseline session lifecycle (new, list, resume, close, prompt,
-cancel), answering every prompt with a fixed placeholder. The agentic loop,
-real cancellation and provider integrations are planned, not implemented.
+cancel), answering every prompt with a fixed placeholder. A running prompt
+can be cancelled and a failed turn is reported, but the placeholder turn never takes time.
+The agentic loop and provider integrations are planned, not implemented.
 Documentation must keep saying that the placeholder reply is temporary and that
 no LLM is integrated, until that changes.
 
@@ -50,6 +51,7 @@ tests/
 ├── stdio.rs    the stdio transport, through the real binary
 ├── acp.rs      the agent core, in-process
 ├── session.rs  the session and prompt lifecycle, in-process
+├── cancel.rs   cancellation, failed turns and error mapping, in-process
 └── mcp.rs      the MCP-over-ACP spike (ADR-002)
 ```
 

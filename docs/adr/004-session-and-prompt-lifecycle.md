@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted
+Accepted. Superseded in part by [ADR-005](005-prompt-cancellation-and-error-mapping.md): `session/cancel`
+is no longer a no-op, turns no longer run inside the handler, and overlapping prompts are refused.
 
 ## Context
 

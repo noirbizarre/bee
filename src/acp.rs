@@ -8,13 +8,17 @@
 //! the SDK can connect, and [`serve_stdio`] picks stdin/stdout. A remote
 //! transport later supplies another [`ConnectTo`] and changes nothing else.
 
+use std::any::Any;
+use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use agent_client_protocol::schema::v2;
 use agent_client_protocol::{Agent, Client, ConnectTo, Responder, Stdio, V2ConnectionTo};
+use futures::future::{AbortHandle, AbortRegistration, Abortable, FutureExt};
 
-use crate::session::Sessions;
+use crate::session::{SessionError, Sessions};
 use crate::{Error, Result};
 
 /// What every prompt is answered with, until an LLM is integrated.
@@ -23,6 +27,69 @@ use crate::{Error, Result};
 /// output, and a client or a user could come to rely on it.
 const PLACEHOLDER_REPLY: &str = "This is a placeholder response: Bee has no LLM integrated yet, \
                                  so it cannot answer your prompt.";
+
+/// Why a turn failed.
+///
+/// Reported to the client as the `error` stop reason, with this text as the
+/// error's data. Not part of the stable API: it exists so tests can inject a
+/// failing turn (see [`agent_with`]).
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{0}")]
+pub struct TurnFailure(String);
+
+impl TurnFailure {
+    /// A failure that says `reason`.
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self(reason.into())
+    }
+}
+
+/// How a running turn talks to its client.
+///
+/// Not part of the stable API: it is what [`agent_with`] hands the turn body.
+/// It can only write agent output, and only while the turn is still the
+/// session's current one, so a cancelled turn cannot speak after the client was
+/// told it stopped.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct Reply {
+    sessions: Arc<Mutex<Sessions>>,
+    connection: V2ConnectionTo<Client>,
+    id: String,
+    session_id: v2::SessionId,
+    message_id: String,
+    token: u64,
+}
+
+impl Reply {
+    /// Send `text` as a chunk of the agent's answer, unless the turn was
+    /// cancelled or has ended.
+    pub fn text(&self, text: &str) {
+        // The check and the send share one lock guard. A cancel takes the same
+        // lock to stop the turn and to send its `idle`, so a chunk can never be
+        // sent after that `idle` even if this runs on another thread.
+        let sessions = lock(&self.sessions);
+        if sessions.is_current(&self.id, self.token) {
+            // A failed send means the peer is gone, and the connection is
+            // already shutting down: nothing is left to tell.
+            let _ = send_update(
+                &self.connection,
+                &self.session_id,
+                v2::SessionUpdate::AgentMessageChunk(v2::ContentChunk::new(
+                    text.into(),
+                    self.message_id.clone(),
+                )),
+            );
+        }
+    }
+}
+
+/// The turn every prompt gets until an LLM is integrated.
+async fn placeholder(reply: Reply) -> std::result::Result<(), TurnFailure> {
+    reply.text(PLACEHOLDER_REPLY);
+    Ok(())
+}
 
 /// Run the agent over `transport` until the peer disconnects.
 ///
@@ -59,10 +126,29 @@ pub async fn serve_stdio() -> Result<()> {
 /// `close`, `prompt`, `cancel`) and answers every prompt with a fixed
 /// placeholder. No LLM is integrated yet.
 ///
+/// A running prompt can be stopped with `session/cancel` or `session/close`,
+/// and a second prompt is refused until it ends (ADR-005).
+///
 /// The result connects to any [`Client`] transport, which is how the tests
 /// drive it in-process without a subprocess. Each call builds its own session
 /// registry, so two connections never share a session.
 pub fn agent() -> impl ConnectTo<Client> {
+    agent_with(placeholder)
+}
+
+/// [`agent`], with `body` as the turn that answers every prompt.
+///
+/// Not part of the stable API. The placeholder turn finishes instantly, so
+/// nothing could observe a cancelled or failed turn through it; tests inject a
+/// body that waits, fails or panics instead. It is the only seam, and it is
+/// not a provider abstraction: that waits for a real provider.
+#[doc(hidden)]
+pub fn agent_with<F, Fut>(body: F) -> impl ConnectTo<Client>
+where
+    F: Fn(Reply) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = std::result::Result<(), TurnFailure>> + Send + 'static,
+{
+    let body = Arc::new(body);
     let sessions = Arc::new(Mutex::new(Sessions::new()));
 
     // `Agent.v2()`, not `Agent.builder()`: the latter is the stable v1 surface.
@@ -146,7 +232,7 @@ pub fn agent() -> impl ConnectTo<Client> {
                     let id = request.session_id.to_string();
                     let cwd: &Path = request.cwd.as_ref();
                     if let Err(error) = lock(&sessions).resume(&id, cwd) {
-                        return responder.respond_with_error(invalid_params(error));
+                        return responder.respond_with_error(session_error(error));
                     }
                     // The protocol requires a current-state snapshot before the
                     // response: the response alone does not imply idle.
@@ -161,13 +247,28 @@ pub fn agent() -> impl ConnectTo<Client> {
                 let sessions = Arc::clone(&sessions);
                 async move |request: v2::CloseSessionRequest,
                             responder: Responder<v2::CloseSessionResponse>,
-                            _connection: V2ConnectionTo<Client>| {
-                    // No foreground work can be pending (the placeholder turn
-                    // ends inside its own handler), so there is nothing to
-                    // cancel or wait for before responding.
-                    match lock(&sessions).close(&request.session_id.to_string()) {
-                        Ok(()) => responder.respond(v2::CloseSessionResponse::new()),
-                        Err(error) => responder.respond_with_error(invalid_params(error)),
+                            connection: V2ConnectionTo<Client>| {
+                    // Held until the update is sent: a turn finishing at this
+                    // moment waits here, then finds it was taken and stays silent,
+                    // so the client gets exactly one terminal state.
+                    let mut sessions = lock(&sessions);
+                    match sessions.close(&request.session_id.to_string()) {
+                        Ok(cancelled) => {
+                            if cancelled {
+                                // Closing cancels running work, and the protocol
+                                // wants its `cancelled` idle *before* the close
+                                // response. None for an idle session. A failed
+                                // send means the peer is gone, so the response
+                                // below is moot too.
+                                let _ = send_update(
+                                    &connection,
+                                    &request.session_id,
+                                    idle(Some(v2::StopReason::Cancelled)),
+                                );
+                            }
+                            responder.respond(v2::CloseSessionResponse::new())
+                        }
+                        Err(error) => responder.respond_with_error(session_error(error)),
                     }
                 }
             },
@@ -179,20 +280,45 @@ pub fn agent() -> impl ConnectTo<Client> {
                 async move |request: v2::PromptRequest,
                             responder: Responder<v2::PromptResponse>,
                             connection: V2ConnectionTo<Client>| {
-                    let turn = match lock(&sessions).begin_turn(&request.session_id.to_string()) {
+                    // Before anything is inserted: a prompt that carries content
+                    // Bee did not advertise support for is a bad request, not a
+                    // turn that fails halfway.
+                    if let Some(reason) = unsupported_content(&request.prompt) {
+                        return responder.respond_with_error(invalid_params(reason));
+                    }
+
+                    // Registered here, in the handler, and not in the spawned
+                    // task: the SDK dispatches a `session/cancel` as soon as this
+                    // handler returns, and a turn the registry does not know yet
+                    // could not be cancelled.
+                    let (abort, registration) = AbortHandle::new_pair();
+                    let id = request.session_id.to_string();
+                    let turn = match lock(&sessions).begin_turn(&id, move || abort.abort()) {
                         Ok(turn) => turn,
                         // A prompt refused before insertion is an error
                         // response, not an idle update: no turn ever started.
-                        Err(error) => return responder.respond_with_error(invalid_params(error)),
+                        Err(error) => return responder.respond_with_error(session_error(error)),
                     };
                     let session_id = request.session_id;
 
                     // Acceptance only: the response says the user message was
                     // inserted, not that anything has been answered. Everything
                     // after it travels as `session/update`.
-                    responder.respond(v2::PromptResponse::new(turn.user_message_id.clone()))?;
+                    if let Err(error) =
+                        responder.respond(v2::PromptResponse::new(turn.user_message_id.clone()))
+                    {
+                        // The turn was registered but will never run; leaving it
+                        // would keep the session busy for good.
+                        lock(&sessions).finish_turn(&id, turn.token);
+                        return Err(error);
+                    }
 
-                    send_update(
+                    // Sent from the handler, not the spawned turn, so both
+                    // always precede the `idle` of a cancel that arrives next.
+                    // Send failures mean the peer is gone and the response is
+                    // already out: returning them would make the SDK answer the
+                    // same request a second time.
+                    let _ = send_update(
                         &connection,
                         &session_id,
                         v2::SessionUpdate::UserMessage(
@@ -200,41 +326,141 @@ pub fn agent() -> impl ConnectTo<Client> {
                             // match the echoed message to its prompt.
                             v2::UserMessage::new(turn.user_message_id).content(request.prompt),
                         ),
-                    )?;
-                    send_update(
+                    );
+                    let _ = send_update(
                         &connection,
                         &session_id,
                         v2::SessionUpdate::StateUpdate(v2::StateUpdate::Running(
                             v2::RunningStateUpdate::new(),
                         )),
-                    )?;
-                    send_update(
-                        &connection,
-                        &session_id,
-                        v2::SessionUpdate::AgentMessageChunk(v2::ContentChunk::new(
-                            PLACEHOLDER_REPLY.into(),
-                            turn.agent_message_id,
-                        )),
-                    )?;
-                    // The terminal state of the turn. `end_turn`, because the
-                    // placeholder always completes; cancellation and failure
-                    // arrive with the agentic loop.
-                    send_update(&connection, &session_id, idle(Some(v2::StopReason::EndTurn)))
+                    );
+
+                    let reply = Reply {
+                        sessions: Arc::clone(&sessions),
+                        connection: connection.clone(),
+                        id,
+                        session_id,
+                        message_id: turn.agent_message_id,
+                        token: turn.token,
+                    };
+                    // A turn runs off the dispatch loop: handlers block it, and
+                    // a `session/cancel` queued behind a running prompt would
+                    // only be seen once the turn it should stop had ended. If
+                    // the spawn fails the connection is already closing, and
+                    // there is nobody left to run the turn for.
+                    let _ = connection.spawn(run_turn(Arc::clone(&body), reply, registration));
+                    Ok(())
                 }
             },
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_notification(
-            async |_notification: v2::CancelSessionNotification,
-                   _connection: V2ConnectionTo<Client>| {
-                // Deliberately nothing: the placeholder turn finishes inside its
-                // own handler, so no work is ever in flight to cancel, and the
-                // protocol asks for no update when none is. Real cancellation
-                // arrives with the agentic loop.
-                Ok(())
+            {
+                let sessions = Arc::clone(&sessions);
+                async move |notification: v2::CancelSessionNotification,
+                            connection: V2ConnectionTo<Client>| {
+                    // Held until the update is sent, as in `session/close`.
+                    let mut sessions = lock(&sessions);
+                    // Cancelling an idle or unknown session is not an error: a
+                    // notification has no reply to carry one, and the protocol
+                    // asks for no update when there was no work to cancel.
+                    if sessions.cancel(&notification.session_id.to_string()) {
+                        // `cancelled`, even though aborting dropped the work
+                        // mid-flight: the protocol forbids reporting that as an
+                        // error, and the client asked for it.
+                        send_update(
+                            &connection,
+                            &notification.session_id,
+                            idle(Some(v2::StopReason::Cancelled)),
+                        )?;
+                    }
+                    Ok(())
+                }
             },
             agent_client_protocol::on_receive_notification!(),
         )
+}
+
+/// Run one turn to its terminal state.
+///
+/// Always returns `Ok`: the SDK shuts the whole connection down when a spawned
+/// task fails, and one failed turn must not take the other sessions with it.
+async fn run_turn<F, Fut>(
+    body: Arc<F>,
+    reply: Reply,
+    registration: AbortRegistration,
+) -> agent_client_protocol::Result<()>
+where
+    F: Fn(Reply) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = std::result::Result<(), TurnFailure>> + Send + 'static,
+{
+    let sessions = Arc::clone(&reply.sessions);
+    let connection = reply.connection.clone();
+    let id = reply.id.clone();
+    let session_id = reply.session_id.clone();
+    let token = reply.token;
+
+    // `catch_unwind` so a panicking turn ends as a failed turn and not as a
+    // dead task whose session stays busy forever. The `async` block also
+    // covers a body that panics before it returns its future.
+    let attempt = AssertUnwindSafe(async move { body(reply).await }).catch_unwind();
+    let stop_reason = match Abortable::new(attempt, registration).await {
+        // Cancelled or closed: whoever stopped it already sent the terminal
+        // `idle`, and sending another would be a second one.
+        Err(_aborted) => return Ok(()),
+        Ok(Ok(Ok(()))) => v2::StopReason::EndTurn,
+        Ok(Ok(Err(failure))) => failed(&failure.to_string()),
+        Ok(Err(panic)) => failed(&panic_reason(&*panic)),
+    };
+
+    // Held across the send, as in `session/cancel`: if a cancel took this turn
+    // in the meantime it reports the terminal state and this stays silent. Never
+    // `end_turn` for a turn the client saw cancelled.
+    let mut sessions = lock(&sessions);
+    if sessions.finish_turn(&id, token) {
+        // A failed send means the peer is gone; there is nobody to tell.
+        let _ = send_update(&connection, &session_id, idle(Some(stop_reason)));
+    }
+    Ok(())
+}
+
+/// The `error` stop reason, carrying what failed as a JSON-RPC error.
+fn failed(reason: &str) -> v2::StopReason {
+    v2::StopReason::Error(
+        v2::ErrorStopReason::new().error(v2::Error::internal_error().data(reason.to_owned())),
+    )
+}
+
+/// What a panic said, when it said anything printable.
+fn panic_reason(payload: &(dyn Any + Send)) -> String {
+    let message = payload
+        .downcast_ref::<&str>()
+        .map(|message| (*message).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "no message".to_owned());
+    format!("the turn panicked: {message}")
+}
+
+/// Why `prompt` cannot be served, if it has a block Bee does not accept.
+///
+/// Bee advertises no prompt capability, and the protocol only requires text
+/// and resource links without one. Anything else would be echoed back as if it
+/// had been understood.
+fn unsupported_content(prompt: &[v2::ContentBlock]) -> Option<String> {
+    prompt.iter().find_map(|block| {
+        let kind = match block {
+            v2::ContentBlock::Text(_) | v2::ContentBlock::ResourceLink(_) => return None,
+            v2::ContentBlock::Image(_) => "image",
+            v2::ContentBlock::Audio(_) => "audio",
+            v2::ContentBlock::Resource(_) => "resource",
+            // Future block types, and the custom ones: not understood either.
+            _ => "unrecognized",
+        };
+        Some(format!(
+            "`{kind}` prompt content is not supported: Bee does not advertise that prompt \
+             capability; send `text` or `resource_link` blocks instead"
+        ))
+    })
 }
 
 /// Lock the registry.
@@ -261,6 +487,19 @@ fn send_update(
         session_id.clone(),
         update,
     ))
+}
+
+/// The protocol error a refused session operation becomes.
+fn session_error(error: SessionError) -> agent_client_protocol::Error {
+    match error {
+        // A well-formed request, sent at a moment it cannot be honoured: not a
+        // problem with its parameters, so not `-32602`.
+        SessionError::Busy(_) => {
+            agent_client_protocol::Error::invalid_request().data(error.to_string())
+        }
+        // Everything else names a session or directory the client got wrong.
+        _ => invalid_params(error),
+    }
 }
 
 /// The client sent something this agent cannot act on; the text says what.

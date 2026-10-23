@@ -32,8 +32,10 @@ binary serves ACPv2 over stdio: a client can start it, complete the `initialize`
 prompts. Bee advertises the baseline session lifecycle (`session/new`, `list`, `resume`, `close`, `prompt`, `cancel`).
 
 **No LLM is integrated yet.** Every prompt is answered with the same fixed placeholder message, which is temporary and
-will be replaced by the agentic loop and a provider integration. Cancellation does nothing yet, because the placeholder
-turn finishes immediately, and `session/resume` cannot replay history. There is no agentic loop either.
+will be replaced by the agentic loop and a provider integration. A running prompt can be stopped with `session/cancel`
+or `session/close`, and a prompt sent while one is running is refused. Because the placeholder turn finishes
+immediately, this only shows once a real turn takes time. `session/resume` cannot replay history, and prompts accept
+`text` and `resource_link` content only. There is no agentic loop either.
 
 The "Scope" and "Non-goals" sections describe the intended design, not current behaviour.
 
@@ -49,7 +51,8 @@ leaves everything about presentation and orchestration to the client. The planne
 - configuration and credential handling
 - error handling and observability
 
-None of these exist as code yet. They are boundaries to grow into, not modules to scaffold ahead of need.
+Most of these do not exist as code yet: only the protocol integration, the session lifecycle with cancellation, and
+protocol error mapping do. They are boundaries to grow into, not modules to scaffold ahead of need.
 
 ## Non-goals
 

@@ -271,3 +271,88 @@ fn a_client_that_never_speaks_can_disconnect_cleanly() {
     assert!(status.success(), "exit status was {status}");
     assert_eq!(stderr, "");
 }
+
+/// Open a session over `agent`, which must be initialized, and return its id.
+fn new_session(agent: &mut Agent, id: u64) -> Value {
+    agent.send(&json!({
+        "jsonrpc": "2.0", "id": id, "method": "session/new",
+        "params": { "cwd": std::env::temp_dir() },
+    }));
+    agent.recv()["result"]["sessionId"].clone()
+}
+
+#[test]
+fn a_malformed_prompt_gets_invalid_params_and_the_next_prompt_still_runs() {
+    let mut agent = Agent::spawn();
+    agent.initialize(1);
+    let session = new_session(&mut agent, 2);
+
+    // `prompt` must be an array of content blocks.
+    agent.send(&json!({
+        "jsonrpc": "2.0", "id": 3, "method": "session/prompt",
+        "params": { "sessionId": session, "prompt": "hi" },
+    }));
+    let error = agent.recv();
+    agent.send(&json!({
+        "jsonrpc": "2.0", "id": 4, "method": "session/prompt",
+        "params": { "sessionId": session, "prompt": [{ "type": "text", "text": "hi" }] },
+    }));
+
+    assert_eq!(error["id"], 3);
+    assert_eq!(error["error"]["code"], -32602);
+    // Recovery: the connection and the session are both still usable.
+    let mut accepted = false;
+    loop {
+        let message = agent.recv();
+        accepted |= message["id"] == 4 && message["result"]["messageId"].is_string();
+        if message["params"]["update"]["state"] == "idle" {
+            break;
+        }
+    }
+    assert!(accepted, "the second prompt was accepted");
+    let (status, stderr) = agent.finish();
+    assert!(status.success(), "exit status was {status}");
+    assert_eq!(stderr, "", "an error response writes nothing to stderr");
+}
+
+#[test]
+fn a_prompt_with_unsupported_content_gets_invalid_params_over_the_wire() {
+    let mut agent = Agent::spawn();
+    agent.initialize(1);
+    let session = new_session(&mut agent, 2);
+
+    agent.send(&json!({
+        "jsonrpc": "2.0", "id": 3, "method": "session/prompt",
+        "params": {
+            "sessionId": session,
+            "prompt": [{ "type": "image", "data": "aGk=", "mimeType": "image/png" }],
+        },
+    }));
+    let error = agent.recv();
+
+    assert_eq!(error["id"], 3);
+    assert_eq!(error["error"]["code"], -32602);
+    let (status, stderr) = agent.finish();
+    assert!(status.success(), "exit status was {status}");
+    assert_eq!(stderr, "");
+}
+
+#[test]
+fn a_malformed_cancel_notification_gets_no_reply_and_the_connection_survives() {
+    let mut agent = Agent::spawn();
+    agent.initialize(1);
+
+    // A notification has no id, so there is nobody to answer. It must not
+    // end the connection either.
+    agent.send(&json!({
+        "jsonrpc": "2.0", "method": "session/cancel",
+        "params": { "sessionId": 42 },
+    }));
+    let created = new_session(&mut agent, 2);
+
+    // The next message is the answer to `session/new`, not an error for the
+    // notification.
+    assert!(created.is_string());
+    let (status, _stderr) = agent.finish();
+    assert!(status.success(), "exit status was {status}");
+}
