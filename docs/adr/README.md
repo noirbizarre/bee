@@ -22,3 +22,4 @@ by editing the old one. The history is the value.
 ## Index
 
 - [ADR-001](001-acpv2-rust-sdk.md) — Build on the ACP Rust SDK's draft v2 API
+- [ADR-002](002-mcp-over-acp.md) — Reach client-hosted tools through the SDK's MCP-over-ACP path
