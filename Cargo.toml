@@ -90,11 +90,20 @@ miette = { version = "7", features = ["fancy"] }
 # CLI
 clap = { version = "4", features = ["derive", "env", "wrap_help"] }
 
+# ACPv2. v2 is the SDK's draft protocol, reachable only through the
+# `unstable_protocol_v2` feature, so a minor release may break it. The exact pin
+# turns every upgrade into a deliberate, reviewed change instead of a surprise
+# from `cargo update`. Only `src/acp.rs` imports this crate; see ADR-001.
+agent-client-protocol = { version = "=3.5.0", features = ["unstable_protocol_v2"] }
+
 # `console`, `demand`, `serde` and `serde_json` are deliberately absent: the
-# bootstrap uses none of them. Add each with the code that needs it (ACPv2
-# framing and configuration will want serde).
+# bootstrap uses none of them. Add each with the code that needs it
+# (configuration will want serde; ACPv2 framing is the SDK's job).
 
 [dev-dependencies]
+# Only for `#[tokio::test]`: the SDK is runtime-agnostic and the library does not
+# depend on tokio. The runtime for the binary is decided with the stdio entry point.
+tokio = { version = "1", features = ["macros", "rt"] }
 assert_cmd = "2"
 predicates = "3"
 tempfile = "3"

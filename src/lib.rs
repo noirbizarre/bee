@@ -11,6 +11,7 @@
 #![allow(clippy::result_large_err)]
 #![warn(missing_docs)]
 
+pub mod acp;
 pub mod error;
 
 pub use error::{Error, Result};

@@ -36,6 +36,7 @@ checks is a comment, and it will be violated.
 src/
 ├── lib.rs      the library surface
 ├── main.rs     the bee binary
+├── acp.rs      the ACPv2 boundary: the only module that imports the SDK
 ├── cli.rs      argument types only
 └── error.rs    the crate's error type
 tests/
