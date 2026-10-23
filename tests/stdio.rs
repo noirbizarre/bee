@@ -127,15 +127,58 @@ fn an_initialize_over_stdio_is_answered_with_the_bee_identity() {
 }
 
 #[test]
-fn the_initialize_response_advertises_no_session_capability() {
+fn the_initialize_response_advertises_only_the_baseline_session_capability() {
     let mut agent = Agent::spawn();
 
     let response = agent.initialize(1);
 
-    // Advertising what is not implemented would send clients to methods Bee
-    // cannot answer.
-    assert!(response["result"]["capabilities"].get("session").is_none());
+    // `{}` promises the baseline session methods and nothing else. Anything
+    // more would send clients to methods Bee cannot answer.
+    assert_eq!(response["result"]["capabilities"]["session"], json!({}));
     agent.finish();
+}
+
+#[test]
+fn a_prompt_over_stdio_is_accepted_and_ends_with_an_idle_end_turn_update() {
+    let mut agent = Agent::spawn();
+    agent.initialize(1);
+
+    agent.send(&json!({
+        "jsonrpc": "2.0", "id": 2, "method": "session/new",
+        "params": { "cwd": std::env::temp_dir() },
+    }));
+    let created = agent.recv();
+    let session = created["result"]["sessionId"].clone();
+    agent.send(&json!({
+        "jsonrpc": "2.0", "id": 3, "method": "session/prompt",
+        "params": { "sessionId": session, "prompt": [{ "type": "text", "text": "hi" }] },
+    }));
+
+    // The acceptance response and the four updates are separate messages, so
+    // read until the terminal one rather than assuming an interleaving.
+    let mut accepted = None;
+    let mut states = Vec::new();
+    loop {
+        let message = agent.recv();
+        if message["id"] == 3 {
+            accepted = Some(message);
+        } else if message["method"] == "session/update" {
+            let update = &message["params"]["update"];
+            if update["sessionUpdate"] == "state_update" {
+                states.push(update.clone());
+                if update["state"] == "idle" {
+                    break;
+                }
+            }
+        }
+    }
+
+    assert!(accepted.is_some_and(|response| response["result"]["messageId"].is_string()));
+    assert_eq!(states[0]["state"], "running");
+    assert_eq!(states[1]["stopReason"], "end_turn");
+    let (status, stderr) = agent.finish();
+    assert!(status.success(), "exit status was {status}");
+    assert_eq!(stderr, "", "a prompt writes nothing to stderr");
 }
 
 #[test]

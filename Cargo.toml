@@ -111,7 +111,7 @@ futures = { version = "0.3", default-features = false, features = ["std", "execu
 [dev-dependencies]
 # Only for `#[tokio::test]`: the SDK is runtime-agnostic and neither the library
 # nor the binary depends on tokio; the binary runs on `futures::executor`.
-tokio = { version = "1", features = ["macros", "rt", "sync"] }
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 # The client side of the MCP-over-ACP spike (tests/mcp.rs, ADR-002). The SDK core
 # has no tool builder, so a test client needs this companion crate to host a tool.
 # Exact pin and the same two features as the SDK, for the same reason: the draft

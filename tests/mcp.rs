@@ -2,8 +2,9 @@
 //!
 //! A spike: the client hosts an MCP server with one tool, and a test-local agent
 //! calls it through the SDK's `mcp/message` method. The agent lives here rather
-//! than in `src/acp.rs` on purpose, so Bee's real agent keeps advertising no
-//! session capabilities until the session lifecycle exists.
+//! than in `src/acp.rs` on purpose: a client only sends an ACP-transport MCP
+//! server to an agent advertising the `mcp.acp` capability, which Bee's real
+//! agent does not until MCP is integrated.
 
 use agent_client_protocol::mcp_server::McpServer;
 use agent_client_protocol::schema::{ProtocolVersion, v2};

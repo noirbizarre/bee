@@ -28,8 +28,12 @@ loop and LLM provider integration, allowing it to work with any compatible ACPv2
 ## Status
 
 Bee is at the **bootstrap stage**. The repository, tooling, CI and release automation are in place, and the `bee`
-binary serves ACPv2 over stdio: a client can start it and complete the `initialize` handshake. That is all it does.
-Bee advertises no capabilities, and there are no sessions, no agentic loop and no LLM provider integration yet.
+binary serves ACPv2 over stdio: a client can start it, complete the `initialize` handshake, create sessions and submit
+prompts. Bee advertises the baseline session lifecycle (`session/new`, `list`, `resume`, `close`, `prompt`, `cancel`).
+
+**No LLM is integrated yet.** Every prompt is answered with the same fixed placeholder message, which is temporary and
+will be replaced by the agentic loop and a provider integration. Cancellation does nothing yet, because the placeholder
+turn finishes immediately, and `session/resume` cannot replay history. There is no agentic loop either.
 
 The "Scope" and "Non-goals" sections describe the intended design, not current behaviour.
 

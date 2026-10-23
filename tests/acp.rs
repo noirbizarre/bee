@@ -1,7 +1,8 @@
 //! The ACPv2 SDK integration, exercised in-process.
 //!
-//! A subprocess stdio test needs the binary to speak ACP, which is a later
-//! step; the SDK's in-memory transport covers the same `initialize` exchange.
+//! The SDK's in-memory transport covers the `initialize` exchange and the
+//! transport seam without a subprocess; `stdio.rs` covers the binary and
+//! `session.rs` the session lifecycle.
 
 use agent_client_protocol::schema::{ProtocolVersion, v2};
 use agent_client_protocol::{Client, Error};
@@ -27,7 +28,7 @@ async fn a_v2_client_can_initialize_the_bee_agent_in_process() -> Result<(), Err
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn the_bee_agent_does_not_advertise_sessions_it_cannot_serve() -> Result<(), Error> {
+async fn the_bee_agent_advertises_only_the_baseline_session_capability() -> Result<(), Error> {
     Client
         .v2()
         .connect_with(bee::acp::agent(), async |connection| {
@@ -39,7 +40,16 @@ async fn the_bee_agent_does_not_advertise_sessions_it_cannot_serve() -> Result<(
                 .block_task()
                 .await?;
 
-            assert!(response.capabilities.session.is_none());
+            // Each extra capability is a promise a client acts on, and none is
+            // implemented: an extension must be added here with its code.
+            let session = response
+                .capabilities
+                .session
+                .expect("the session lifecycle is implemented");
+            assert!(session.prompt.is_none());
+            assert!(session.mcp.is_none());
+            assert!(session.delete.is_none());
+            assert!(session.additional_directories.is_none());
             Ok(())
         })
         .await

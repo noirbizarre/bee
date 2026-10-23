@@ -14,9 +14,11 @@ ACPv2 client-agent contract. Do not propose a TUI, a web frontend, a plugin
 framework or a provider abstraction ahead of a concrete need.
 
 The repository is at the bootstrap stage: Bee serves ACPv2 over stdio and
-answers `initialize`, advertising no capabilities. Sessions, the agentic loop
-and provider integrations are planned, not implemented. Documentation must keep
-saying so until that changes.
+implements the baseline session lifecycle (new, list, resume, close, prompt,
+cancel), answering every prompt with a fixed placeholder. The agentic loop,
+real cancellation and provider integrations are planned, not implemented.
+Documentation must keep saying that the placeholder reply is temporary and that
+no LLM is integrated, until that changes.
 
 ## Non-negotiable invariants
 
@@ -40,17 +42,18 @@ src/
 ├── main.rs     the bee binary
 ├── acp.rs      the ACPv2 boundary: the only module that imports the SDK;
 │               the agent core, and `serve` over any transport
+├── session.rs  session state, free of the SDK
 ├── cli.rs      argument types only
 └── error.rs    the crate's error type
 tests/
 ├── cli.rs      the binary's observable contract
 ├── stdio.rs    the stdio transport, through the real binary
 ├── acp.rs      the agent core, in-process
+├── session.rs  the session and prompt lifecycle, in-process
 └── mcp.rs      the MCP-over-ACP spike (ADR-002)
 ```
 
-New modules for the ACPv2 protocol, the agent loop, providers, sessions and
-configuration are added when the code that needs them is, not before.
+New modules for the agent loop, providers and configuration are added when the code that needs them is, not before.
 
 Dependencies point inward. Nothing in the library knows a command exists.
 

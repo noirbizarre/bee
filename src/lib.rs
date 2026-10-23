@@ -13,6 +13,7 @@
 
 pub mod acp;
 pub mod error;
+pub mod session;
 
 pub use error::{Error, Result};
 
