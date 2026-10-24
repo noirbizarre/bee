@@ -267,6 +267,11 @@ fn open_browser(url: &str) {
         .spawn();
 }
 
+// Share the fake with integration tests so command tests need no Unix file permissions.
+#[cfg(test)]
+#[path = "../tests/support/credential_store.rs"]
+mod test_store;
+
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
@@ -277,6 +282,7 @@ mod tests {
     use bee::config::project_config_path;
     use bee::http::{HttpResponse, Unreachable};
 
+    use super::test_store::MemoryStore;
     use super::*;
 
     const KEY: &str = "sk-or-test-key";
@@ -294,8 +300,8 @@ mod tests {
     }
 
     struct Fixture {
-        dir: tempfile::TempDir,
         providers: Providers,
+        store: MemoryStore,
     }
 
     impl Fixture {
@@ -311,11 +317,14 @@ mod tests {
             .unwrap();
             let env = Environment::new(None, Some(dir.path().join("home")), None);
             let providers = Providers::from_config(&Config::load(&env, &project).unwrap()).unwrap();
-            Self { dir, providers }
+            Self {
+                providers,
+                store: MemoryStore::default(),
+            }
         }
 
-        fn store(&self) -> FileStore {
-            FileStore::new(self.dir.path().join("credentials.json"))
+        fn store(&self) -> &MemoryStore {
+            &self.store
         }
 
         /// Run `bee auth login` and return what it wrote to stderr.
@@ -329,7 +338,7 @@ mod tests {
                 &mut Context {
                     env: &env,
                     providers: &self.providers,
-                    store: &store,
+                    store,
                     http: &KeyGiver,
                     timeout: Duration::from_secs(5),
                     open,
@@ -418,7 +427,7 @@ mod tests {
             &mut Context {
                 env: &env,
                 providers: &fixture.providers,
-                store: &store,
+                store,
                 http: &KeyGiver,
                 timeout: Duration::from_millis(100),
                 open: &open,

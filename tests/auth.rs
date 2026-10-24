@@ -2,7 +2,7 @@
 //! in-process.
 //!
 //! Nothing here touches the network or the developer's own files: the
-//! environment is described by value, the store lives in a temporary
+//! environment is described by value, stores are in memory or a temporary
 //! directory, HTTP is a fake and "the browser" is a thread talking to the
 //! loopback listener.
 
@@ -26,6 +26,10 @@ use bee::provider::{Profile, Protocol, Providers};
 use pretty_assertions::assert_eq;
 use rstest::rstest;
 use tempfile::TempDir;
+
+#[path = "support/credential_store.rs"]
+mod test_store;
+use test_store::MemoryStore;
 
 /// A secret that must never appear in any diagnostic or debug output.
 const SECRET: &str = "sk-super-secret-token";
@@ -641,7 +645,7 @@ fn an_unset_or_empty_variable_is_a_missing_credential(#[case] value: Option<&str
 fn a_stored_credential_is_found_after_a_login() {
     let sandbox = Sandbox::new();
     let providers = sandbox.providers(STORED);
-    let store = sandbox.store();
+    let store = MemoryStore::default();
     auth::store_secret(
         profile(&providers, "token"),
         &format!("  {SECRET}\n"),
@@ -668,7 +672,7 @@ fn a_stored_credential_that_is_absent_points_at_the_login_command() {
     let error = auth::resolve(
         profile(&providers, "token"),
         &sandbox.env(),
-        &sandbox.store(),
+        &MemoryStore::default(),
         0,
     )
     .unwrap_err();
@@ -682,7 +686,7 @@ fn a_stored_credential_that_is_absent_points_at_the_login_command() {
 fn an_expired_credential_is_not_used() {
     let sandbox = Sandbox::new();
     let providers = sandbox.providers(STORED);
-    let store = sandbox.store();
+    let store = MemoryStore::default();
     store
         .put(
             Audience::Provider("or"),
@@ -744,7 +748,7 @@ fn a_blank_token_is_refused_and_stores_nothing() {
 fn status_reports_where_each_credential_stands_without_revealing_any() {
     let sandbox = Sandbox::new();
     let providers = sandbox.providers(STORED);
-    let store = sandbox.store();
+    let store = MemoryStore::default();
     auth::store_secret(profile(&providers, "token"), SECRET, &store).unwrap();
     let env = sandbox.env().with_variable("BEE_TEST_KEY", SECRET);
 
@@ -779,6 +783,30 @@ fn status_reports_where_each_credential_stands_without_revealing_any() {
 }
 
 // ---- the store ------------------------------------------------------------------
+
+#[cfg(not(unix))]
+#[test]
+fn an_unsupported_file_store_refuses_every_operation_without_touching_the_file() {
+    let sandbox = Sandbox::new();
+    let path = sandbox.store_path();
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, SECRET).unwrap();
+    let store = sandbox.store();
+    let audience = Audience::Provider("token");
+
+    for error in [
+        store.get(audience).unwrap_err(),
+        store
+            .put(audience, &Credential::new(Secret::new(SECRET)))
+            .unwrap_err(),
+        store.remove(audience).unwrap_err(),
+    ] {
+        assert!(matches!(error, Error::AuthStoreUnsupported));
+        let text = rendered(error);
+        assert!(!text.contains(SECRET), "{text}");
+    }
+    assert_eq!(fs::read_to_string(path).unwrap(), SECRET);
+}
 
 #[cfg(unix)]
 mod file_store {

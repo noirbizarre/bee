@@ -161,6 +161,8 @@ fn configured() -> tempfile::TempDir {
     dir
 }
 
+// These commands exercise the real private-file store, which is Unix-only.
+#[cfg(unix)]
 #[test]
 fn a_token_can_be_stored_checked_and_forgotten_without_it_ever_being_printed() {
     let dir = configured();
@@ -207,6 +209,7 @@ fn a_token_can_be_stored_checked_and_forgotten_without_it_ever_being_printed() {
         .stdout(predicate::str::contains("no stored credential"));
 }
 
+#[cfg(unix)]
 #[test]
 fn status_lists_every_profile_and_the_state_of_its_environment_variable() {
     let dir = configured();
@@ -227,6 +230,54 @@ fn status_lists_every_profile_and_the_state_of_its_environment_variable() {
         .assert()
         .success()
         .stdout(predicate::str::contains("is NOT set"));
+}
+
+#[test]
+fn environment_credential_status_needs_no_file_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join(".config/bee.toml");
+    std::fs::create_dir_all(project.parent().unwrap()).unwrap();
+    // Exclude stored profiles: status checks every configured profile's source.
+    std::fs::write(
+        project,
+        "[providers.env]\nprotocols = { openai-chat = {} }\ncredential = { env = \"BEE_TEST_KEY\" }\n",
+    )
+    .unwrap();
+
+    isolated(dir.path())
+        .env("BEE_TEST_KEY", SECRET)
+        .args(["auth", "status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("`BEE_TEST_KEY` is set"))
+        .stdout(predicate::str::contains(SECRET).not());
+    isolated(dir.path())
+        .args(["auth", "status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("is NOT set"));
+    assert!(!dir.path().join("data/bee/credentials.json").exists());
+}
+
+#[cfg(not(unix))]
+#[test]
+fn file_store_commands_report_unsupported_storage_without_exposing_the_token() {
+    let dir = configured();
+    for args in [
+        vec!["auth", "login", "stored", "--with-token"],
+        vec!["auth", "logout", "stored"],
+        vec!["auth", "status"],
+    ] {
+        isolated(dir.path())
+            .args(args)
+            .write_stdin(format!("{SECRET}\n"))
+            .assert()
+            .failure()
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::contains("bee::auth::store_unsupported"))
+            .stderr(predicate::str::contains(SECRET).not());
+    }
+    assert!(!dir.path().join("data").exists());
 }
 
 #[test]
