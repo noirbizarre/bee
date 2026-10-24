@@ -56,11 +56,11 @@ fn invalid_inherited_model_mappings_name_the_file_that_supplied_the_entry() {
         "[providers.p]\npreset='gateway'",
     );
     let error = sandbox.providers().unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains(&sandbox.global().display().to_string())
-    );
+    let Error::ProviderInvalid { path, .. } = &error else {
+        panic!("expected an invalid mapping, got {error:?}");
+    };
+    // Windows accepts both separators; compare paths rather than rendered text.
+    assert_eq!(Path::new(path), sandbox.global());
     assert!(!format!("{error} {error:?}").contains(SECRET));
 }
 

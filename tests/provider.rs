@@ -148,11 +148,11 @@ fn layered_model_mappings_merge_literal_ids_and_preserve_entry_origins() {
     let config = Config::load(&env, &sandbox.project_dir()).unwrap();
     assert!(!format!("{config:?}").contains(SECRET));
     let error = Providers::from_config(&config).unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains(&sandbox.global().display().to_string())
-    );
+    let Error::ProviderInvalid { path, .. } = &error else {
+        panic!("expected an invalid mapping, got {error:?}");
+    };
+    // Windows accepts both separators; compare paths rather than rendered text.
+    assert_eq!(Path::new(path), sandbox.global());
     assert!(!format!("{error:?}").contains(SECRET));
     sandbox.write(
         &sandbox.project(),
