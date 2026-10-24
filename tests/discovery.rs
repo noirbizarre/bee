@@ -206,7 +206,8 @@ async fn symlinks_are_reported_without_recursive_traversal() {
     }
 }
 
-#[cfg(unix)]
+// macOS filesystems reject this fixture at creation with an illegal byte sequence.
+#[cfg(all(unix, not(target_os = "macos")))]
 #[tokio::test]
 async fn ambiguous_non_utf8_names_are_rejected_without_lossy_results() {
     use std::os::unix::ffi::OsStringExt;
