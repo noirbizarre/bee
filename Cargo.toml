@@ -110,7 +110,7 @@ futures = { version = "0.3", default-features = false, features = ["std", "execu
 
 # Model streams must yield while waiting for I/O so ACP cancellation can run.
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream", "json"] }
-tokio = { version = "1", features = ["rt", "net", "time", "sync", "macros"] }
+tokio = { version = "1", features = ["rt", "net", "time", "sync", "macros", "process", "io-util"] }
 # Native tools expose cooperative cancellation as well as future-drop cancellation.
 tokio-util = { version = "0.7", features = ["rt"] }
 # Typed native inputs advertise the same schema that is enforced at dispatch.
@@ -144,6 +144,10 @@ getrandom = "0.4"
 # over `Value`, never derived: serde's error text quotes the offending value, and
 # this file is where keys live (the reason `provider.rs` avoids it for TOML).
 serde_json = "1"
+
+[target.'cfg(unix)'.dependencies]
+# Safe process-group signaling keeps cancellation cleanup synchronous on drop.
+nix = { version = "0.30", default-features = false, features = ["signal", "process"] }
 
 [dev-dependencies]
 # The client side of the MCP-over-ACP spike (tests/mcp.rs, ADR-002). The SDK core

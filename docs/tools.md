@@ -3,10 +3,84 @@
 Bee's SDK-free `tool` module defines typed native operations, their advertised
 schemas, and their execution context. `agent::NativeExecutor` connects a registry
 to the bounded inference loop. Normal ACP sessions advertise and execute the
-shipped `read`, `glob`, `list`, `write`, and `edit` tools. Their execution base is the session cwd,
+shipped `bash`, `read`, `glob`, `list`, `write`, and `edit` tools. Their execution base is the session cwd,
 not the launch directory used to load configuration.
 
 ## Implement and register a tool
+
+### Built-in Bash execution
+
+`bash` runs project commands such as tests, builds, and formatters. Input requires
+nonempty `command`; optional positive `timeout_ms` and `output_limit` select limits
+within the host's ceilings. Unknown fields and NUL in commands are rejected.
+For example, `{"command":"cargo test","timeout_ms":60000}` runs tests in the
+session directory without changing Bee's own working directory.
+
+Bee starts `bash --noprofile --norc -c <command>` with no interactive input or PTY.
+Stdin is EOF, stdout and stderr are separately captured, and `BASH_ENV` is removed
+to prevent noninteractive startup-script injection. The remaining environment is
+inherited. Bash must be installed, including on Windows; Bee does not substitute
+another shell or translate command syntax.
+
+Configure policy in the normal layered launch-time configuration:
+
+```toml
+[tools.bash]
+shell = "bash"                  # executable on PATH, or an absolute executable path
+timeout_ms = 120000              # default deadline, milliseconds
+max_timeout_ms = 600000          # per-call ceiling
+output_limit = 65536             # default complete serialized result budget
+max_output_limit = 1048576       # per-call ceiling, at most 1 MiB
+```
+
+These are the defaults. Defaults must not exceed their ceilings; output budgets
+must be between 256 and 1048576 bytes. Call overrides can increase defaults up to
+the ceilings or request smaller limits. The execution context's output budget is
+an additional ceiling. Invalid policy fails startup with `bee::bash::setting`,
+identifying the setting and source file without exposing its value. Policy is
+loaded once at launch, while commands use the session cwd.
+
+Completed commands return structured data, for example:
+
+```json
+{"data":{"stdout":"ok\n","stderr":"","exit_code":0,"signal":null,"timed_out":false,"stdout_truncated":false,"stderr_truncated":false}}
+```
+
+Nonzero exits retain streams and actual exit codes as normal structured results;
+a missing command normally returns Bash's exit 127 and explanatory stderr. Failure
+to launch Bash or access the working directory is instead an actionable tool
+error. Unix signal termination has a null `exit_code` and a numeric `signal`;
+other platforms return a null signal.
+
+Both pipes drain concurrently with bounded storage. Capture retains prefixes,
+decodes bytes as lossy UTF-8, and marks each truncated stream. Metadata and JSON
+escaping count against the complete result budget. Remaining capacity is divided
+equally between streams with a conservative escaping allowance, so retained text
+can be substantially smaller than the byte budget. Excess output is discarded
+while execution continues under its timeout. Binary output can contain replacement
+characters; this tool does not provide byte-exact binary capture.
+
+A deadline terminates the command and returns `timed_out: true`, partial captured
+output, and the available termination status. Both truncation flags are set when
+timeout prevents complete capture. Cancellation aborts the turn using Bee's normal
+cancelled-turn contract, rather than returning a model-facing command result.
+
+On Unix, commands run in a new process group. Timeout, cancellation, future drop,
+and foreground-shell completion kill remaining processes in that group. Descendants
+that deliberately move to another group/session can escape this cleanup; the
+deadline still bounds waiting on inherited pipes. On other platforms, Bee terminates
+the direct shell process, without a descendant-tree guarantee. Normal and timeout
+paths await the shell for reaping; immediate future drop initiates termination
+synchronously and uses Tokio's best-effort background reaping.
+
+Commands execute with Bee's **host user privileges**. A working directory is a
+starting point, **not a sandbox**: commands can access files outside cwd, network
+resources, and inherited environment credentials. Captured output is sent to the
+model. Cancellation and timeout cannot undo filesystem or network side effects.
+
+Embedders can register `bee::tool::bash::Bash::default()` or construct `Bash::new`
+with `Settings::from_config`. `tool::builtins_with_bash(settings)` composes the
+complete shipped catalog with that policy for `acp::Runtime::new`.
 
 ### Built-in file reading
 

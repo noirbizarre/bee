@@ -56,6 +56,22 @@ fn isolated(dir: &std::path::Path) -> Command {
 const SECRET: &str = "sk-super-secret-token";
 
 #[test]
+fn invalid_bash_policy_fails_before_protocol_output_without_echoing_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("selected.toml");
+    std::fs::write(&file, format!("[tools.bash]\ntimeout_ms = '{SECRET}'")).unwrap();
+    isolated(dir.path())
+        .env("BEE_CONFIG", &file)
+        .write_stdin("")
+        .assert()
+        .failure()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("bee::bash::setting"))
+        .stderr(predicate::str::contains("tools.bash.timeout_ms"))
+        .stderr(predicate::str::contains(SECRET).not());
+}
+
+#[test]
 fn invalid_agent_limits_fail_before_protocol_output_without_echoing_values() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("selected.toml");

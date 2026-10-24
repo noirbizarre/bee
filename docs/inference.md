@@ -59,7 +59,8 @@ portable text and drops protocol-specific continuation. This does not implement 
 The SDK-free `agent::run` accepts tool definitions and an injected `Executor`, with correlated call/result history.
 The [native tool contract](tools.md) provides typed schema validation, registration, bounded results, and
 `agent::NativeExecutor` for this seam.
-Normal ACP sessions advertise and execute the shipped `read`, `glob`, `list`, `write`, and `edit` tools through this
+Normal ACP sessions advertise and execute the shipped `bash`, `read`, `glob`, `list`, `write`, and `edit` tools
+through this
 same interface.
 They resolve relative paths against the session cwd, while configuration is loaded from the launch directory.
 Cancelling or closing a session drops pending inference and tool futures and signals native-tool cancellation tokens.
