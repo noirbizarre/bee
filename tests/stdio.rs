@@ -38,7 +38,7 @@ impl Agent {
         let isolated = tempfile::tempdir().expect("a temp directory").keep();
         let path = bee::config::project_config_path(&isolated);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, config).unwrap();
+        std::fs::write(path, support::native_bash_config(config)).unwrap();
         let mut child = Command::new(env!("CARGO_BIN_EXE_bee"))
             .env("HOME", &isolated)
             .env("XDG_CONFIG_HOME", isolated.join("xdg"))
@@ -133,6 +133,42 @@ impl Agent {
 }
 
 #[test]
+fn bash_output_is_captured_without_corrupting_the_protocol_stream() {
+    let server = support::Server::start(vec![
+        support::Response::json(
+            // Use only shell builtins so the Windows direct-child guarantee is sufficient.
+            json!({"choices":[{"index":0,"message":{"tool_calls":[{"id":"bash-call","type":"function","function":{"name":"bash","arguments":"{\"command\":\"printf child-stdout; printf child-stderr >&2; while :; do :; done\"}"}}]},"finish_reason":"tool_calls"}]}),
+        ),
+        support::Response::json(
+            json!({"choices":[{"index":0,"message":{"content":"done"},"finish_reason":"stop"}]}),
+        ),
+    ]);
+    let mut agent = Agent::configured(&format!(
+        "[tools.bash]\ntimeout_ms=1000\n[providers.test]\nmodel='test'\n[providers.test.protocols.openai-chat]\nbase_url='{}'",
+        server.url
+    ));
+    agent.initialize(1);
+    agent.send(&json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":std::env::temp_dir()}}));
+    let session = agent.recv()["result"]["sessionId"].clone();
+    agent.send(&json!({"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"text","text":"run"}]}}));
+    loop {
+        // recv parses every stdout line, including any accidental child output.
+        let message = agent.recv();
+        if message["params"]["update"]["state"] == "idle" {
+            break;
+        }
+    }
+    server.request();
+    let result = server.request().body["messages"].to_string();
+    assert!(result.contains("child-stdout"));
+    assert!(result.contains("child-stderr"));
+    assert!(result.contains("timed_out"));
+    let (status, stderr) = agent.finish();
+    assert!(status.success());
+    assert!(stderr.is_empty());
+}
+
+#[test]
 fn configured_turn_limits_reach_real_stdio_inference() {
     let server = support::Server::start(vec![support::Response::json(
         json!({"choices":[{"index":0,"message":{"tool_calls":[{"id":"a","type":"function","function":{"name":"list","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}),
@@ -165,7 +201,7 @@ fn configured_turn_limits_reach_real_stdio_inference() {
         .iter()
         .map(|tool| tool["function"]["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, ["edit", "glob", "list", "read", "write"]);
+    assert_eq!(names, ["bash", "edit", "glob", "list", "read", "write"]);
     server.assert_no_more_requests();
     let (status, stderr) = agent.finish();
     assert!(status.success());

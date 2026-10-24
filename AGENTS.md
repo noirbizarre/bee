@@ -19,7 +19,7 @@ and Anthropic Messages inference. Successful context is retained in memory, with
 context windows, approximate token accounting and transactional oldest-whole-turn truncation; failed/cancelled/refused
 turns are excluded, and ACP replay remains unsupported. The SDK-free bounded
 loop supports configurable turn limits and injected tool executors; production ACP
-registers the native read, glob, list, write and edit tools with session-relative execution contexts.
+registers the native bash, read, glob, list, write and edit tools with session-relative execution contexts.
 Each native backend preserves its own continuation and tool-result semantics.
 
 ## Non-negotiable invariants

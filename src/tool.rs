@@ -14,6 +14,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
+pub mod bash;
 mod discovery;
 pub mod edit;
 mod fs;
@@ -30,7 +31,13 @@ pub const MIN_OUTPUT_BYTES: usize = 256;
 
 /// Compose shipped tools once, keeping registration outside the inference loop.
 pub fn builtins() -> Result<Registry, Error> {
+    builtins_with_bash(bash::Settings::default())
+}
+
+/// Compose shipped tools with an explicitly validated Bash execution policy.
+pub fn builtins_with_bash(settings: bash::Settings) -> Result<Registry, Error> {
     let mut registry = Registry::default();
+    registry.register(bash::Bash::new(settings))?;
     registry.register(read::Read)?;
     registry.register(glob::Glob)?;
     registry.register(list::List)?;

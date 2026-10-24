@@ -17,6 +17,19 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, Error, Diagnostic)]
 #[non_exhaustive]
 pub enum Error {
+    /// Invalid Bash policy; configuration values never enter diagnostics.
+    #[error("Bash setting `{key}` in `{path}` {reason}")]
+    #[diagnostic(code(bee::bash::setting), help("{instruction}"))]
+    BashSetting {
+        /// Known setting requiring correction.
+        key: String,
+        /// Source file, never its contents.
+        path: String,
+        /// Safe failure classification.
+        reason: &'static str,
+        /// Actionable correction.
+        instruction: &'static str,
+    },
     /// Invalid runtime policy; values are deliberately excluded from diagnostics.
     #[error("agent setting `{key}` in `{path}` {reason}")]
     #[diagnostic(code(bee::agent::setting), help("{instruction}"))]

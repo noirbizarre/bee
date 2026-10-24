@@ -285,12 +285,21 @@ async fn acp_executes_shipped_tools_in_the_session_directory_and_retains_results
             "read",
             json!({"path":"created.txt"}),
         )),
+        Response::json(native_call(
+            protocol,
+            "g",
+            "bash",
+            json!({"command":"printf '%s' \"$(<created.txt)\"; printf bash-stderr >&2; exit 7"}),
+        )),
         Response::json(answer(protocol, "done")),
         Response::json(answer(protocol, "remembered")),
     ]);
     native_turns(
         providers(protocol, &server.url, ""),
-        bee::acp::Runtime::builtins(bee::agent::Limits::default()).unwrap(),
+        bee::acp::Runtime::new(
+            bee::agent::Limits::default(),
+            bee::tool::builtins_with_bash(support::bash_settings()).unwrap(),
+        ),
         vec![(root.path().into(), vec![true, true])],
     )
     .await;
@@ -307,7 +316,7 @@ async fn acp_executes_shipped_tools_in_the_session_directory_and_retains_results
             }
         })
         .collect();
-    assert_eq!(names, ["edit", "glob", "list", "read", "write"]);
+    assert_eq!(names, ["bash", "edit", "glob", "list", "read", "write"]);
     for id in ["a", "b"] {
         let body = server.request().body.to_string();
         assert!(body.contains("note.txt"));
@@ -327,6 +336,11 @@ async fn acp_executes_shipped_tools_in_the_session_directory_and_retains_results
     }
     let final_request = server.request();
     assert!(final_request.body.to_string().contains("after-edit"));
+    let bash_result = server.request().body.to_string();
+    assert!(bash_result.contains("after-edit"));
+    assert!(bash_result.contains("bash-stderr"));
+    assert!(bash_result.contains("exit_code"));
+    assert!(bash_result.contains('g'));
     let next = server.request();
     assert!(next.body.to_string().contains("session-specific-content"));
     assert!(next.body.to_string().contains("after-edit"));
@@ -484,12 +498,27 @@ impl bee::tool::Tool for PendingNative {
 }
 
 #[rstest::rstest]
-#[case::cancel(false)]
-#[case::close_and_resume(true)]
+#[case::cancel(false, false)]
+#[case::close_and_resume(true, false)]
+#[cfg_attr(unix, case::bash_cancel(false, true))]
+#[cfg_attr(unix, case::bash_close_and_resume(true, true))]
 #[tokio::test]
-async fn acp_cancellation_drops_native_work_and_allows_a_clean_replacement(#[case] close: bool) {
+async fn acp_cancellation_drops_native_work_and_allows_a_clean_replacement(
+    #[case] close: bool,
+    #[case] bash: bool,
+) {
+    let root = tempfile::tempdir().unwrap();
     let server = Server::start(vec![
-        Response::json(native_call("openai-chat", "a", "pending", json!({}))),
+        Response::json(native_call(
+            "openai-chat",
+            "a",
+            if bash { "bash" } else { "pending" },
+            if bash {
+                json!({"command":"(printf ready > ready; sleep 0.4; printf leaked > leaked) & wait"})
+            } else {
+                json!({})
+            },
+        )),
         Response::json(chat_text("replacement")),
     ]);
     let (started, mut starts) = tokio::sync::mpsc::unbounded_channel();
@@ -501,6 +530,9 @@ async fn acp_cancellation_drops_native_work_and_allows_a_clean_replacement(#[cas
             dropped: dropped.clone(),
         })
         .unwrap();
+    if bash {
+        registry.register(bee::tool::bash::Bash::default()).unwrap();
+    }
     let runtime = bee::acp::Runtime::new(bee::agent::Limits::default(), registry);
     let (tx, mut updates) = tokio::sync::mpsc::unbounded_channel();
     let client = Client.v2().on_receive_notification(
@@ -522,7 +554,7 @@ async fn acp_cancellation_drops_native_work_and_allows_a_clean_replacement(#[cas
                     ))
                     .block_task()
                     .await?;
-                let cwd = std::env::temp_dir();
+                let cwd = root.path().to_path_buf();
                 let session = connection
                     .send_request(v2::NewSessionRequest::new(cwd.clone()))
                     .block_task()
@@ -536,8 +568,16 @@ async fn acp_cancellation_drops_native_work_and_allows_a_clean_replacement(#[cas
                     .block_task()
                     .await?;
                 // Wait for actual native execution, not just HTTP acceptance.
-                let token = starts.recv().await.unwrap();
-                assert!(!token.is_cancelled());
+                let token = if bash {
+                    while !root.path().join("ready").exists() {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                    None
+                } else {
+                    let token = starts.recv().await.unwrap();
+                    assert!(!token.is_cancelled());
+                    Some(token)
+                };
                 if close {
                     connection
                         .send_request(v2::CloseSessionRequest::new(session.clone()))
@@ -560,8 +600,13 @@ async fn acp_cancellation_drops_native_work_and_allows_a_clean_replacement(#[cas
                         break;
                     }
                 }
-                token.cancelled().await;
-                assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
+                if let Some(token) = token {
+                    token.cancelled().await;
+                    assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
+                } else {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    assert!(!root.path().join("leaked").exists());
+                }
                 if close {
                     connection
                         .send_request(v2::ResumeSessionRequest::new(session.clone(), cwd))

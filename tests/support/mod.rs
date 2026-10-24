@@ -12,6 +12,37 @@ use bee::config::{Config, Environment, project_config_path};
 use bee::provider::{Profile, Providers};
 use serde_json::{Value, json};
 
+/// Select native Git Bash explicitly on Windows, where PATH may prefer WSL.
+pub fn native_bash_config(text: &str) -> String {
+    #[cfg(windows)]
+    {
+        let shell = std::path::PathBuf::from(std::env::var_os("ProgramFiles").unwrap())
+            // bin/bash.exe is a launcher; direct-child termination must own Bash itself.
+            .join("Git/usr/bin/bash.exe");
+        assert!(
+            shell.is_file(),
+            "the Windows test host must have Git Bash installed"
+        );
+        let setting = format!("shell = '{}'\n", shell.display());
+        if text.contains("[tools.bash]") {
+            text.replacen("[tools.bash]", &format!("[tools.bash]\n{setting}"), 1)
+        } else {
+            format!("{text}\n[tools.bash]\n{setting}")
+        }
+    }
+    #[cfg(not(windows))]
+    text.into()
+}
+
+/// Exercise the host's native Bash without changing process-global PATH.
+pub fn bash_settings() -> bee::tool::bash::Settings {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("bash.toml");
+    std::fs::write(&path, native_bash_config("")).unwrap();
+    let config = Config::load(&Environment::new(None, None, Some(path)), root.path()).unwrap();
+    bee::tool::bash::Settings::from_config(&config).unwrap()
+}
+
 pub struct Response {
     pub status: u16,
     pub kind: &'static str,
