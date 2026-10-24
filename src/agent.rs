@@ -23,6 +23,58 @@ pub trait Executor: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<ToolResult, Error>> + Send + 'a>>;
 }
 
+/// Bind a registered native-tool catalog to one session/turn's execution context.
+///
+/// Obtain advertised definitions from this same adapter so dispatch and the
+/// model's catalog cannot accidentally use different registries.
+pub struct NativeExecutor<'a> {
+    registry: &'a crate::tool::Registry,
+    context: crate::tool::Context,
+}
+
+impl<'a> NativeExecutor<'a> {
+    /// Bind tools to an explicit session directory, cancellation, and byte budget.
+    pub fn new(registry: &'a crate::tool::Registry, context: crate::tool::Context) -> Self {
+        Self { registry, context }
+    }
+
+    /// Convert the registered catalog to provider-neutral inference definitions.
+    pub fn definitions(&self) -> Vec<Tool> {
+        self.registry
+            .definitions()
+            .map(|definition| Tool {
+                name: definition.name.clone(),
+                description: definition.description.clone(),
+                parameters: definition.input_schema.clone(),
+            })
+            .collect()
+    }
+}
+
+impl Executor for NativeExecutor<'_> {
+    fn execute<'a>(
+        &'a self,
+        call: &'a Call,
+    ) -> Pin<Box<dyn Future<Output = Result<ToolResult, Error>> + Send + 'a>> {
+        Box::pin(async move {
+            let result = self
+                .registry
+                .invoke(&call.name, &call.arguments, &self.context)
+                .await
+                .map_err(|error| match error {
+                    crate::tool::Error::Cancelled => Error::Cancelled,
+                    // Registration/context errors cannot arise during invocation;
+                    // keep this boundary classified if the contract later grows.
+                    _ => Error::Tool,
+                })?;
+            Ok(ToolResult {
+                output: result.json,
+                is_error: result.is_error,
+            })
+        })
+    }
+}
+
 /// Successful turn additions, committed by the caller only if still current.
 #[derive(Debug)]
 pub struct Outcome {
@@ -90,7 +142,7 @@ pub async fn run(
         messages.push(step.message);
         for call in calls {
             let result = executor.execute(&call).await?;
-            if result.output.len() > crate::http::MAX_EVENT {
+            if result.output.len() > crate::tool::MAX_OUTPUT_BYTES {
                 return Err(Error::Limit);
             }
             messages.push(Message::Tool {

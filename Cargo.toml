@@ -111,6 +111,13 @@ futures = { version = "0.3", default-features = false, features = ["std", "execu
 # Model streams must yield while waiting for I/O so ACP cancellation can run.
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream", "json"] }
 tokio = { version = "1", features = ["rt", "net", "time", "sync", "macros"] }
+# Native tools expose cooperative cancellation as well as future-drop cancellation.
+tokio-util = { version = "0.7", features = ["rt"] }
+# Typed native inputs advertise the same schema that is enforced at dispatch.
+serde = { version = "1", features = ["derive"] }
+schemars = "1"
+# Schemas are local code, not a reason to fetch URLs or read referenced files.
+jsonschema = { version = "0.60", default-features = false }
 
 # Layered configuration (ADR-006). Only the generic `Table`/`Value` types are
 # used, which sit behind the `serde` feature; `display` (serialization) is not
@@ -133,20 +140,13 @@ getrandom = "0.4"
 # this file is where keys live (the reason `provider.rs` avoids it for TOML).
 serde_json = "1"
 
-# `console`, `demand` and `serde` are deliberately absent: nothing in the
-# library uses them. Add each with the code that needs it (a typed configuration
-# schema will want serde; ACPv2 framing is the SDK's job).
-
 [dev-dependencies]
 # The client side of the MCP-over-ACP spike (tests/mcp.rs, ADR-002). The SDK core
 # has no tool builder, so a test client needs this companion crate to host a tool.
 # Exact pin and the same two features as the SDK, for the same reason: the draft
 # MCP binding may change in a minor release. Dev-only, so Bee itself pulls in no
-# rmcp or schemars.
+# rmcp.
 agent-client-protocol-rmcp = { version = "=4.0.5", features = ["unstable_protocol_v2", "unstable_mcp_over_acp"] }
-# Tool input and output types for `tool_fn` must be serde-able and carry a schema.
-schemars = "1"
-serde = { version = "1", features = ["derive"] }
 assert_cmd = "2"
 predicates = "3"
 tempfile = "3"

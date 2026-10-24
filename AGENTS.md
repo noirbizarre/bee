@@ -57,6 +57,7 @@ src/
 ├── llm.rs      SDK-free inference types, errors and protocol dispatch
 ├── llm/        native wire adapters
 ├── agent.rs    bounded model/tool loop with an injected executor
+├── tool.rs     typed native tools, validation, execution context and registry
 ├── cli.rs      argument types only
 ├── commands.rs what `bee auth` does and prints (binary only)
 └── error.rs    the crate's error type

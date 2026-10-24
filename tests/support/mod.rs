@@ -168,6 +168,56 @@ pub fn tool() -> bee::llm::Tool {
 
 pub struct Echo;
 
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NativeInput {
+    #[schemars(length(min = 1))]
+    text: String,
+}
+
+pub struct NativeEcho;
+
+impl bee::tool::Tool for NativeEcho {
+    type Input = NativeInput;
+    type Output = String;
+
+    fn name(&self) -> &str {
+        "echo"
+    }
+    fn description(&self) -> &str {
+        "Echo nonempty text"
+    }
+
+    async fn execute(
+        &self,
+        input: NativeInput,
+        _: &bee::tool::Context,
+    ) -> Result<String, bee::tool::Failure> {
+        if input.text == "fail" {
+            return Err(bee::tool::Failure::new(
+                bee::tool::Code::Execution,
+                "Choose different text.",
+            ));
+        }
+        Ok(input.text)
+    }
+}
+
+pub fn native_registry() -> bee::tool::Registry {
+    let mut registry = bee::tool::Registry::default();
+    registry.register(NativeEcho).unwrap();
+    registry
+}
+
+pub fn native_context() -> bee::tool::Context {
+    bee::tool::Context::new(
+        "/session/project",
+        tokio_util::sync::CancellationToken::new(),
+        bee::tool::MAX_OUTPUT_BYTES,
+    )
+    .unwrap()
+}
+
 impl bee::agent::Executor for Echo {
     fn execute<'a>(
         &'a self,

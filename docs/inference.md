@@ -34,6 +34,8 @@ refused turns may already have visible text but are excluded from future context
 portable text and drops protocol-specific continuation. This does not implement ACP update replay or disk persistence.
 
 The SDK-free `agent::run` accepts tool definitions and an injected `Executor`, with correlated call/result history.
+The [native tool contract](tools.md) provides typed schema validation, registration, bounded results, and
+`agent::NativeExecutor` for this seam.
 This is exercised against local HTTP servers. **Production ACP does not discover or execute tools yet**: no tool
 definitions are sent, and unsolicited calls fail clearly. Cancelling an injected executor drops its future; an executor
 must cooperate with cancellation, and external side effects cannot be rolled back.
