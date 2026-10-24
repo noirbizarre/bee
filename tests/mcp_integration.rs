@@ -100,11 +100,22 @@ async fn initialize(
 async fn idle(
     updates: &mut tokio::sync::mpsc::UnboundedReceiver<v2::UpdateSessionNotification>,
 ) -> v2::IdleStateUpdate {
+    completion(updates).await.0
+}
+
+async fn completion(
+    updates: &mut tokio::sync::mpsc::UnboundedReceiver<v2::UpdateSessionNotification>,
+) -> (v2::IdleStateUpdate, String) {
+    let mut text = String::new();
     loop {
-        if let v2::SessionUpdate::StateUpdate(v2::StateUpdate::Idle(idle)) =
-            updates.recv().await.unwrap().update
+        let update = updates.recv().await.unwrap().update;
+        if let v2::SessionUpdate::AgentMessageChunk(chunk) = &update
+            && let v2::ContentBlock::Text(content) = &chunk.content
         {
-            return idle;
+            text.push_str(&content.text);
+        }
+        if let v2::SessionUpdate::StateUpdate(v2::StateUpdate::Idle(idle)) = update {
+            return (idle, text);
         }
     }
 }
@@ -171,10 +182,9 @@ async fn production_inference_calls_a_client_hosted_tool_and_retains_its_structu
                         ))
                         .block_task()
                         .await?;
-                    assert_eq!(
-                        idle(&mut updates).await.stop_reason,
-                        Some(v2::StopReason::EndTurn)
-                    );
+                    let (idle, text) = completion(&mut updates).await;
+                    assert_eq!(idle.stop_reason, Some(v2::StopReason::EndTurn));
+                    assert_eq!(text, "done");
                 }
                 Ok(())
             },
@@ -495,9 +505,10 @@ async fn failed_discovery_is_sanitized_and_resume_with_no_servers_recovers(
 #[tokio::test]
 async fn cancellation_drops_pending_mcp_work_without_committing_the_turn(
     #[case] during_call: bool,
+    #[values(false, true)] close: bool,
 ) {
     let mut index = 0;
-    let http = Server::respond(if during_call { 2 } else { 1 }, move |request| {
+    let http = Server::respond(if during_call { 3 } else { 2 }, move |request| {
         index += 1;
         Response::json(if during_call && index == 1 {
             call("openai-chat", &tool_name("openai-chat", &request.body))
@@ -509,10 +520,20 @@ async fn cancellation_drops_pending_mcp_work_without_committing_the_turn(
     let (started, mut pending) = tokio::sync::mpsc::unbounded_channel();
     let release = Arc::new(tokio::sync::Notify::new());
     let gate = Arc::clone(&release);
+    let cancellation = Arc::new(Mutex::new(
+        None::<agent_client_protocol::RequestCancellation>,
+    ));
+    let observed = Arc::clone(&cancellation);
     let client = Client
         .v2()
         .on_receive_notification(
             async move |update: v2::UpdateSessionNotification, _| {
+                if matches!(&update.update, v2::SessionUpdate::StateUpdate(v2::StateUpdate::Idle(idle))
+                    if idle.stop_reason == Some(v2::StopReason::Cancelled)) {
+                    // Client dispatch must see request cancellation before idle,
+                    // rather than merely ignore an eventual late tool result.
+                    assert!(observed.lock().unwrap().as_ref().unwrap().is_cancelled());
+                }
                 tx.send(update).map_err(Error::into_internal_error)
             },
             agent_client_protocol::on_receive_notification!(),
@@ -526,6 +547,7 @@ async fn cancellation_drops_pending_mcp_work_without_committing_the_turn(
                         json!({"tools":[{"name":"echo","inputSchema":{"type":"object"}}]}),
                     ));
                 }
+                *cancellation.lock().unwrap() = Some(responder.cancellation());
                 started.send(()).unwrap();
                 let gate = Arc::clone(&gate);
                 // Leave dispatch free to process cancellation while the remote operation waits.
@@ -567,8 +589,29 @@ async fn cancellation_drops_pending_mcp_work_without_committing_the_turn(
                     .block_task()
                     .await?;
                 pending.recv().await.unwrap();
+                // A blocked client tool must not block another session's inference.
+                let other = connection
+                    .send_request(v2::NewSessionRequest::new(cwd.clone()))
+                    .block_task()
+                    .await?
+                    .session_id;
                 connection
-                    .send_notification(v2::CancelSessionNotification::new(session.clone()))?;
+                    .send_request(v2::PromptRequest::new(other, vec!["independent".into()]))
+                    .block_task()
+                    .await?;
+                assert_eq!(
+                    idle(&mut updates).await.stop_reason,
+                    Some(v2::StopReason::EndTurn)
+                );
+                if close {
+                    connection
+                        .send_request(v2::CloseSessionRequest::new(session.clone()))
+                        .block_task()
+                        .await?;
+                } else {
+                    connection
+                        .send_notification(v2::CancelSessionNotification::new(session.clone()))?;
+                }
                 assert_eq!(
                     idle(&mut updates).await.stop_reason,
                     Some(v2::StopReason::Cancelled)
@@ -602,6 +645,7 @@ async fn cancellation_drops_pending_mcp_work_without_committing_the_turn(
     if during_call {
         http.request();
     }
+    http.request();
     let recovered = http.request().body.to_string();
     assert!(!recovered.contains("cancelled-question"));
     assert!(!recovered.contains("late-result"));

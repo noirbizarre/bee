@@ -22,6 +22,7 @@ Copyright &copy; 2026 Axel H. — MIT licensed
 nav = [
   { "Home" = "index.md" },
   { "Tools" = "tools.md" },
+  { "ACPv2 compatibility" = "compatibility.md" },
   { "Instructions and skills" = "instructions.md" },
   { "About" = [
     { "Architecture Decisions" = "adr/README.md" },

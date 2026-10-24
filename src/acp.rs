@@ -8,6 +8,7 @@
 //! the SDK can connect, and [`serve_stdio`] picks stdin/stdout. A remote
 //! transport later supplies another [`ConnectTo`] and changes nothing else.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::path::Path;
@@ -15,13 +16,18 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use agent_client_protocol::schema::v2;
 use agent_client_protocol::{Agent, Client, ConnectTo, Responder, Stdio, V2ConnectionTo};
-use futures::future::{AbortHandle, AbortRegistration, Abortable, FutureExt};
+use futures::channel::oneshot;
+use futures::future::{AbortHandle, AbortRegistration, Abortable, BoxFuture, FutureExt, Shared};
 
 use crate::provider::Providers;
 use crate::session::{SessionError, Sessions, Settings};
 use crate::{Error, Result};
 
 mod mcp;
+
+// Retain the busy barrier until aborted futures have actually been dropped and
+// their terminal update sent. Session cancellation alone only requests abort.
+type Tasks = Arc<Mutex<BTreeMap<String, Shared<BoxFuture<'static, ()>>>>>;
 
 /// Immutable execution policy and complete native catalog for one connection.
 pub struct Runtime {
@@ -344,6 +350,7 @@ where
     let body = Arc::new(body);
     let sessions = Arc::new(Mutex::new(Sessions::with_providers(providers)));
     let mcp = Arc::new(Mutex::new(mcp::Bindings::default()));
+    let tasks: Tasks = Arc::default();
 
     // `Agent.v2()`, not `Agent.builder()`: the latter is the stable v1 surface.
     Agent
@@ -422,6 +429,7 @@ where
             {
                 let sessions = Arc::clone(&sessions);
                 let mcp = Arc::clone(&mcp);
+                let tasks = Arc::clone(&tasks);
                 async move |request: v2::ResumeSessionRequest,
                             responder: Responder<v2::ResumeSessionResponse>,
                             connection: V2ConnectionTo<Client>| {
@@ -448,11 +456,20 @@ where
                         lock(&mcp).sessions.insert(id.clone(), servers);
                         // The session keeps what the client chose before it
                         // was closed, so the options report that, not the defaults.
+                        let state = if lock(&tasks).contains_key(&id) {
+                            v2::SessionUpdate::StateUpdate(v2::StateUpdate::Running(
+                                v2::RunningStateUpdate::new(),
+                            ))
+                        } else {
+                            idle(None)
+                        };
+                        // Snapshot and send share the session lock so a finishing
+                        // turn cannot send idle before a stale running snapshot.
+                        send_update(&connection, &request.session_id, state)?;
                         config_options(sessions.settings(&id).ok().flatten())
                     };
                     // The protocol requires a current-state snapshot before the
                     // response: the response alone does not imply idle.
-                    send_update(&connection, &request.session_id, idle(None))?;
                     responder.respond(v2::ResumeSessionResponse::new().config_options(options))
                 }
             },
@@ -461,6 +478,7 @@ where
         .on_receive_request(
             {
                 let sessions = Arc::clone(&sessions);
+                let tasks = Arc::clone(&tasks);
                 async move |request: v2::SetSessionConfigOptionRequest,
                             responder: Responder<v2::SetSessionConfigOptionResponse>,
                             _connection: V2ConnectionTo<Client>| {
@@ -477,6 +495,10 @@ where
                     // One guard from the change to the snapshot, so the reply
                     // describes exactly the state this request produced.
                     let mut sessions = lock(&sessions);
+                    if lock(&tasks).contains_key(&id) {
+                        return responder
+                            .respond_with_error(session_error(SessionError::SettingsBusy(id)));
+                    }
                     let changed = match &*request.config_id.to_string() {
                         PROVIDER_OPTION => sessions.set_provider(&id, &value),
                         MODEL_OPTION => sessions.set_model(&id, &value),
@@ -500,31 +522,27 @@ where
             {
                 let sessions = Arc::clone(&sessions);
                 let mcp = Arc::clone(&mcp);
+                let tasks = Arc::clone(&tasks);
                 async move |request: v2::CloseSessionRequest,
                             responder: Responder<v2::CloseSessionResponse>,
                             connection: V2ConnectionTo<Client>| {
-                    // Held until the update is sent: a turn finishing at this
-                    // moment waits here, then finds it was taken and stays silent,
-                    // so the client gets exactly one terminal state.
-                    let mut sessions = lock(&sessions);
-                    match sessions.close(&request.session_id.to_string()) {
-                        Ok(cancelled) => {
-                            lock(&mcp).sessions.remove(&request.session_id.to_string());
-                            if cancelled {
-                                // Closing cancels running work, and the protocol
-                                // wants its `cancelled` idle *before* the close
-                                // response. None for an idle session. A failed
-                                // send means the peer is gone, so the response
-                                // below is moot too.
-                                let _ = send_update(
-                                    &connection,
-                                    &request.session_id,
-                                    idle(Some(v2::StopReason::Cancelled)),
-                                );
-                            }
-                            responder.respond(v2::CloseSessionResponse::new())
+                    let pending = {
+                        let mut sessions = lock(&sessions);
+                        if let Err(error) = sessions.close(&request.session_id.to_string()) {
+                            return responder.respond_with_error(session_error(error));
                         }
-                        Err(error) => responder.respond_with_error(session_error(error)),
+                        lock(&mcp).sessions.remove(&request.session_id.to_string());
+                        lock(&tasks).get(&request.session_id.to_string()).cloned()
+                    };
+                    if let Some(pending) = pending {
+                        // Do not await on dispatch: dropping a pending outgoing
+                        // request may itself need the peer's dispatcher to run.
+                        connection.spawn(async move {
+                            pending.await;
+                            responder.respond(v2::CloseSessionResponse::new())
+                        })
+                    } else {
+                        responder.respond(v2::CloseSessionResponse::new())
                     }
                 }
             },
@@ -534,6 +552,7 @@ where
             {
                 let sessions = Arc::clone(&sessions);
                 let mcp = Arc::clone(&mcp);
+                let tasks = Arc::clone(&tasks);
                 async move |request: v2::PromptRequest,
                             responder: Responder<v2::PromptResponse>,
                             connection: V2ConnectionTo<Client>| {
@@ -551,6 +570,9 @@ where
                     let (abort, registration) = AbortHandle::new_pair();
                     let id = request.session_id.to_string();
                     let mut registry = lock(&sessions);
+                    if lock(&tasks).contains_key(&id) {
+                        return responder.respond_with_error(session_error(SessionError::Busy(id)));
+                    }
                     let turn = match registry.begin_turn(&id, move || abort.abort()) {
                         Ok(turn) => turn,
                         // A prompt refused before insertion is an error
@@ -578,6 +600,15 @@ where
                         lock(&sessions).finish_turn(&id, turn.token);
                         return Err(error);
                     }
+                    let (finished, completion) = oneshot::channel();
+                    lock(&tasks).insert(
+                        id.clone(),
+                        async move {
+                            let _ = completion.await;
+                        }
+                        .boxed()
+                        .shared(),
+                    );
 
                     // Sent from the handler, not the spawned turn, so both
                     // always precede the `idle` of a cancel that arrives next.
@@ -618,7 +649,13 @@ where
                     // only be seen once the turn it should stop had ended. If
                     // the spawn fails the connection is already closing, and
                     // there is nobody left to run the turn for.
-                    let _ = connection.spawn(run_turn(Arc::clone(&body), reply, registration));
+                    let _ = connection.spawn(run_turn(
+                        Arc::clone(&body),
+                        reply,
+                        registration,
+                        Arc::clone(&tasks),
+                        finished,
+                    ));
                     Ok(())
                 }
             },
@@ -628,22 +665,13 @@ where
             {
                 let sessions = Arc::clone(&sessions);
                 async move |notification: v2::CancelSessionNotification,
-                            connection: V2ConnectionTo<Client>| {
-                    // Held until the update is sent, as in `session/close`.
-                    let mut sessions = lock(&sessions);
+                            _connection: V2ConnectionTo<Client>| {
                     // Cancelling an idle or unknown session is not an error: a
                     // notification has no reply to carry one, and the protocol
                     // asks for no update when there was no work to cancel.
-                    if sessions.cancel(&notification.session_id.to_string()) {
-                        // `cancelled`, even though aborting dropped the work
-                        // mid-flight: the protocol forbids reporting that as an
-                        // error, and the client asked for it.
-                        send_update(
-                            &connection,
-                            &notification.session_id,
-                            idle(Some(v2::StopReason::Cancelled)),
-                        )?;
-                    }
+                    // The turn task owns terminal idle, after abort has dropped
+                    // its future and all pending outgoing requests.
+                    lock(&sessions).cancel(&notification.session_id.to_string());
                     Ok(())
                 }
             },
@@ -712,6 +740,8 @@ async fn run_turn<F, Fut>(
     body: Arc<F>,
     reply: Reply,
     registration: AbortRegistration,
+    tasks: Tasks,
+    finished: oneshot::Sender<()>,
 ) -> agent_client_protocol::Result<()>
 where
     F: Fn(Reply) -> Fut + Send + Sync + 'static,
@@ -729,9 +759,7 @@ where
     // covers a body that panics before it returns its future.
     let attempt = AssertUnwindSafe(async move { body(reply).await }).catch_unwind();
     let stop_reason = match Abortable::new(attempt, registration).await {
-        // Cancelled or closed: whoever stopped it already sent the terminal
-        // `idle`, and sending another would be a second one.
-        Err(_aborted) => return Ok(()),
+        Err(_aborted) => v2::StopReason::Cancelled,
         Ok(Ok(Ok(()))) => match lock(&completed).as_ref().map(|outcome| outcome.stop) {
             Some(crate::llm::Stop::MaxTokens) => v2::StopReason::MaxTokens,
             Some(crate::llm::Stop::Refusal) => v2::StopReason::Refusal,
@@ -741,9 +769,9 @@ where
         Ok(Err(_panic)) => failed("the turn panicked; retry or report this failure"),
     };
 
-    // Held across the send, as in `session/cancel`: if a cancel took this turn
-    // in the meantime it reports the terminal state and this stays silent. Never
-    // `end_turn` for a turn the client saw cancelled.
+    // The Abortable has been dropped before taking this lock: cleanup and SDK
+    // request cancellation must happen before terminal idle. A concurrent cancel
+    // can still win against natural completion, but cannot start a replacement.
     let mut sessions = lock(&sessions);
     if let Some(outcome) = lock(&completed).take()
         && outcome.stop != crate::llm::Stop::Refusal
@@ -779,10 +807,16 @@ where
             );
         }
     }
-    if sessions.finish_turn(&id, token) {
-        // A failed send means the peer is gone; there is nobody to tell.
-        let _ = send_update(&connection, &session_id, idle(Some(stop_reason)));
-    }
+    let stop_reason = if sessions.finish_turn(&id, token) {
+        stop_reason
+    } else {
+        v2::StopReason::Cancelled
+    };
+    // Release the busy barrier only after sending idle, under the same session
+    // lock used by prompt acceptance. Close responses await this completion.
+    let _ = send_update(&connection, &session_id, idle(Some(stop_reason)));
+    lock(&tasks).remove(&id);
+    let _ = finished.send(());
     Ok(())
 }
 

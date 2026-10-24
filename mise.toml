@@ -233,3 +233,9 @@ git tpl diff --exit-code --stat
 #
 # Artwork tasks belong here rather than in `default` or `check`: they rewrite
 # committed binaries, so a routine run would dirty the working tree every time.
+
+[tasks."test:compatibility"]
+description = "Run the pinned official ACPv2 TCK with a local fixture provider"
+depends = ["build"]
+raw_args = true
+run = "uv run --no-project python tests/compatibility.py target/debug/bee"

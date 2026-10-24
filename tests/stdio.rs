@@ -23,6 +23,8 @@ struct Agent {
     stdin: Option<ChildStdin>,
     /// Raw stdout lines, in order.
     lines: Receiver<String>,
+    stderr: Option<thread::JoinHandle<String>>,
+    _isolated: tempfile::TempDir,
 }
 
 impl Agent {
@@ -33,17 +35,16 @@ impl Agent {
     fn configured(config: &str) -> Self {
         // An empty directory as home, config home and working directory, so a
         // developer's real configuration (or a malformed one) cannot change
-        // what these tests observe. Leaked deliberately: the child outlives
-        // this function and the OS temp cleaner owns it.
-        let isolated = tempfile::tempdir().expect("a temp directory").keep();
-        let path = bee::config::project_config_path(&isolated);
+        // what these tests observe. Keep it alive until the child is reaped.
+        let isolated = tempfile::tempdir().expect("a temp directory");
+        let path = bee::config::project_config_path(isolated.path());
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, support::native_bash_config(config)).unwrap();
         let mut child = Command::new(env!("CARGO_BIN_EXE_bee"))
-            .env("HOME", &isolated)
-            .env("XDG_CONFIG_HOME", isolated.join("xdg"))
+            .env("HOME", isolated.path())
+            .env("XDG_CONFIG_HOME", isolated.path().join("xdg"))
             .env_remove("BEE_CONFIG")
-            .current_dir(&isolated)
+            .current_dir(isolated.path())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -63,10 +64,27 @@ impl Agent {
         });
 
         let stdin = child.stdin.take();
+        let mut stderr = child.stderr.take().expect("stderr is piped");
+        // Drain while the child runs, so diagnostics cannot fill the pipe and
+        // deadlock protocol progress. Retain only a bounded diagnostic prefix.
+        let stderr = thread::spawn(move || {
+            let mut captured = Vec::new();
+            let mut buffer = [0; 8192];
+            while let Ok(count) = stderr.read(&mut buffer) {
+                if count == 0 {
+                    break;
+                }
+                let keep = count.min((64 * 1024_usize).saturating_sub(captured.len()));
+                captured.extend_from_slice(&buffer[..keep]);
+            }
+            String::from_utf8_lossy(&captured).into_owned()
+        });
         Self {
             child,
             stdin,
             lines,
+            stderr: Some(stderr),
+            _isolated: isolated,
         }
     }
 
@@ -121,15 +139,112 @@ impl Agent {
             thread::sleep(Duration::from_millis(20));
         };
 
-        let mut stderr = String::new();
-        self.child
-            .stderr
-            .take()
-            .expect("stderr is piped")
-            .read_to_string(&mut stderr)
-            .expect("stderr is readable");
+        let stderr = self.stderr.take().unwrap().join().unwrap();
         (status, stderr)
     }
+}
+
+impl Drop for Agent {
+    fn drop(&mut self) {
+        // Assertion failures must not leave a child holding temporary files.
+        drop(self.stdin.take());
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[rstest::rstest]
+#[case::cancel(false)]
+#[case::close(true)]
+fn pending_inference_can_be_stopped_over_stdio_and_the_session_recovers(#[case] close: bool) {
+    let root = tempfile::tempdir().unwrap();
+    let (pending, release) = support::Response::json(support::chat_text("late answer")).gated();
+    let http = support::Server::start(vec![
+        pending,
+        support::Response::json(support::chat_text("recovered")),
+    ]);
+    let mut agent = Agent::configured(&format!(
+        "[providers.test]\nmodel='test'\n[providers.test.protocols.openai-chat]\nbase_url='{}'",
+        http.url
+    ));
+    // Supporting interaction modes on the client does not make Bee advertise
+    // or invoke flows it has not implemented.
+    agent.send(
+        &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+            "protocolVersion":2,"info":{"name":"compatibility-test","version":"0"},
+            "capabilities":{"elicitation":{"form":{},"url":{}}}
+        }}),
+    );
+    let initialized = agent.recv();
+    assert_eq!(
+        initialized["result"]["capabilities"],
+        json!({"session":{"mcp":{"acp":{}}}})
+    );
+    agent
+        .send(&json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":root.path()}}));
+    let session = agent.recv()["result"]["sessionId"].clone();
+    agent.send(&json!({"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"text","text":"cancelled-question"}]}}));
+    assert_eq!(agent.recv()["id"], 3);
+    http.request();
+    if close {
+        agent.send(&json!({"jsonrpc":"2.0","id":4,"method":"session/close","params":{"sessionId":session}}));
+    } else {
+        agent.send(
+            &json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":session}}),
+        );
+    }
+    loop {
+        let message = agent.recv();
+        assert_eq!(message["method"], "session/update");
+        assert_eq!(message["params"]["sessionId"], session);
+        let update = &message["params"]["update"];
+        assert_ne!(update["sessionUpdate"], "agent_message_chunk");
+        if update["state"] == "idle" {
+            assert_eq!(update["stopReason"], "cancelled");
+            break;
+        }
+    }
+    if !close {
+        agent.send(&json!({"jsonrpc":"2.0","id":4,"method":"session/close","params":{"sessionId":session}}));
+    }
+    assert_eq!(agent.recv()["id"], 4, "idle precedes the close response");
+    agent.send(&json!({"jsonrpc":"2.0","id":5,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"text","text":"closed"}]}}));
+    assert_eq!(agent.recv()["error"]["code"], -32602);
+    agent.send(&json!({"jsonrpc":"2.0","id":6,"method":"session/resume","params":{"sessionId":session,"cwd":root.path()}}));
+    let snapshot = agent.recv();
+    assert_eq!(snapshot["params"]["update"]["state"], "idle");
+    assert!(snapshot["params"]["update"].get("stopReason").is_none());
+    assert_eq!(agent.recv()["id"], 6);
+    release.send(()).unwrap();
+    agent.send(&json!({"jsonrpc":"2.0","id":7,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"text","text":"recover"}]}}));
+    assert_eq!(agent.recv()["id"], 7);
+    let mut text = String::new();
+    loop {
+        let message = agent.recv();
+        assert_eq!(message["method"], "session/update");
+        let update = &message["params"]["update"];
+        if let Some(chunk) = update["content"]["text"].as_str() {
+            text.push_str(chunk);
+        }
+        if update["state"] == "idle" {
+            assert_eq!(update["stopReason"], "end_turn");
+            break;
+        }
+    }
+    assert_eq!(text, "recovered");
+    let recovered = http.request().body.to_string();
+    assert!(!recovered.contains("cancelled-question"));
+    assert!(!recovered.contains("late answer"));
+    agent.send(&json!({"jsonrpc":"2.0","id":8,"method":"session/list","params":{}}));
+    let listed = agent.recv();
+    assert_eq!(
+        listed["id"], 8,
+        "no duplicate idle or late answer follows recovery"
+    );
+    assert_eq!(listed["result"]["sessions"][0]["sessionId"], session);
+    let (status, stderr) = agent.finish();
+    assert!(status.success());
+    assert!(stderr.is_empty());
 }
 
 #[test]

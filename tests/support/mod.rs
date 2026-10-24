@@ -13,7 +13,7 @@ use bee::provider::{Profile, Providers};
 use serde_json::{Value, json};
 
 /// Select native Git Bash explicitly on Windows, where PATH may prefer WSL.
-pub fn native_bash_config(text: &str) -> String {
+pub fn bash_executable() -> std::path::PathBuf {
     #[cfg(windows)]
     {
         let shell = std::path::PathBuf::from(std::env::var_os("ProgramFiles").unwrap())
@@ -23,7 +23,16 @@ pub fn native_bash_config(text: &str) -> String {
             shell.is_file(),
             "the Windows test host must have Git Bash installed"
         );
-        let setting = format!("shell = '{}'\n", shell.display());
+        shell
+    }
+    #[cfg(not(windows))]
+    "bash".into()
+}
+
+pub fn native_bash_config(text: &str) -> String {
+    #[cfg(windows)]
+    {
+        let setting = format!("shell = '{}'\n", bash_executable().display());
         if text.contains("[tools.bash]") {
             text.replacen("[tools.bash]", &format!("[tools.bash]\n{setting}"), 1)
         } else {
@@ -50,6 +59,7 @@ pub struct Response {
     pub body: String,
     pub delay: Duration,
     pub pause: Option<(usize, Duration)>,
+    pause_gate: Option<(usize, Receiver<()>)>,
 }
 
 impl Response {
@@ -61,6 +71,7 @@ impl Response {
             body: value.to_string(),
             delay: Duration::ZERO,
             pause: None,
+            pause_gate: None,
         }
     }
 
@@ -72,6 +83,7 @@ impl Response {
             body,
             delay: Duration::ZERO,
             pause: None,
+            pause_gate: None,
         }
     }
 
@@ -79,6 +91,13 @@ impl Response {
     pub fn gated(mut self) -> (Self, mpsc::Sender<()>) {
         let (release, gate) = mpsc::channel();
         self.gate = Some(gate);
+        (self, release)
+    }
+
+    /// Pause after an SSE event until the client observes its streamed chunk.
+    pub fn gated_after(mut self, index: usize) -> (Self, mpsc::Sender<()>) {
+        let (release, gate) = mpsc::channel();
+        self.pause_gate = Some((index, gate));
         (self, release)
     }
 }
@@ -152,6 +171,14 @@ impl Server {
                     response.body.len()
                 );
                 if socket.write_all(head.as_bytes()).is_ok() {
+                    if let Some((index, gate)) = response.pause_gate {
+                        if socket.write_all(&response.body.as_bytes()[..index]).is_ok()
+                            && gate.recv_timeout(Duration::from_secs(10)).is_ok()
+                        {
+                            let _ = socket.write_all(&response.body.as_bytes()[index..]);
+                        }
+                        continue;
+                    }
                     if let Some((index, delay)) = response.pause {
                         if socket
                             .write_all(&response.body.as_bytes()[..index])
