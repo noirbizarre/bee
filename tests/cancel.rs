@@ -196,10 +196,42 @@ async fn cancelling_a_running_turn_ends_it_with_a_cancelled_idle_update() {
 
             let seen = until_idle(&mut updates).await;
             assert_eq!(terminal_reason(&seen), v2::StopReason::Cancelled);
-            // The work was stopped, not just reported stopped.
-            tokio::time::timeout(TIMEOUT, dropped_signal.recv())
-                .await
-                .expect("the cancelled turn is dropped within the timeout");
+            // Terminal idle is a cleanup barrier, not just an abort request.
+            dropped_signal
+                .try_recv()
+                .expect("the turn was dropped before idle");
+            Ok(())
+        },
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn resuming_an_active_session_reports_running_without_ending_its_turn() {
+    let (dropped, _signal) = mpsc::unbounded_channel();
+    run(
+        never_ending_body!(dropped),
+        async |connection, mut updates| {
+            let session = new_session(&connection).await?;
+            prompt(&connection, &session).await?;
+            while !is_agent_text(&next(&mut updates).await.update) {}
+            connection
+                .send_request(v2::ResumeSessionRequest::new(
+                    session.clone(),
+                    std::env::temp_dir().join("bee-cancel"),
+                ))
+                .block_task()
+                .await?;
+            assert!(matches!(
+                next(&mut updates).await.update,
+                v2::SessionUpdate::StateUpdate(v2::StateUpdate::Running(_))
+            ));
+            cancel(&connection, &session)?;
+            assert_eq!(
+                terminal_reason(&until_idle(&mut updates).await),
+                v2::StopReason::Cancelled
+            );
+            assert_no_further_updates(&connection, &mut updates).await;
             Ok(())
         },
     )
