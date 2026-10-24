@@ -479,7 +479,7 @@ fn an_error_in_what_a_preset_supplies_names_the_file_that_defined_the_preset() {
         panic!("expected an invalid provider setting: {error:?}");
     };
     assert_eq!(key, "providers.p.protocols.openai-chat.base_url");
-    assert_eq!(path, &sandbox.global().display().to_string());
+    assert_eq!(Path::new(path), sandbox.global());
 
     let text = rendered(error);
     assert!(text.contains("bee::provider::invalid"), "{text}");
