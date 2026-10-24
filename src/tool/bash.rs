@@ -262,7 +262,7 @@ impl Tool for Bash {
         "Run a noninteractive Bash command in the session directory. Returns separate stdout/stderr, exit status, timeout and truncation flags. Commands run with host privileges; cwd is not a sandbox."
     }
 
-    async fn execute(&self, input: Input, context: &Context) -> Result<Output, Failure> {
+    fn preflight(&self, input: &Input) -> Result<(), Failure> {
         let timeout = input.timeout_ms.unwrap_or(self.settings.timeout_ms);
         let budget = input.output_limit.unwrap_or(self.settings.output_limit);
         if input.command.is_empty()
@@ -276,7 +276,7 @@ impl Tool for Bash {
                 "Use a nonempty command without NUL and positive limits within the configured host ceilings.",
             ));
         }
-        let deadline = tokio::time::Instant::now()
+        tokio::time::Instant::now()
             .checked_add(Duration::from_millis(timeout))
             .ok_or_else(|| {
                 Failure::new(
@@ -284,6 +284,15 @@ impl Tool for Bash {
                     "Timeout exceeds the supported range; request a shorter timeout.",
                 )
             })?;
+        Ok(())
+    }
+
+    async fn execute(&self, input: Input, context: &Context) -> Result<Output, Failure> {
+        self.preflight(&input)?;
+        let timeout = input.timeout_ms.unwrap_or(self.settings.timeout_ms);
+        let budget = input.output_limit.unwrap_or(self.settings.output_limit);
+        // Human authorization time is not part of the process execution budget.
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout);
         let mut command = Command::new(&self.settings.shell);
         command
             .args(["--noprofile", "--norc", "-c", &input.command])

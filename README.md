@@ -37,6 +37,9 @@ only, never fetched). The SDK-free loop supports injected function executors; pr
 `bash`, `read`, `glob`, `list`, `write`, and `edit` tools in each session's working directory.
 It also discovers and invokes client-hosted MCP tools through ACPv2's `session.mcp.acp` transport, alongside native
 tools. The client owns MCP configuration and permission policy; denials are returned to the model as tool errors.
+Native Bash requests client permission before execution. Form-capable clients receive
+an `ask_user` tool; URL-capable clients can handle provider browser sign-in when a
+stored credential is missing or expired. See [user interactions](docs/tools.md#acp-user-interactions).
 All three protocols use native wire adapters, with provider identity, model, endpoint and authentication kept separate.
 
 See [ACPv2 compatibility](docs/compatibility.md) for automated workflow coverage, pinned

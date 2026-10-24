@@ -293,7 +293,8 @@ fn a_callback_without_a_state_is_refused() {
 fn a_callback_reporting_an_error_is_a_denial() {
     let listener = CallbackListener::bind().unwrap();
     let port = listener.port();
-    let browser = thread::spawn(move || browse(port, "/callback?error=access_denied"));
+    let browser =
+        thread::spawn(move || browse(port, "/callback?state=expected&error=access_denied"));
 
     let error = listener
         .wait("expected", Duration::from_secs(5))
@@ -301,6 +302,18 @@ fn a_callback_reporting_an_error_is_a_denial() {
 
     browser.join().unwrap();
     assert!(matches!(error, Error::AuthDenied), "{error:?}");
+}
+
+#[test]
+fn a_denial_without_the_expected_state_is_not_trusted() {
+    let listener = CallbackListener::bind().unwrap();
+    let port = listener.port();
+    let browser = thread::spawn(move || browse(port, "/callback?state=wrong&error=access_denied"));
+    let error = listener
+        .wait("expected", Duration::from_secs(5))
+        .unwrap_err();
+    browser.join().unwrap();
+    assert!(matches!(error, Error::AuthStateMismatch));
 }
 
 #[test]

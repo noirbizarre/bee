@@ -417,12 +417,27 @@ async fn native_turns(
     sessions: Vec<(std::path::PathBuf, Vec<bool>)>,
 ) -> Vec<String> {
     let (tx, mut updates) = tokio::sync::mpsc::unbounded_channel();
-    let client = Client.v2().on_receive_notification(
-        async move |update: v2::UpdateSessionNotification, _connection| {
-            tx.send(update).map_err(Error::into_internal_error)
-        },
-        agent_client_protocol::on_receive_notification!(),
-    );
+    let client = Client
+        .v2()
+        .on_receive_request(
+            async |_request: v2::RequestPermissionRequest,
+                   responder: agent_client_protocol::Responder<v2::RequestPermissionResponse>,
+                   _| {
+                responder.respond(
+                    serde_json::from_value(
+                        json!({"outcome":{"outcome":"selected","optionId":"allow_once"}}),
+                    )
+                    .unwrap(),
+                )
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_notification(
+            async move |update: v2::UpdateSessionNotification, _connection| {
+                tx.send(update).map_err(Error::into_internal_error)
+            },
+            agent_client_protocol::on_receive_notification!(),
+        );
     tokio::time::timeout(
         Duration::from_secs(10),
         client.connect_with(
@@ -1089,12 +1104,27 @@ async fn acp_cancellation_drops_native_work_and_allows_a_clean_replacement(
     }
     let runtime = bee::acp::Runtime::new(bee::agent::Limits::default(), registry);
     let (tx, mut updates) = tokio::sync::mpsc::unbounded_channel();
-    let client = Client.v2().on_receive_notification(
-        async move |update: v2::UpdateSessionNotification, _connection| {
-            tx.send(update).map_err(Error::into_internal_error)
-        },
-        agent_client_protocol::on_receive_notification!(),
-    );
+    let client = Client
+        .v2()
+        .on_receive_request(
+            async |_request: v2::RequestPermissionRequest,
+                   responder: agent_client_protocol::Responder<v2::RequestPermissionResponse>,
+                   _| {
+                responder.respond(
+                    serde_json::from_value(
+                        json!({"outcome":{"outcome":"selected","optionId":"allow_once"}}),
+                    )
+                    .unwrap(),
+                )
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_notification(
+            async move |update: v2::UpdateSessionNotification, _connection| {
+                tx.send(update).map_err(Error::into_internal_error)
+            },
+            agent_client_protocol::on_receive_notification!(),
+        );
     let profiles = providers("openai-chat", &server.url, "");
     tokio::time::timeout(
         Duration::from_secs(10),

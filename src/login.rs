@@ -154,8 +154,13 @@ impl LoginSpec {
     /// [`Error::AuthExchangeFailed`], with advice per status. The response body
     /// is never part of it.
     pub fn exchange(&self, http: &dyn Http, code: &Code, pkce: &Pkce) -> Result<Secret> {
+        let body = self.exchange_body(code, pkce);
+        self.exchange_result(http.post_json(&self.exchange_url, &body))
+    }
+
+    fn exchange_body(&self, code: &Code, pkce: &Pkce) -> String {
         let names = &self.exchange;
-        let body = Value::Object(
+        Value::Object(
             [
                 (names.code.clone(), Value::from(code.0.expose())),
                 (
@@ -167,7 +172,14 @@ impl LoginSpec {
             .into_iter()
             .collect(),
         )
-        .to_string();
+        .to_string()
+    }
+
+    fn exchange_result(
+        &self,
+        response: std::result::Result<crate::http::HttpResponse, crate::http::Unreachable>,
+    ) -> Result<Secret> {
+        let names = &self.exchange;
         // The flow's own advice follows the generic one: it knows things this
         // code cannot, such as how long a code lives.
         let failed = |status: String, reason: &'static str, help: &str| Error::AuthExchangeFailed {
@@ -179,7 +191,7 @@ impl LoginSpec {
                 None => help.to_owned(),
             },
         };
-        let response = http.post_json(&self.exchange_url, &body).map_err(|_| {
+        let response = response.map_err(|_| {
             failed(
                 String::new(),
                 "the request did not reach the server",
@@ -330,12 +342,18 @@ fn handle(mut stream: TcpStream, expected_state: &str) -> Outcome {
         respond(&mut stream, "400 Bad Request", "Bad request.");
         return Outcome::Ignored;
     };
-    let Some((path, query)) = parse_request_line(&line) else {
-        respond(&mut stream, "404 Not Found", "Not found.");
+    interpret(&line, expected_state, |status, message| {
+        respond(&mut stream, status, message)
+    })
+}
+
+fn interpret(line: &str, expected_state: &str, mut respond: impl FnMut(&str, &str)) -> Outcome {
+    let Some((path, query)) = parse_request_line(line) else {
+        respond("404 Not Found", "Not found.");
         return Outcome::Ignored;
     };
     if path != "/callback" {
-        respond(&mut stream, "404 Not Found", "Not found.");
+        respond("404 Not Found", "Not found.");
         return Outcome::Ignored;
     }
     let param = |name: &str| {
@@ -347,39 +365,115 @@ fn handle(mut stream: TcpStream, expected_state: &str) -> Outcome {
 
     // The pages are fixed text: echoing a parameter back would let any page
     // that can reach localhost put its own content in front of the user.
-    if param("error").is_some() {
-        respond(
-            &mut stream,
-            "200 OK",
-            "Sign-in was not authorized. You can close this tab and return to the terminal.",
-        );
-        return Outcome::Denied;
-    }
     if param("state") != Some(expected_state) {
         respond(
-            &mut stream,
             "400 Bad Request",
             "This sign-in response was not expected. Return to the terminal.",
         );
         return Outcome::StateMismatch;
     }
+    // A denial is authoritative only when it belongs to this sign-in attempt.
+    if param("error").is_some() {
+        respond(
+            "200 OK",
+            "Sign-in was not authorized. You can close this tab.",
+        );
+        return Outcome::Denied;
+    }
     match param("code").map(Code::new) {
         Some(Ok(code)) => {
             respond(
-                &mut stream,
                 "200 OK",
-                "Signed in to Bee. You can close this tab and return to the terminal.",
+                "Sign-in response received. You can close this tab and return to the client.",
             );
             Outcome::Code(code)
         }
         _ => {
             respond(
-                &mut stream,
                 "400 Bad Request",
                 "The sign-in response carried no code. Return to the terminal.",
             );
             Outcome::Invalid
         }
+    }
+}
+
+/// An owned asynchronous browser flow. Dropping it closes its callback listener.
+pub(crate) struct AsyncSignIn {
+    listener: tokio::net::TcpListener,
+    pkce: Pkce,
+    state: String,
+    pub url: String,
+}
+
+impl AsyncSignIn {
+    pub async fn prepare(flow: &LoginSpec) -> Result<Self> {
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .map_err(|source| Error::AuthCallbackIo { source })?;
+        let port = listener
+            .local_addr()
+            .map_err(|source| Error::AuthCallbackIo { source })?
+            .port();
+        let pkce = Pkce::generate()?;
+        let state = random_token(16)?;
+        let url = flow.authorization_url(
+            &pkce,
+            Some(&state),
+            Some(&format!("http://localhost:{port}/callback")),
+        );
+        Ok(Self {
+            listener,
+            pkce,
+            state,
+            url,
+        })
+    }
+
+    pub async fn callback(&self) -> Result<Code> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        loop {
+            let (mut stream, _) = self
+                .listener
+                .accept()
+                .await
+                .map_err(|source| Error::AuthCallbackIo { source })?;
+            // A local connection that sends no line must not monopolize the flow.
+            let outcome = tokio::time::timeout(Duration::from_secs(2), async {
+                let mut line = Vec::new();
+                while line.len() < MAX_REQUEST {
+                    let byte = stream.read_u8().await.ok()?;
+                    if byte == b'\n' { break; }
+                    line.push(byte);
+                }
+                if line.len() >= MAX_REQUEST { return None; }
+                let line = String::from_utf8(line).ok()?;
+                let mut response = String::new();
+                let outcome = interpret(&line, &self.state, |status, message| {
+                    response = format!("HTTP/1.1 {status}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{message}", message.len());
+                });
+                // Browser disconnection does not invalidate an already validated code.
+                let _ = stream.write_all(response.as_bytes()).await;
+                Some(outcome)
+            }).await;
+            match outcome {
+                Ok(Some(Outcome::Code(code))) => return Ok(code),
+                Ok(Some(Outcome::Denied)) => return Err(Error::AuthDenied),
+                Ok(Some(Outcome::StateMismatch)) => return Err(Error::AuthStateMismatch),
+                Ok(Some(Outcome::Invalid)) => return Err(Error::AuthCallbackInvalid),
+                _ => {}
+            }
+        }
+    }
+
+    pub async fn exchange(
+        &self,
+        flow: &LoginSpec,
+        code: &Code,
+        http: &dyn crate::http::LoginHttp,
+    ) -> Result<Secret> {
+        let body = flow.exchange_body(code, &self.pkce);
+        flow.exchange_result(http.post_json(&flow.exchange_url, body).await)
     }
 }
 

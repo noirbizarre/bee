@@ -195,6 +195,10 @@ pub trait Tool: Send + Sync + 'static {
     fn target(&self, _input: &Self::Input) -> Option<Target> {
         None
     }
+    /// Check semantic constraints before a caller asks authorization for an operation.
+    fn preflight(&self, _input: &Self::Input) -> Result<(), Failure> {
+        Ok(())
+    }
     /// Execute validated input. Dropping this future must stop pending work.
     ///
     /// Await cancellation for cooperative cleanup, but do not depend on async
@@ -240,11 +244,21 @@ impl fmt::Debug for Output {
 type Execution<'a> = Pin<Box<dyn Future<Output = Output> + Send + 'a>>;
 
 trait Erased: Send + Sync {
+    fn preflight(&self, arguments: Value) -> Result<(), Failure>;
     fn target(&self, arguments: Value) -> Option<Target>;
     fn execute<'a>(&'a self, arguments: Value, context: &'a Context) -> Execution<'a>;
 }
 
 impl<T: Tool> Erased for T {
+    fn preflight(&self, arguments: Value) -> Result<(), Failure> {
+        let input = serde_json::from_value(arguments).map_err(|_| {
+            Failure::new(
+                Code::InvalidArguments,
+                "Arguments could not be decoded; follow the input schema.",
+            )
+        })?;
+        Tool::preflight(self, &input)
+    }
     fn target(&self, arguments: Value) -> Option<Target> {
         let input = serde_json::from_value(arguments).ok()?;
         Tool::target(self, &input)
@@ -280,6 +294,19 @@ pub struct Registry {
 }
 
 impl Registry {
+    /// Validate without executing so authorization never precedes input checks.
+    pub(crate) fn preflight(&self, name: &str, arguments: &Value) -> Result<(), Failure> {
+        let entry = self.entries.get(name).ok_or_else(|| {
+            Failure::new(Code::UnknownTool, "Unknown tool; choose a registered tool.")
+        })?;
+        if !arguments.is_object() || !entry.validator.is_valid(arguments) {
+            return Err(Failure::new(
+                Code::InvalidArguments,
+                "Arguments do not match the input schema; correct the call.",
+            ));
+        }
+        entry.implementation.preflight(arguments.clone())
+    }
     /// Inspect schema-valid arguments using the registered implementation's decoder.
     pub fn target(&self, name: &str, arguments: &Value) -> Option<Target> {
         let entry = self.entries.get(name)?;

@@ -174,6 +174,10 @@ impl<'a> NativeExecutor<'a> {
             })
             .collect()
     }
+
+    pub(crate) fn preflight(&self, call: &Call) -> Result<(), crate::tool::Failure> {
+        self.registry.preflight(&call.name, &call.arguments)
+    }
 }
 
 impl Executor for NativeExecutor<'_> {
