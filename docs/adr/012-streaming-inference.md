@@ -6,6 +6,9 @@ Accepted. Supersedes the placeholder/no-history execution in ADR-004 and the exe
 
 ## Decision
 
+Implementation update: [ADR-015](015-client-hosted-mcp-execution.md) wires production MCP tools into the executor
+seam alongside native tools. Statements about production sending no tools below describe the original inference work.
+
 The first backend (#8) introduces concrete normalized messages, tool calls/results, optional usage and completion
 reasons. A closed protocol dispatch selects the profile's preferred endpoint, never a vendor name or model catalog.
 Responses (#26) and Anthropic (#23) implement their own wire semantics against the same interface. Native continuation

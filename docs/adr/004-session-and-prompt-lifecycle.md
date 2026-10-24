@@ -9,6 +9,9 @@ Placeholder execution and lack of model context are superseded by [ADR-012](012-
 
 ## Context
 
+Implementation update: [ADR-015](015-client-hosted-mcp-execution.md) adds ACP MCP capability and session attachments;
+the capability and ignored-server statements below describe this initial lifecycle implementation.
+
 Bee answered `initialize` and nothing else. The next step is sessions and
 prompts, without an LLM: the protocol shape has to be right before anything
 real is put behind it.

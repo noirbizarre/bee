@@ -327,14 +327,16 @@ fn an_initialize_over_stdio_is_answered_with_the_bee_identity() {
 }
 
 #[test]
-fn the_initialize_response_advertises_only_the_baseline_session_capability() {
+fn the_initialize_response_advertises_sessions_and_only_acp_mcp_transport() {
     let mut agent = Agent::spawn();
 
     let response = agent.initialize(1);
 
-    // `{}` promises the baseline session methods and nothing else. Anything
-    // more would send clients to methods Bee cannot answer.
-    assert_eq!(response["result"]["capabilities"]["session"], json!({}));
+    // Capabilities promise implemented behavior, including the exact MCP transport.
+    assert_eq!(
+        response["result"]["capabilities"]["session"],
+        json!({"mcp":{"acp":{}}})
+    );
     agent.finish();
 }
 

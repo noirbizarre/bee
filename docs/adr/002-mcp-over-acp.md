@@ -4,6 +4,9 @@
 
 Accepted
 
+Historical feasibility record. [ADR-015](015-client-hosted-mcp-execution.md) records the subsequent production
+integration; statements about the unimplemented agent below describe the original spike.
+
 ## Context
 
 Bee does not configure or orchestrate MCP; the client does. A client reaches an

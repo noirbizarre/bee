@@ -20,6 +20,8 @@ context windows, approximate token accounting and transactional oldest-whole-tur
 turns are excluded, and ACP replay remains unsupported. The SDK-free bounded
 loop supports configurable turn limits and injected tool executors; production ACP
 registers the native bash, read, glob, list, write and edit tools with session-relative execution contexts.
+Client-hosted MCP tools are discovered per prompt and invoked through ACP's MCP transport, with session-scoped
+attachments, offline schema validation and complete JSON result envelopes. The client owns permission policy.
 Each native backend preserves its own continuation and tool-result semantics.
 
 ## Non-negotiable invariants
@@ -47,8 +49,9 @@ checks is a comment, and it will be violated.
 src/
 ├── lib.rs      the library surface
 ├── main.rs     the bee binary
-├── acp.rs      the ACPv2 boundary: the only module that imports the SDK;
+├── acp.rs      the ACPv2 boundary: only this module and its submodules import the SDK;
 │               the agent core, and `serve` over any transport
+├── acp/mcp.rs  session-scoped client MCP discovery, routing and composite execution
 ├── session.rs  session state, free of the SDK
 ├── config.rs   layered XDG configuration (ADR-006), free of the SDK
 ├── provider.rs provider profiles from the configuration (ADR-007), free of the SDK
@@ -77,7 +80,8 @@ tests/
 ├── selection.rs provider and model selection over ACPv2, in-process
 ├── auth.rs     credentials, the store and the sign-in flows, in-process
 ├── preset.rs   presets, login flows as data and the project-file trust rule, in-process
-└── mcp.rs      the MCP-over-ACP spike (ADR-002)
+├── mcp.rs      the MCP-over-ACP spike (ADR-002)
+└── mcp_integration.rs production model/MCP cycles, failures and lifecycle isolation (ADR-015)
 ```
 
 New modules for the agent loop and providers are added when the code that needs them is, not before.

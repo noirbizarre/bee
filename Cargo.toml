@@ -99,10 +99,10 @@ clap = { version = "4", features = ["derive", "env", "wrap_help"] }
 # ACPv2. v2 is the SDK's draft protocol, reachable only through the
 # `unstable_protocol_v2` feature, so a minor release may break it. The exact pin
 # turns every upgrade into a deliberate, reviewed change instead of a surprise
-# from `cargo update`. Only `src/acp.rs` imports this crate; see ADR-001.
+# from `cargo update`. Only the `acp` boundary imports this crate; see ADR-001.
 #
 # `stdio` is the SDK's native stdin/stdout transport (ADR-003).
-agent-client-protocol = { version = "=3.5.0", features = ["stdio", "unstable_protocol_v2"] }
+agent-client-protocol = { version = "=3.5.0", features = ["stdio", "unstable_protocol_v2", "unstable_mcp_over_acp"] }
 
 # SDK task cancellation and stream combinators. Tokio supplies model I/O's
 # reactor in the binary; the ACP transport itself stays runtime-agnostic.

@@ -28,7 +28,7 @@ async fn a_v2_client_can_initialize_the_bee_agent_in_process() -> Result<(), Err
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn the_bee_agent_advertises_only_the_baseline_session_capability() -> Result<(), Error> {
+async fn the_bee_agent_advertises_sessions_and_only_acp_mcp_transport() -> Result<(), Error> {
     Client
         .v2()
         .connect_with(bee::acp::agent(), async |connection| {
@@ -40,14 +40,16 @@ async fn the_bee_agent_advertises_only_the_baseline_session_capability() -> Resu
                 .block_task()
                 .await?;
 
-            // Each extra capability is a promise a client acts on, and none is
-            // implemented: an extension must be added here with its code.
+            // Each extra capability is a promise a client acts on.
             let session = response
                 .capabilities
                 .session
                 .expect("the session lifecycle is implemented");
             assert!(session.prompt.is_none());
-            assert!(session.mcp.is_none());
+            let mcp = serde_json::to_value(session.mcp.expect("MCP is implemented")).unwrap();
+            assert!(mcp.get("acp").is_some());
+            assert!(mcp.get("http").is_none());
+            assert!(mcp.get("stdio").is_none());
             assert!(session.delete.is_none());
             assert!(session.additional_directories.is_none());
             Ok(())

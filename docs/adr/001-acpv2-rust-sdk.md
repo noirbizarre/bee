@@ -6,6 +6,9 @@ Accepted
 
 ## Context
 
+Implementation update: [ADR-015](015-client-hosted-mcp-execution.md) extends the ACP boundary to private submodules
+and enables production MCP-over-ACP. The original SDK decision below is retained as history.
+
 Bee is the agent side of an ACPv2 connection. Writing its own JSON-RPC framing
 and protocol types would mean maintaining a second interpretation of a protocol
 that is still moving.
