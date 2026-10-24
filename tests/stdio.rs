@@ -158,7 +158,14 @@ fn configured_turn_limits_reach_real_stdio_inference() {
             break;
         }
     }
-    assert_eq!(server.request().body["tools"].as_array().unwrap().len(), 3);
+    let request = server.request();
+    let names: Vec<_> = request.body["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["function"]["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["edit", "glob", "list", "read", "write"]);
     server.assert_no_more_requests();
     let (status, stderr) = agent.finish();
     assert!(status.success());

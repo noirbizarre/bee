@@ -34,6 +34,8 @@ pub fn builtins() -> Result<Registry, Error> {
     registry.register(read::Read)?;
     registry.register(glob::Glob)?;
     registry.register(list::List)?;
+    registry.register(write::Write)?;
+    registry.register(edit::Edit)?;
     Ok(registry)
 }
 

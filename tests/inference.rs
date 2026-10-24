@@ -126,6 +126,24 @@ async fn acp_executes_shipped_tools_in_the_session_directory_and_retains_results
             "read",
             json!({"path":"note.txt"}),
         )),
+        Response::json(native_call(
+            protocol,
+            "d",
+            "write",
+            json!({"path":"created.txt","content":"before-edit\n"}),
+        )),
+        Response::json(native_call(
+            protocol,
+            "e",
+            "edit",
+            json!({"path":"created.txt","old_text":"before-edit","new_text":"after-edit"}),
+        )),
+        Response::json(native_call(
+            protocol,
+            "f",
+            "read",
+            json!({"path":"created.txt"}),
+        )),
         Response::json(answer(protocol, "done")),
         Response::json(answer(protocol, "remembered")),
     ]);
@@ -148,22 +166,34 @@ async fn acp_executes_shipped_tools_in_the_session_directory_and_retains_results
             }
         })
         .collect();
-    assert_eq!(names, ["glob", "list", "read"]);
+    assert_eq!(names, ["edit", "glob", "list", "read", "write"]);
     for id in ["a", "b"] {
         let body = server.request().body.to_string();
         assert!(body.contains("note.txt"));
         assert!(body.contains(id));
     }
-    let final_request = server.request();
+    let read_result = server.request();
     assert!(
-        final_request
+        read_result
             .body
             .to_string()
             .contains("session-specific-content")
     );
+    for id in ["d", "e"] {
+        let body = server.request().body.to_string();
+        assert!(body.contains("bytes_written"));
+        assert!(body.contains(id));
+    }
+    let final_request = server.request();
+    assert!(final_request.body.to_string().contains("after-edit"));
     let next = server.request();
     assert!(next.body.to_string().contains("session-specific-content"));
+    assert!(next.body.to_string().contains("after-edit"));
     assert!(next.body.to_string().contains("question 1"));
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("created.txt")).unwrap(),
+        "after-edit\n"
+    );
 }
 
 #[tokio::test]

@@ -59,7 +59,8 @@ portable text and drops protocol-specific continuation. This does not implement 
 The SDK-free `agent::run` accepts tool definitions and an injected `Executor`, with correlated call/result history.
 The [native tool contract](tools.md) provides typed schema validation, registration, bounded results, and
 `agent::NativeExecutor` for this seam.
-Normal ACP sessions advertise and execute the shipped `read`, `glob`, and `list` tools through this same interface.
+Normal ACP sessions advertise and execute the shipped `read`, `glob`, `list`, `write`, and `edit` tools through this
+same interface.
 They resolve relative paths against the session cwd, while configuration is loaded from the launch directory.
 Cancelling or closing a session drops pending inference and tool futures and signals native-tool cancellation tokens.
 Executors must cooperate with cancellation, and external side effects cannot be rolled back.
@@ -84,6 +85,8 @@ timeout_ms = 120000
 4. Submit a longer prompt and cancel after output begins. Expect exactly one cancelled idle and no later chunks.
 5. Ask the model to discover files, list a directory and read a text file in the session directory. Expect a final
    answer using the tool results; a follow-up can refer to those results.
+6. Ask it to create a new text file, edit a unique fragment and read the result. Verify that the file in the session
+   directory contains the requested changes.
 
 For a third-party/local compatible server, repeat using its documented base URL and model. For example:
 

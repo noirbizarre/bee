@@ -3,7 +3,7 @@
 Bee's SDK-free `tool` module defines typed native operations, their advertised
 schemas, and their execution context. `agent::NativeExecutor` connects a registry
 to the bounded inference loop. Normal ACP sessions advertise and execute the
-shipped `read`, `glob`, and `list` tools. Their execution base is the session cwd,
+shipped `read`, `glob`, `list`, `write`, and `edit` tools. Their execution base is the session cwd,
 not the launch directory used to load configuration.
 
 ## Implement and register a tool
