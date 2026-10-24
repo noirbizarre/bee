@@ -35,3 +35,4 @@ by editing the old one. The history is the value.
 - [ADR-010](010-several-protocols-per-provider.md) — Let a provider speak several protocols, ordered by `prefer`
 - [ADR-011](011-openai-responses-protocol.md) — Add `openai-responses` as a protocol of its own
 - [ADR-012](012-streaming-inference.md) — SDK-free inference with cancellable HTTP and caller-owned tools
+- [ADR-013](013-per-model-protocol-selection.md) — Select protocols by exact model ID independently of catalogs

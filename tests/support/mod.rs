@@ -120,6 +120,14 @@ impl Server {
         self.requests.recv_timeout(Duration::from_secs(10)).unwrap()
     }
 
+    pub fn assert_no_more_requests(&self) {
+        // Call after inference completes, so a retry cannot still be in flight.
+        assert!(
+            self.requests.try_recv().is_err(),
+            "unexpected extra HTTP request"
+        );
+    }
+
     pub async fn request_async(&self) -> Request {
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
@@ -135,10 +143,16 @@ impl Server {
 }
 
 pub fn providers(protocol: &str, url: &str, settings: &str) -> Providers {
+    configured_providers(&format!(
+        "[providers.test]\nmodel = 'private-model'\n{settings}\n[providers.test.protocols.{protocol}]\nbase_url = '{url}'\n"
+    ))
+}
+
+pub fn configured_providers(text: &str) -> Providers {
     let root = tempfile::tempdir().unwrap();
     let path = project_config_path(root.path());
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, format!("[providers.test]\nmodel = 'private-model'\n{settings}\n[providers.test.protocols.{protocol}]\nbase_url = '{url}'\n")).unwrap();
+    std::fs::write(path, text).unwrap();
     let env = Environment::new(None, None, None);
     Providers::from_config(&Config::load(&env, root.path()).unwrap()).unwrap()
 }

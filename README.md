@@ -45,7 +45,9 @@ Bee merges up to three TOML files, lowest precedence first: the global
 are replaced rather than extended. A malformed or unreadable file, or a missing `BEE_CONFIG` file, stops Bee at launch
 with an actionable error that never repeats the file's contents. Provider profiles (`[providers.<name>]`: the protocols
 the provider speaks, each with its base URL and options, plus model, credential reference and headers) are validated and
-selectable per ACPv2 session. See the [documentation](https://noirbizarre.github.io/bee/#configuration).
+selectable per ACPv2 session. An optional `model_protocols = { "vendor/model.v2" = "openai-responses" }` table
+routes exact model IDs to configured protocols; unmapped IDs use `prefer`, without a catalog lookup.
+See the [documentation](https://noirbizarre.github.io/bee/#configuration).
 
 ## Authentication
 

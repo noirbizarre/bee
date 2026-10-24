@@ -226,7 +226,14 @@ pub struct Config {
 impl fmt::Debug for Config {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Config")
-            .field("keys", &self.origins.keys().collect::<Vec<_>>())
+            .field(
+                "keys",
+                &self
+                    .origins
+                    .keys()
+                    .map(|key| diagnostic_key(key))
+                    .collect::<Vec<_>>(),
+            )
             .field("sources", &self.sources)
             .finish_non_exhaustive()
     }
@@ -411,7 +418,7 @@ fn merge(
                     lower_type: existing.type_str(),
                     higher_path: higher_path.display().to_string(),
                     higher_type: value.type_str(),
-                    key: dotted,
+                    key: diagnostic_key(&dotted).to_owned(),
                 });
             }
             Some(Value::Table(existing)) => {
@@ -431,6 +438,18 @@ fn merge(
         }
     }
     Ok(())
+}
+
+// Model IDs are configuration values expressed as keys; exposing their origin
+// paths would bypass the normal protection against printing configuration values.
+fn diagnostic_key(key: &str) -> &str {
+    if (key.starts_with("providers.") || key.starts_with("presets."))
+        && let Some((parent, _)) = key.split_once(".model_protocols.")
+    {
+        &key[..parent.len() + ".model_protocols".len()]
+    } else {
+        key
+    }
 }
 
 /// Record `path` as the origin of `value` and of every key nested in it.

@@ -1,8 +1,15 @@
 # Inference and smoke tests
 
 Bee implements text and function-calling Chat Completions, Responses and Anthropic Messages.
-A profile's preferred protocol is used exactly; failures never trigger protocol fallback. Any opaque
+A profile's exact `model_protocols` mapping wins, otherwise its preferred protocol is used; failures never trigger
+protocol fallback. Any opaque
 model ID is accepted without a catalog lookup, but the endpoint must support that model and the selected protocol.
+
+For example, a profile using `preset = "openai"` can set
+`model_protocols = { "YOUR_CHAT_MODEL_ID" = "openai-chat" }` while keeping Responses as its preference.
+The effective session-selected or default model ID controls dispatch, endpoint URL/options and authentication headers
+together. The provider's credential, custom headers and common limits are shared. See
+[provider configuration](index.md#providers-and-models) for validation and layer/preset merge rules.
 
 ## Request settings and supported subset
 

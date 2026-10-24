@@ -76,8 +76,8 @@ base_url = "http://localhost:11434/v1"
 # OpenCode Zen, the pay-as-you-go gateway. It serves the open and the free models
 # over Chat Completions, the GPT, Grok and Muse models over Responses and the
 # Claude models over Messages, so no single protocol reaches them all. Chat is
-# preferred because it reaches the most models, until a protocol can be chosen
-# per model. Its Gemini models are only offered over Google's native protocol,
+# preferred because it reaches the most models; configure exact model_protocols
+# mappings for models needing another protocol. Its Gemini models use Google's native protocol,
 # which Bee does not speak. Another key than Zen's (OpenCode Go has its own
 # endpoints under `/inference/go`) needs a profile of its own.
 [presets.opencode]

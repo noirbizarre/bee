@@ -5,8 +5,8 @@
 //! protocols are properties of the profile, never inferred from its name, and
 //! nothing here knows a commercial provider: any name and any model id is
 //! accepted. One provider can serve several protocols, each at its own URL
-//! and with its own options; which one a request uses is `prefer`'s order. See
-//! ADR-007 and ADR-010.
+//! and with its own options; exact `model_protocols` mappings override `prefer`.
+//! See ADR-007, ADR-010 and ADR-013.
 //!
 //! Profiles are read from the merged [`Config`] (ADR-006) under `provider`
 //! (the default profile) and `providers.<name>`, optionally laid over a preset
@@ -36,6 +36,7 @@ const PROFILE_KEYS: &[&str] = &[
     "prefer",
     "model",
     "models",
+    "model_protocols",
     "credential",
     "headers",
     "timeout_ms",
@@ -52,6 +53,7 @@ const PRESET_KEYS: &[&str] = &[
     "prefer",
     "model",
     "models",
+    "model_protocols",
     "credential",
     "headers",
     "timeout_ms",
@@ -252,6 +254,7 @@ pub struct Profile {
     endpoints: Vec<Endpoint>,
     model: Option<String>,
     models: Vec<String>,
+    model_protocols: BTreeMap<String, Protocol>,
     credential: Option<CredentialSource>,
     // The sign-in `credential.login` names, resolved when the profile was read
     // so a dangling or malformed flow stops Bee at launch.
@@ -319,14 +322,22 @@ impl Profile {
             .find(|endpoint| endpoint.protocol == protocol)
     }
 
-    /// The endpoint requests use today: the first of [`Profile::endpoints`].
-    ///
-    /// Choosing by model is a later, additive change; until then the
-    /// preference is the whole rule.
+    /// The fallback endpoint: the first of [`Profile::endpoints`].
     #[must_use]
     pub fn preferred(&self) -> &Endpoint {
         // Validation guarantees at least one endpoint.
         &self.endpoints[0]
+    }
+
+    /// Resolve an opaque model ID without a catalog or network access.
+    /// Exact configured mappings win; every other ID uses the preference order.
+    #[must_use]
+    pub fn endpoint_for_model(&self, model: &str) -> &Endpoint {
+        match self.model_protocols.get(model) {
+            // Validation guarantees mapped protocols belong to this profile.
+            Some(protocol) => self.endpoint(*protocol).expect("validated model protocol"),
+            None => self.preferred(),
+        }
     }
 
     /// The preferred endpoint's protocol.
@@ -613,7 +624,7 @@ impl Reader<'_> {
         self.only_keys(&key, own, PROFILE_KEYS)?;
 
         let Some(preset) = own.get("preset") else {
-            return self.profile_from(name, &key, own);
+            return self.profile_from(name, &key, own, None);
         };
         let preset_key = format!("{key}.preset");
         let preset_name = self.string(&preset_key, preset)?;
@@ -635,14 +646,21 @@ impl Reader<'_> {
         };
         inner.only_keys(&format!("presets.{preset_name}"), preset_table, PRESET_KEYS)?;
         let combined = overlay(preset_table, own);
-        inner.profile_from(name, &key, &combined)
+        inner.profile_from(name, &key, &combined, Some(preset_name))
     }
 
     /// Read a profile from its final table: the preset, if any, already laid
     /// under the profile's own keys.
-    fn profile_from(&self, name: &str, key: &str, table: &Table) -> Result<Profile> {
+    fn profile_from(
+        &self,
+        name: &str,
+        key: &str,
+        table: &Table,
+        preset: Option<&str>,
+    ) -> Result<Profile> {
         let key = key.to_owned();
         let endpoints = self.endpoints(name, &key, table)?;
+        let model_protocols = self.model_protocols(&key, table, &endpoints, preset)?;
 
         let model = table
             .get("model")
@@ -691,12 +709,64 @@ impl Reader<'_> {
             endpoints,
             model,
             models,
+            model_protocols,
             credential,
             login,
             headers,
             timeout_ms: self.positive(table, &key, "timeout_ms", 120_000)?,
             max_output_tokens: self.positive(table, &key, "max_output_tokens", 4096)?,
         })
+    }
+
+    fn model_protocols(
+        &self,
+        key: &str,
+        table: &Table,
+        endpoints: &[Endpoint],
+        preset: Option<&str>,
+    ) -> Result<BTreeMap<String, Protocol>> {
+        let key = format!("{key}.model_protocols");
+        let Some(value) = table.get("model_protocols") else {
+            return Ok(BTreeMap::new());
+        };
+        let mappings = self.table(&key, value)?;
+        let mut result = BTreeMap::new();
+        for (model, value) in mappings {
+            // IDs are values represented as TOML keys. Use them only for internal
+            // provenance, never in diagnostics: a pasted credential must stay private.
+            let origin = self.config.origin(&format!("{key}.{model}")).or_else(|| {
+                preset.and_then(|preset| {
+                    self.config
+                        .origin(&format!("presets.{preset}.model_protocols.{model}"))
+                })
+            });
+            let path = origin.map_or_else(|| self.path(&key), |path| path.display().to_string());
+            let invalid = |reason| Error::ProviderInvalid {
+                key: key.clone(),
+                path: path.clone(),
+                reason,
+            };
+            check_model_id(model).map_err(invalid)?;
+            let name = value.as_str().ok_or_else(|| Error::ProviderType {
+                key: key.clone(),
+                path: path.clone(),
+                expected: "a protocol name string",
+                found: value.type_str(),
+            })?;
+            let protocol = Protocol::from_name(name).ok_or_else(|| invalid(
+                "must name a supported protocol: openai-chat, openai-responses or anthropic-messages",
+            ))?;
+            if !endpoints
+                .iter()
+                .any(|endpoint| endpoint.protocol == protocol)
+            {
+                return Err(invalid(
+                    "mapped protocol is not configured; add it under protocols or change the mapping",
+                ));
+            }
+            result.insert(model.clone(), protocol);
+        }
+        Ok(result)
     }
 
     fn positive(&self, table: &Table, key: &str, field: &str, default: u32) -> Result<u32> {
