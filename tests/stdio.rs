@@ -148,7 +148,7 @@ fn the_initialize_response_advertises_only_the_baseline_session_capability() {
 }
 
 #[test]
-fn a_prompt_over_stdio_is_accepted_and_ends_with_an_idle_end_turn_update() {
+fn an_unconfigured_prompt_over_stdio_is_accepted_and_reports_an_actionable_failure() {
     let mut agent = Agent::spawn();
     agent.initialize(1);
 
@@ -184,7 +184,12 @@ fn a_prompt_over_stdio_is_accepted_and_ends_with_an_idle_end_turn_update() {
 
     assert!(accepted.is_some_and(|response| response["result"]["messageId"].is_string()));
     assert_eq!(states[0]["state"], "running");
-    assert_eq!(states[1]["stopReason"], "end_turn");
+    assert_eq!(states[1]["stopReason"], "error");
+    assert!(
+        states[1]
+            .to_string()
+            .contains("configure a provider and model")
+    );
     let (status, stderr) = agent.finish();
     assert!(status.success(), "exit status was {status}");
     assert_eq!(stderr, "", "a prompt writes nothing to stderr");

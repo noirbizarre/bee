@@ -58,6 +58,23 @@ fn load(text: &str) -> bee::Result<Providers> {
     sandbox.providers()
 }
 
+#[test]
+fn inference_limits_are_positive_and_work_in_presets() {
+    let providers = load("[presets.local]\ntimeout_ms=456\nmax_output_tokens=123\n[ presets.local.protocols.openai-chat ]\n[providers.work]\npreset='local'\n").unwrap();
+    let profile = providers.get("work").unwrap();
+    assert_eq!(profile.timeout(), std::time::Duration::from_millis(456));
+    assert_eq!(profile.max_output_tokens(), 123);
+    for field in ["timeout_ms", "max_output_tokens"] {
+        for value in ["0", "-1", "4294967296", "'sk-secret'"] {
+            let error = load(&format!(
+                "[providers.work]\n{field}={value}\n[providers.work.protocols.openai-chat]"
+            ))
+            .unwrap_err();
+            assert!(!format!("{error:?} {error}").contains("sk-secret"));
+        }
+    }
+}
+
 fn rendered(error: Error) -> String {
     format!("{:?}", miette::Report::new(error))
 }

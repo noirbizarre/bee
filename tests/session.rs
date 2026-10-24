@@ -1,8 +1,7 @@
 //! The session and prompt lifecycle, exercised in-process over the SDK's
 //! in-memory transport.
 //!
-//! The reply every prompt gets is a placeholder: no LLM is integrated yet. These
-//! tests pin the protocol shape around it, which outlives the placeholder.
+//! Deterministic injected replies isolate lifecycle behavior from inference.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -32,10 +31,16 @@ async fn run<T>(body: impl AsyncFnOnce(V2ConnectionTo<Agent>, Updates) -> Result
             },
             agent_client_protocol::on_receive_notification!(),
         )
-        .connect_with(bee::acp::agent(), async move |connection| {
-            initialize(&connection).await?;
-            body(connection, updates).await
-        });
+        .connect_with(
+            bee::acp::agent_with(|reply| async move {
+                reply.text("deterministic test answer");
+                Ok(())
+            }),
+            async move |connection| {
+                initialize(&connection).await?;
+                body(connection, updates).await
+            },
+        );
 
     tokio::time::timeout(TIMEOUT, client)
         .await
@@ -170,7 +175,7 @@ async fn the_user_message_update_carries_the_id_the_prompt_response_returned() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn the_reply_says_it_is_a_placeholder_because_no_llm_is_integrated() {
+async fn an_injected_turn_streams_its_text_to_the_client() {
     run(async |connection, mut updates| {
         let session = new_session(&connection, dir("a")).await?;
 
@@ -184,15 +189,14 @@ async fn the_reply_says_it_is_a_placeholder_because_no_llm_is_integrated() {
                 _ => None,
             })
             .expect("the turn has an agent message");
-        assert!(text.contains("placeholder"), "{text}");
-        assert!(text.contains("no LLM"), "{text}");
+        assert!(text.contains("deterministic test answer"), "{text}");
         Ok(())
     })
     .await;
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn the_reply_does_not_depend_on_the_prompt() {
+async fn an_injected_turn_can_answer_successive_prompts() {
     run(async |connection, mut updates| {
         let session = new_session(&connection, dir("a")).await?;
 
@@ -435,7 +439,7 @@ async fn resuming_with_a_replay_cursor_is_rejected_rather_than_replayed_empty() 
             .send_request(request)
             .block_task()
             .await
-            .expect_err("Bee retains no history to replay");
+            .expect_err("Bee does not retain ACP updates to replay");
 
         assert_eq!(error.code, ErrorCode::InvalidParams);
         Ok(())

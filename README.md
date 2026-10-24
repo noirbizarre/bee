@@ -29,11 +29,11 @@ Bee is at the **bootstrap stage**. The repository, tooling, CI and release autom
 binary serves ACPv2 over stdio: a client can start it, complete the `initialize` handshake, create sessions and submit
 prompts. Bee advertises the baseline session lifecycle (`session/new`, `list`, `resume`, `close`, `prompt`, `cancel`).
 
-**No LLM is integrated yet.** Every prompt is answered with the same fixed placeholder message, which is temporary and
-will be replaced by the agentic loop and a provider integration. A running prompt can be stopped with `session/cancel`
-or `session/close`, and a prompt sent while one is running is refused. Because the placeholder turn finishes
-immediately, this only shows once a real turn takes time. `session/resume` cannot replay history, and prompts accept
-`text` and `resource_link` content only. There is no agentic loop either.
+**Chat Completions, Responses and Anthropic Messages inference are implemented.** Prompts stream responses from the
+selected endpoint. Turns can be cancelled or closed, and another prompt is refused until the session is idle. Context is
+retained in memory; ACP update replay is unsupported. Prompts accept text and resource links (references only, never
+fetched). The SDK-free loop supports injected function executors; production ACP tool execution remains deferred.
+All three protocols use native wire adapters, with provider identity, model, endpoint and authentication kept separate.
 
 The "Scope" and "Non-goals" sections describe the intended design, not current behaviour.
 
@@ -45,7 +45,7 @@ Bee merges up to three TOML files, lowest precedence first: the global
 are replaced rather than extended. A malformed or unreadable file, or a missing `BEE_CONFIG` file, stops Bee at launch
 with an actionable error that never repeats the file's contents. Provider profiles (`[providers.<name>]`: the protocols
 the provider speaks, each with its base URL and options, plus model, credential reference and headers) are validated and
-selectable per ACPv2 session, but no LLM is called yet. See the [documentation](https://noirbizarre.github.io/bee/#configuration).
+selectable per ACPv2 session. See the [documentation](https://noirbizarre.github.io/bee/#configuration).
 
 ## Authentication
 
@@ -55,8 +55,7 @@ A profile's `credential` names an environment variable (`{ env = "KEY" }`) or Be
 `preset = "openrouter"` (also `openai`, `anthropic`, `opencode`, `deepseek`, `google`, `groq`, `mistral`, `xai`,
 `ollama`) fills in a profile, and your own `presets` and `login_flows` tables extend or override the shipped ones.
 OpenRouter's sign-in returns an API key; Cloudflare uses a scoped API token and not Wrangler's login; remote MCP server
-authorization is a separate audience and is not implemented. No LLM is called yet, so stored credentials are not used
-for requests. See the
+authorization is a separate audience and is not implemented. Credentials are resolved when inference needs them. See the
 [documentation](https://noirbizarre.github.io/bee/#authentication).
 
 ## Scope
@@ -71,9 +70,8 @@ leaves everything about presentation and orchestration to the client. The planne
 - configuration and credential handling
 - error handling and observability
 
-Most of these do not exist as code yet: only the protocol integration, the session lifecycle with cancellation,
-protocol error mapping, configuration and credential handling do. They are boundaries to grow into, not modules to
-scaffold ahead of need.
+Protocol integration, cancellable inference, configuration and credential handling are implemented. Production tool
+execution and richer observability remain future work.
 
 ## Non-goals
 
@@ -88,7 +86,7 @@ scaffold ahead of need.
 
 ## Installation
 
-There is nothing useful to install yet. Bee is not published to crates.io (the `bee` crate name is taken by an
+Bee is not published to crates.io (the `bee` crate name is taken by an
 unrelated project); releases will be distributed as GitHub release binaries, a Homebrew formula and an AUR package.
 
 ```bash

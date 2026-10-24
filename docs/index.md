@@ -13,11 +13,13 @@ Bee is at the **bootstrap stage**: the repository, tooling, CI and release autom
 serves ACPv2 over stdio, so a client can start it, complete the `initialize` handshake, create sessions and submit
 prompts. Bee advertises the baseline session lifecycle (`session/new`, `list`, `resume`, `close`, `prompt`, `cancel`).
 
-**No LLM is integrated yet.** Every prompt is answered with the same fixed placeholder message, which is temporary and
-will be replaced by the agentic loop and a provider integration. A running prompt can be stopped with `session/cancel`
-or `session/close`, and a prompt sent while one is running is refused. Because the placeholder turn finishes
-immediately, this only shows once a real turn takes time. `session/resume` cannot replay history, and prompts accept
-`text` and `resource_link` content only. There is no agentic loop either.
+**Chat Completions, Responses and Anthropic Messages inference are implemented.** Selected profiles receive prompts and
+stream answers over ACP. Cancellation and close interrupt pending inference. Successful context is retained in memory,
+across close/resume; ACP update replay is unsupported. Cancelled, failed and refused turns do not enter model context.
+Prompts accept text and resource links, represented as references without fetching their contents.
+
+The SDK-free loop supports injected function executors. Production ACP tool execution remains deferred and no tools
+are advertised. All three native backends support function calls through the injected executor interface.
 
 ## Configuration
 
@@ -48,6 +50,8 @@ model = "corp/ft-2026"             # optional default model: any id, listed anyw
 models = ["corp/base"]             # optional suggestions for model selectors, not a limit
 credential = { env = "GATEWAY_KEY" }           # optional: names where the secret lives, see Authentication
 headers = { "X-Team" = "infra" }   # optional, sent only to this profile
+timeout_ms = 120000               # optional whole-request deadline, including streaming
+max_output_tokens = 4096          # optional output limit
 
 # `protocols` is required: one table per protocol the provider speaks: "openai-chat", "openai-responses" or
 # "anthropic-messages".
@@ -85,7 +89,9 @@ credential. The provider is the client's choice, else `provider`, else the only 
 choice, else the profile's `model`, else the first of its `models`. Choosing another provider resets the model, and
 settings cannot change while a turn is running. See [ADR-007](adr/007-provider-profiles-and-model-selection.md).
 
-Profiles are validated and selectable, but no LLM is called yet: they have no effect on the placeholder reply.
+Requests use the preferred protocol exactly; Bee never silently falls back to another protocol. `openai-chat`,
+`openai-responses` and `anthropic-messages` can run inference, including presets preferring Responses or Messages.
+See [Inference and smoke tests](inference.md) for the supported subset and verification instructions.
 
 ## Authentication
 
@@ -231,7 +237,7 @@ preset = "openrouter"
 bee auth login openrouter
 ```
 
-No LLM is called yet, so a stored credential is not used for requests until the provider backends land.
+Stored credentials are resolved when an inference request needs them, using the selected profile's audience.
 
 ## Scope
 

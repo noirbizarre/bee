@@ -4,6 +4,8 @@
 
 Accepted
 
+The executor choice is superseded by [ADR-012](012-streaming-inference.md); the transport seam remains.
+
 ## Context
 
 An ACPv2 client starts Bee as a subprocess and speaks JSON-RPC on its stdin and

@@ -104,19 +104,21 @@ clap = { version = "4", features = ["derive", "env", "wrap_help"] }
 # `stdio` is the SDK's native stdin/stdout transport (ADR-003).
 agent-client-protocol = { version = "=3.5.0", features = ["stdio", "unstable_protocol_v2"] }
 
-# The executor that drives the stdio connection from `bee::run()`. The SDK is
-# runtime-agnostic and does its own blocking I/O on a thread pool, so a plain
-# executor is enough and the binary needs no tokio (ADR-003). Already in the
-# tree through the SDK; this only makes it a direct dependency.
+# SDK task cancellation and stream combinators. Tokio supplies model I/O's
+# reactor in the binary; the ACP transport itself stays runtime-agnostic.
 futures = { version = "0.3", default-features = false, features = ["std", "executor"] }
+
+# Model streams must yield while waiting for I/O so ACP cancellation can run.
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream", "json"] }
+tokio = { version = "1", features = ["rt", "net", "time", "sync", "macros"] }
 
 # Layered configuration (ADR-006). Only the generic `Table`/`Value` types are
 # used, which sit behind the `serde` feature; `display` (serialization) is not
 # needed because Bee never writes configuration.
 toml = { version = "1", default-features = false, features = ["std", "serde", "parse"] }
 
-# Provider authentication (ADR-008). A blocking HTTP client, because the library
-# has no async runtime (ADR-003): `ureq` needs no tokio. `rustls` rather than
+# Provider authentication (ADR-008). Login retains its blocking HTTP seam;
+# model streaming uses the async client above (ADR-012). `rustls` rather than
 # the system's OpenSSL, so the musl targets need no C library to link against.
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 # PKCE (RFC 7636) is a SHA-256 of a random verifier, base64url encoded. Each is
@@ -136,14 +138,11 @@ serde_json = "1"
 # schema will want serde; ACPv2 framing is the SDK's job).
 
 [dev-dependencies]
-# Only for `#[tokio::test]`: the SDK is runtime-agnostic and neither the library
-# nor the binary depends on tokio; the binary runs on `futures::executor`.
-tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 # The client side of the MCP-over-ACP spike (tests/mcp.rs, ADR-002). The SDK core
 # has no tool builder, so a test client needs this companion crate to host a tool.
 # Exact pin and the same two features as the SDK, for the same reason: the draft
 # MCP binding may change in a minor release. Dev-only, so Bee itself pulls in no
-# rmcp, tokio or schemars.
+# rmcp or schemars.
 agent-client-protocol-rmcp = { version = "=4.0.5", features = ["unstable_protocol_v2", "unstable_mcp_over_acp"] }
 # Tool input and output types for `tool_fn` must be serde-able and carry a schema.
 schemars = "1"

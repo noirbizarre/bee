@@ -8,7 +8,6 @@
 //! the SDK can connect, and [`serve_stdio`] picks stdin/stdout. A remote
 //! transport later supplies another [`ConnectTo`] and changes nothing else.
 
-use std::any::Any;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::path::Path;
@@ -21,13 +20,6 @@ use futures::future::{AbortHandle, AbortRegistration, Abortable, FutureExt};
 use crate::provider::Providers;
 use crate::session::{SessionError, Sessions, Settings};
 use crate::{Error, Result};
-
-/// What every prompt is answered with, until an LLM is integrated.
-///
-/// Fixed on purpose: a reply that varied with the prompt would look like model
-/// output, and a client or a user could come to rely on it.
-const PLACEHOLDER_REPLY: &str = "This is a placeholder response: Bee has no LLM integrated yet, \
-                                 so it cannot answer your prompt.";
 
 /// Why a turn failed.
 ///
@@ -61,6 +53,8 @@ pub struct Reply {
     session_id: v2::SessionId,
     message_id: String,
     token: u64,
+    input: Option<(crate::provider::Profile, String, Vec<crate::llm::Message>)>,
+    completed: Arc<Mutex<Option<crate::agent::Outcome>>>,
 }
 
 impl Reply {
@@ -86,9 +80,32 @@ impl Reply {
     }
 }
 
-/// The turn every prompt gets until an LLM is integrated.
-async fn placeholder(reply: Reply) -> std::result::Result<(), TurnFailure> {
-    reply.text(PLACEHOLDER_REPLY);
+/// Credentials are resolved at request time, not while loading configuration.
+async fn inference(reply: Reply) -> std::result::Result<(), TurnFailure> {
+    let (profile, model, messages) = reply.input.clone().ok_or_else(|| TurnFailure::new(
+        "configure a provider and model in Bee's configuration or select a model over ACP before prompting"
+    ))?;
+    let env = crate::config::Environment::from_process();
+    let store = if matches!(
+        profile.credential(),
+        Some(crate::provider::CredentialSource::Store { .. })
+    ) {
+        crate::auth::FileStore::from_environment(&env).map_err(|_| {
+            TurnFailure::new("cannot locate the credential store; configure HOME or XDG_DATA_HOME")
+        })?
+    } else {
+        // resolve never touches the store for an environment/no-auth profile.
+        crate::auth::FileStore::new("")
+    };
+    let credential = crate::auth::resolve(&profile, &env, &store, crate::auth::unix_now())
+        .map_err(|_| TurnFailure::new("cannot resolve the model credential; check its environment variable or run `bee auth login`"))?;
+    let credential = credential.map(|value| value.secret().clone());
+    let model = crate::llm::Model::new(profile, model, credential)
+        .map_err(|error| TurnFailure::new(error.to_string()))?;
+    let outcome = crate::agent::run(&model, messages, &[], None, &mut |text| reply.text(text))
+        .await
+        .map_err(|error| TurnFailure::new(error.to_string()))?;
+    *lock(&reply.completed) = Some(outcome);
     Ok(())
 }
 
@@ -127,8 +144,7 @@ pub async fn serve_stdio(providers: Providers) -> Result<()> {
 /// Build the ACPv2 agent side of a connection.
 ///
 /// It serves the baseline session lifecycle (`session/new`, `list`, `resume`,
-/// `close`, `prompt`, `cancel`) and answers every prompt with a fixed
-/// placeholder. No LLM is integrated yet.
+/// `close`, `prompt`, `cancel`) and streams configured model responses.
 ///
 /// A running prompt can be stopped with `session/cancel` or `session/close`,
 /// and a second prompt is refused until it ends (ADR-005).
@@ -147,15 +163,12 @@ pub fn agent() -> impl ConnectTo<Client> {
 /// choice is a session setting; the profile's endpoint, headers and credential
 /// are configuration, and no request can change them (ADR-007).
 pub fn agent_with_providers(providers: Providers) -> impl ConnectTo<Client> {
-    build(providers, placeholder)
+    build(providers, inference)
 }
 
 /// [`agent`], with `body` as the turn that answers every prompt.
 ///
-/// Not part of the stable API. The placeholder turn finishes instantly, so
-/// nothing could observe a cancelled or failed turn through it; tests inject a
-/// body that waits, fails or panics instead. It is the only seam, and it is
-/// not a provider abstraction: that waits for a real provider.
+/// Not part of the stable API: lifecycle tests inject deterministic turn bodies.
 #[doc(hidden)]
 pub fn agent_with<F, Fut>(body: F) -> impl ConnectTo<Client>
 where
@@ -239,8 +252,9 @@ where
                     // Bee never returns a `nextCursor`, so a cursor can only be
                     // made up; silently ignoring it would hide a client bug.
                     if request.cursor.is_some() {
-                        return responder
-                            .respond_with_error(invalid_params("`cursor` is not supported: `session/list` returns a single page"));
+                        return responder.respond_with_error(invalid_params(
+                            "`cursor` is not supported: `session/list` returns a single page",
+                        ));
                     }
                     let listed = lock(&sessions).list(request.cwd.as_ref().map(AsRef::as_ref));
                     responder.respond(v2::ListSessionsResponse::new(
@@ -259,12 +273,12 @@ where
                 async move |request: v2::ResumeSessionRequest,
                             responder: Responder<v2::ResumeSessionResponse>,
                             connection: V2ConnectionTo<Client>| {
-                    // Nothing is retained, so there is nothing to replay. The
+                    // Model context is retained, but not ACP update events. The
                     // protocol requires rejecting a cursor rather than resuming
                     // without the replay the client asked for.
                     if request.replay_from.is_some() {
                         return responder.respond_with_error(invalid_params(
-                            "`replayFrom` is not supported: Bee does not retain conversation history",
+                            "`replayFrom` is not supported: Bee does not retain ACP update history",
                         ));
                     }
                     let id = request.session_id.to_string();
@@ -375,12 +389,31 @@ where
                     // could not be cancelled.
                     let (abort, registration) = AbortHandle::new_pair();
                     let id = request.session_id.to_string();
-                    let turn = match lock(&sessions).begin_turn(&id, move || abort.abort()) {
+                    let mut registry = lock(&sessions);
+                    let turn = match registry.begin_turn(&id, move || abort.abort()) {
                         Ok(turn) => turn,
                         // A prompt refused before insertion is an error
                         // response, not an idle update: no turn ever started.
                         Err(error) => return responder.respond_with_error(session_error(error)),
                     };
+                    let mut input = registry.inference(&id);
+                    if let Some((_, _, history)) = &mut input {
+                        let content = request
+                            .prompt
+                            .iter()
+                            .filter_map(|block| match block {
+                                v2::ContentBlock::Text(text) => Some(text.text.clone()),
+                                v2::ContentBlock::ResourceLink(link) => Some(format!(
+                                    "[Resource link, contents not fetched: {}]",
+                                    link.uri
+                                )),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        history.push(crate::llm::Message::User(content));
+                    }
+                    drop(registry);
                     let session_id = request.session_id;
 
                     // Acceptance only: the response says the user message was
@@ -424,6 +457,8 @@ where
                         session_id,
                         message_id: turn.agent_message_id,
                         token: turn.token,
+                        input,
+                        completed: Arc::new(Mutex::new(None)),
                     };
                     // A turn runs off the dispatch loop: handlers block it, and
                     // a `session/cancel` queued behind a running prompt would
@@ -534,6 +569,7 @@ where
     let id = reply.id.clone();
     let session_id = reply.session_id.clone();
     let token = reply.token;
+    let completed = Arc::clone(&reply.completed);
 
     // `catch_unwind` so a panicking turn ends as a failed turn and not as a
     // dead task whose session stays busy forever. The `async` block also
@@ -543,15 +579,24 @@ where
         // Cancelled or closed: whoever stopped it already sent the terminal
         // `idle`, and sending another would be a second one.
         Err(_aborted) => return Ok(()),
-        Ok(Ok(Ok(()))) => v2::StopReason::EndTurn,
+        Ok(Ok(Ok(()))) => match lock(&completed).as_ref().map(|outcome| outcome.stop) {
+            Some(crate::llm::Stop::MaxTokens) => v2::StopReason::MaxTokens,
+            Some(crate::llm::Stop::Refusal) => v2::StopReason::Refusal,
+            _ => v2::StopReason::EndTurn,
+        },
         Ok(Ok(Err(failure))) => failed(&failure.to_string()),
-        Ok(Err(panic)) => failed(&panic_reason(&*panic)),
+        Ok(Err(_panic)) => failed("the turn panicked; retry or report this failure"),
     };
 
     // Held across the send, as in `session/cancel`: if a cancel took this turn
     // in the meantime it reports the terminal state and this stays silent. Never
     // `end_turn` for a turn the client saw cancelled.
     let mut sessions = lock(&sessions);
+    if let Some(outcome) = lock(&completed).take()
+        && outcome.stop != crate::llm::Stop::Refusal
+    {
+        sessions.commit(&id, token, outcome.messages);
+    }
     if sessions.finish_turn(&id, token) {
         // A failed send means the peer is gone; there is nobody to tell.
         let _ = send_update(&connection, &session_id, idle(Some(stop_reason)));
@@ -564,16 +609,6 @@ fn failed(reason: &str) -> v2::StopReason {
     v2::StopReason::Error(
         v2::ErrorStopReason::new().error(v2::Error::internal_error().data(reason.to_owned())),
     )
-}
-
-/// What a panic said, when it said anything printable.
-fn panic_reason(payload: &(dyn Any + Send)) -> String {
-    let message = payload
-        .downcast_ref::<&str>()
-        .map(|message| (*message).to_owned())
-        .or_else(|| payload.downcast_ref::<String>().cloned())
-        .unwrap_or_else(|| "no message".to_owned());
-    format!("the turn panicked: {message}")
 }
 
 /// Why `prompt` cannot be served, if it has a block Bee does not accept.
@@ -599,7 +634,7 @@ fn unsupported_content(prompt: &[v2::ContentBlock]) -> Option<String> {
 }
 
 /// Lock the registry.
-fn lock(sessions: &Mutex<Sessions>) -> MutexGuard<'_, Sessions> {
+fn lock<T>(sessions: &Mutex<T>) -> MutexGuard<'_, T> {
     // A poisoned lock only means another handler panicked mid-update. The
     // registry is a few counters and a map with no invariant spanning
     // operations, and failing every later request would be worse.

@@ -1,9 +1,8 @@
 //! Prompt cancellation and protocol error handling, exercised in-process.
 //!
-//! The placeholder turn ends instantly, so nothing could observe a turn that is
-//! still running through it. These tests inject their own turn body with
+//! These tests inject a controlled turn body with
 //! `bee::acp::agent_with`: one that never ends, fails or panics. What they pin
-//! is the protocol around the turn, which outlives the placeholder.
+//! is the protocol around the turn, independent of model I/O.
 
 use std::future::{self, Future};
 use std::path::PathBuf;
@@ -500,7 +499,7 @@ async fn a_panicking_turn_ends_with_an_error_idle_update_and_the_connection_surv
     };
 
     run(body, async |connection, mut updates| {
-        assert_failed_then_recovers(&connection, &mut updates, "the turn blew up").await
+        assert_failed_then_recovers(&connection, &mut updates, "the turn panicked").await
     })
     .await;
 }

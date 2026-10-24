@@ -13,13 +13,12 @@ configuration and orchestration are the client's concern, reached through the
 ACPv2 client-agent contract. Do not propose a TUI, a web frontend, a plugin
 framework or a provider abstraction ahead of a concrete need.
 
-The repository is at the bootstrap stage: Bee serves ACPv2 over stdio and
-implements the baseline session lifecycle (new, list, resume, close, prompt,
-cancel), answering every prompt with a fixed placeholder. A running prompt
-can be cancelled and a failed turn is reported, but the placeholder turn never takes time.
-The agentic loop and provider integrations are planned, not implemented.
-Documentation must keep saying that the placeholder reply is temporary and that
-no LLM is integrated, until that changes.
+Bee serves ACPv2 over stdio and implements the baseline session lifecycle
+(new, list, resume, close, prompt, cancel) with streaming Chat Completions, Responses
+and Anthropic Messages inference. Successful context is retained in memory; failed/cancelled/refused
+turns are excluded, and ACP replay remains unsupported. The SDK-free bounded
+loop supports injected tool executors; production ACP tool execution is deferred.
+Each native backend preserves its own continuation and tool-result semantics.
 
 ## Non-negotiable invariants
 
@@ -55,6 +54,9 @@ src/
 ├── login.rs    the `pkce-key` browser sign-in, driven by a `LoginSpec`, free of the SDK
 ├── preset.rs   presets and login flows as data (ADR-009), free of the SDK
 ├── http.rs     the one HTTP seam, so flows are tested against a fake
+├── llm.rs      SDK-free inference types, errors and protocol dispatch
+├── llm/        native wire adapters
+├── agent.rs    bounded model/tool loop with an injected executor
 ├── cli.rs      argument types only
 ├── commands.rs what `bee auth` does and prints (binary only)
 └── error.rs    the crate's error type
