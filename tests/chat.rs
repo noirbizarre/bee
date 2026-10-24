@@ -7,6 +7,51 @@ use serde_json::json;
 use support::{Echo, Response, Server, chat_text, event, profile, tool};
 
 #[tokio::test]
+async fn a_model_reads_a_real_file_through_the_native_executor() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("hello.txt"), "hello from disk").unwrap();
+    let server = Server::start(vec![
+        Response::json(
+            json!({"choices":[{"index":0,"message":{"tool_calls":[{"id":"read-file","type":"function","function":{"name":"read","arguments":"{\"path\":\"hello.txt\"}"}}]},"finish_reason":"tool_calls"}]}),
+        ),
+        Response::json(chat_text("done")),
+    ]);
+    let model = Model::new(
+        profile("openai-chat", &server.url, ""),
+        "opaque".into(),
+        None,
+    )
+    .unwrap();
+    let mut registry = bee::tool::Registry::default();
+    registry.register(bee::tool::read::Read).unwrap();
+    let context = bee::tool::Context::new(
+        root.path(),
+        tokio_util::sync::CancellationToken::new(),
+        4096,
+    )
+    .unwrap();
+    let executor = bee::agent::NativeExecutor::new(&registry, context);
+    bee::agent::run(
+        &model,
+        vec![Message::User("read hello.txt".into())],
+        &executor.definitions(),
+        Some(&executor),
+        &mut |_| {},
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        server.request().body["tools"][0]["function"]["name"],
+        "read"
+    );
+    let request = server.request();
+    assert_eq!(request.body["messages"][2]["tool_call_id"], "read-file");
+    let result: serde_json::Value =
+        serde_json::from_str(request.body["messages"][2]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(result["data"]["content"], "1: hello from disk\n");
+}
+
+#[tokio::test]
 async fn a_registered_native_tool_returns_a_schema_error_then_executes_the_corrected_call() {
     let call = |id: &str, arguments: &str| {
         Response::json(
