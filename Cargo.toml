@@ -153,6 +153,9 @@ serde_json = "1"
 nix = { version = "0.30", default-features = false, features = ["signal", "process"] }
 
 [dev-dependencies]
+# Exercise the official client against a subprocess without adding process
+# launching support to Bee's production SDK dependency.
+agent-client-protocol = { version = "=3.5.0", features = ["process"] }
 # The client side of the MCP-over-ACP spike (tests/mcp.rs, ADR-002). The SDK core
 # has no tool builder, so a test client needs this companion crate to host a tool.
 # Exact pin and the same two features as the SDK, for the same reason: the draft

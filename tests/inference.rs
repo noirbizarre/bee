@@ -415,7 +415,7 @@ async fn native_turns(
     profiles: bee::provider::Providers,
     runtime: bee::acp::Runtime,
     sessions: Vec<(std::path::PathBuf, Vec<bool>)>,
-) {
+) -> Vec<String> {
     let (tx, mut updates) = tokio::sync::mpsc::unbounded_channel();
     let client = Client.v2().on_receive_notification(
         async move |update: v2::UpdateSessionNotification, _connection| {
@@ -428,6 +428,7 @@ async fn native_turns(
         client.connect_with(
             bee::acp::agent_with_runtime(profiles, runtime),
             async move |connection| {
+                let mut answers = Vec::new();
                 connection
                     .send_request(v2::InitializeRequest::new(
                         ProtocolVersion::V2,
@@ -449,9 +450,18 @@ async fn native_turns(
                             ))
                             .block_task()
                             .await?;
+                        let mut answer = String::new();
                         loop {
+                            let notification = updates.recv().await.unwrap();
+                            assert_eq!(notification.session_id, session);
+                            if let v2::SessionUpdate::AgentMessageChunk(chunk) =
+                                &notification.update
+                                && let v2::ContentBlock::Text(text) = &chunk.content
+                            {
+                                answer.push_str(&text.text);
+                            }
                             if let v2::SessionUpdate::StateUpdate(v2::StateUpdate::Idle(idle)) =
-                                updates.recv().await.unwrap().update
+                                notification.update
                             {
                                 if success {
                                     assert_eq!(idle.stop_reason, Some(v2::StopReason::EndTurn));
@@ -464,15 +474,16 @@ async fn native_turns(
                                 break;
                             }
                         }
+                        answers.push(answer);
                     }
                 }
-                Ok(())
+                Ok(answers)
             },
         ),
     )
     .await
     .unwrap()
-    .unwrap();
+    .unwrap()
 }
 
 #[rstest::rstest]
@@ -811,7 +822,7 @@ async fn acp_executes_shipped_tools_in_the_session_directory_and_retains_results
         Response::json(answer(protocol, "done")),
         Response::json(answer(protocol, "remembered")),
     ]);
-    native_turns(
+    let answers = native_turns(
         providers(protocol, &server.url, ""),
         bee::acp::Runtime::new(
             bee::agent::Limits::default(),
@@ -820,6 +831,7 @@ async fn acp_executes_shipped_tools_in_the_session_directory_and_retains_results
         vec![(root.path().into(), vec![true, true])],
     )
     .await;
+    assert_eq!(answers, ["done", "remembered"]);
     let first = server.request();
     let names: Vec<_> = first.body["tools"]
         .as_array()
@@ -853,11 +865,10 @@ async fn acp_executes_shipped_tools_in_the_session_directory_and_retains_results
     }
     let final_request = server.request();
     assert!(final_request.body.to_string().contains("after-edit"));
-    let bash_result = server.request().body.to_string();
-    assert!(bash_result.contains("after-edit"));
-    assert!(bash_result.contains("bash-stderr"));
-    assert!(bash_result.contains("exit_code"));
-    assert!(bash_result.contains('g'));
+    let bash_result = native_result(protocol, &server.request().body, "g");
+    assert_eq!(bash_result["data"]["stdout"], "after-edit");
+    assert_eq!(bash_result["data"]["stderr"], "bash-stderr");
+    assert_eq!(bash_result["data"]["exit_code"], 7);
     let next = server.request();
     assert!(next.body.to_string().contains("session-specific-content"));
     assert!(next.body.to_string().contains("after-edit"));
@@ -866,6 +877,32 @@ async fn acp_executes_shipped_tools_in_the_session_directory_and_retains_results
         std::fs::read_to_string(root.path().join("created.txt")).unwrap(),
         "after-edit\n"
     );
+}
+
+fn native_result(protocol: &str, body: &serde_json::Value, id: &str) -> serde_json::Value {
+    let content = match protocol {
+        "openai-chat" => &body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["role"] == "tool" && message["tool_call_id"] == id)
+            .expect("correlated chat tool result")["content"],
+        "openai-responses" => &body["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["type"] == "function_call_output" && item["call_id"] == id)
+            .expect("correlated Responses tool result")["output"],
+        "anthropic-messages" => &body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|message| message["content"].as_array().into_iter().flatten())
+            .find(|item| item["type"] == "tool_result" && item["tool_use_id"] == id)
+            .expect("correlated Messages tool result")["content"],
+        _ => unreachable!(),
+    };
+    serde_json::from_str(content.as_str().unwrap()).unwrap()
 }
 
 #[tokio::test]
