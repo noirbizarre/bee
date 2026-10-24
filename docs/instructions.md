@@ -19,7 +19,8 @@ Parent rules remain applicable. A closer `AGENTS.md` wins conflicts for its subt
 file-based guidance. Each nested source is labeled with its scope, so a package's rules are not presented as global
 rules for its siblings. Instruction files at different scopes remain distinct even when they share content.
 
-Before native `read`, `write`, `edit`, `list` or `glob` operations, Bee checks the target's applicable ancestor chain.
+Before native `read`, `write`, `edit`, `list`, `glob` or `grep` operations, Bee checks the target's
+applicable ancestor chain.
 If new or changed guidance was absent when the model generated the calls, the entire batch returns correlated
 `guidance_required` results without executing. The next request contains the guidance, and the model must reconsider
 and issue fresh calls. If an earlier operation changes instructions, remaining calls are deferred before execution.
@@ -28,7 +29,8 @@ Deferred calls and extra model requests count against the normal execution limit
 Directory operations check their explicit target directory, not every returned descendant. Bee never eagerly loads all
 nested instructions. Arbitrary Bash commands and custom tools require the model to read applicable instructions before
 working on new paths; shell commands cannot be reliably analyzed for all affected files. Embedders can opt custom tools
-into structured-target handling explicitly.
+into structured-target handling explicitly. Content search checks its explicit directory root; matching snippets from a
+`SKILL.md` file do not activate that skill.
 
 Targets resolve through existing ancestors and symlinks. External files remain accessible through native tools, but Bee
 does not import external project instruction trees automatically. An `AGENTS.md` symlink must resolve inside the project;

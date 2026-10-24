@@ -19,7 +19,7 @@ and Anthropic Messages inference. Successful context is retained in memory, with
 context windows, approximate token accounting and transactional oldest-whole-turn truncation; failed/cancelled/refused
 turns are excluded, and ACP replay remains unsupported. The SDK-free bounded
 loop supports configurable turn limits and injected tool executors; production ACP
-registers the native bash, read, glob, list, write and edit tools with session-relative execution contexts.
+registers the native bash, read, glob, grep, list, write and edit tools with session-relative execution contexts.
 Client-hosted MCP tools are discovered per prompt and invoked through ACP's MCP transport, with session-scoped
 attachments, offline schema validation and complete JSON result envelopes. The client owns permission policy.
 Production ACP requests permission for Bash only, adds `ask_user` for form-capable clients,

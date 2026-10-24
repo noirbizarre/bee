@@ -387,7 +387,10 @@ fn configured_turn_limits_reach_real_stdio_inference() {
         .iter()
         .map(|tool| tool["function"]["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, ["bash", "edit", "glob", "list", "read", "write"]);
+    assert_eq!(
+        names,
+        ["bash", "edit", "glob", "grep", "list", "read", "write"]
+    );
     server.assert_no_more_requests();
     let (status, stderr) = agent.finish();
     assert!(status.success());

@@ -34,7 +34,7 @@ selected endpoint. Turns can be cancelled or closed, and another prompt is refus
 retained in memory, with oldest-whole-turn truncation when explicit model context windows are configured; provider
 context overflow fails explicitly. ACP update replay is unsupported. Prompts accept text and resource links (references
 only, never fetched). The SDK-free loop supports injected function executors; production ACP executes native
-`bash`, `read`, `glob`, `list`, `write`, and `edit` tools in each session's working directory.
+`bash`, `read`, `glob`, `grep`, `list`, `write`, and `edit` tools in each session's working directory.
 It also discovers and invokes client-hosted MCP tools through ACPv2's `session.mcp.acp` transport, alongside native
 tools. The client owns MCP configuration and permission policy; denials are returned to the model as tool errors.
 Native Bash requests client permission before execution. Form-capable clients receive

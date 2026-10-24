@@ -19,6 +19,7 @@ mod discovery;
 pub mod edit;
 mod fs;
 pub mod glob;
+pub mod grep;
 pub mod list;
 mod mutation;
 pub mod read;
@@ -40,6 +41,7 @@ pub fn builtins_with_bash(settings: bash::Settings) -> Result<Registry, Error> {
     registry.register(bash::Bash::new(settings))?;
     registry.register(read::Read)?;
     registry.register(glob::Glob)?;
+    registry.register(grep::Grep)?;
     registry.register(list::List)?;
     registry.register(write::Write)?;
     registry.register(edit::Edit)?;

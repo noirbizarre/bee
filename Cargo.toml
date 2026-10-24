@@ -121,6 +121,9 @@ jsonschema = { version = "0.60", default-features = false }
 # Repository-local discovery rules and portable, validated glob syntax.
 ignore = "0.4"
 globset = "0.4"
+# Embed ripgrep's matcher while retaining cooperative, bounded file scanning.
+grep-regex = "0.1"
+grep-matcher = "0.1"
 # Standard skill frontmatter is YAML, including folded scalars and duplicate-key validation.
 yaml_serde = "0.10"
 unicode-normalization = "0.1"

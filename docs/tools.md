@@ -3,7 +3,7 @@
 Bee's SDK-free `tool` module defines typed native operations, their advertised
 schemas, and their execution context. `agent::NativeExecutor` connects a registry
 to the bounded inference loop. Normal ACP sessions advertise and execute the
-shipped `bash`, `read`, `glob`, `list`, `write`, and `edit` tools. Their execution base is the session cwd,
+shipped `bash`, `read`, `glob`, `grep`, `list`, `write`, and `edit` tools. Their execution base is the session cwd,
 not the launch directory used to load configuration.
 
 ## ACP user interactions
@@ -300,6 +300,94 @@ Missing/non-directory roots, inaccessible descendants, malformed ignore rules,
 I/O failures and non-UTF-8 names produce actionable errors rather than silently
 incomplete success. Filesystem changes can still race with enumeration. Path
 resolution and cancellation have the same non-sandbox limitations as `read`.
+
+### Built-in content search
+
+Register `bee::tool::grep::Grep` to embed repository-aware content search. Built-in
+ACP sessions already include it. Search is entirely in Rust: no `rg` executable,
+shell permission request, or subprocess is involved.
+
+For example, invoke `grep` with:
+
+```json
+{"pattern":"fn\\s+main","path":"src","include":["**/*.rs"],"exclude":["**/generated/**"],"limit":100}
+```
+
+`pattern` is a nonempty Unicode Rust regex, at most 4096 UTF-8 bytes. Matching is
+line-oriented: lookaround, backreferences, and explicit newline/NUL matches are
+unsupported. Regex compilation and DFA caches each have an approximate 1 MiB
+limit. Invalid or excessive patterns return sanitized `invalid_arguments` errors.
+`case_insensitive` defaults to false; enabling it applies Unicode case folding to
+content, independently of path filters. Inline regex flags are supported.
+
+`path` defaults to `.` and must identify a directory. Use glob filters to narrow
+search to an individual file. `include` and `exclude` default to empty arrays;
+each accepts at most 100 nonempty patterns of at most 4096 UTF-8 bytes. They use
+the same root-relative, case-sensitive syntax as `glob`. A file must match any
+include (or none are required when the array is empty), and no exclude. Excludes
+win. Filters select files without pruning ancestors or overriding ignore rules.
+`include_hidden` and `include_ignored` default to false, independently, with the
+same repository-local rules and disabled global Git ignores as `glob`.
+
+Success data is structured rather than formatted as terminal output:
+
+```json
+{"data":{"matches":[{"path":"main.rs","line_number":12,"line":"fn main() {"}],"truncated":false,"skipped_binary_files":0}}
+```
+
+Each matching logical line appears once, regardless of occurrence count. Paths
+are UTF-8, root-relative and use `/`; line numbers are 1-based. LF/CRLF endings
+and an initial UTF-8 BOM are removed before matching/display. Empty files have
+no lines; a final newline creates no extra line. No multiline search is offered.
+
+`limit` defaults to 1000 and accepts 1–10000 matching lines. Results form a prefix
+sorted by path and numeric line number, independent of filesystem enumeration.
+The complete serialized byte budget, including JSON escaping, may reduce that
+prefix further. Omitted matches or reaching traversal depth 64 set `truncated`.
+A first match too large to represent can produce empty, truncated results. Narrow
+the root/filters or increase the budget/count to inspect more matches.
+
+Only regular UTF-8 text files are searched. NUL or invalid UTF-8 marks a file as
+binary: its matches are discarded and `skipped_binary_files` increases. Files
+are scanned through EOF even after the selection fills; bounded per-file staging
+prevents late binary markers from leaking earlier matches or evicting valid text
+results. A logical line exceeding `context.output_limit()` instead fails the
+search with `output_limit`, even when it would not match. A line-size failure can
+precede detection of later binary content. Lines are never silently split.
+
+Explicit directory symlink roots are followed; nested symlinks (including file
+links and dangling links) and special files are skipped. Missing/non-directory
+roots, inaccessible files/directories, malformed ignore rules, I/O errors and
+non-UTF-8 names produce actionable errors. Path resolution has the same
+non-sandbox policy as other native tools, including absolute paths and `..`.
+
+Traversal and bounded chunk scanning yield cooperatively for cancellation,
+including inside a large nonmatching file. Cancellation aborts dispatch instead
+of returning partial success; dropping dispatch stops its scanner without a
+detached task. Filesystem syscalls can block and concurrent replacements can
+race with metadata checks. Output and intermediate buffers are bounded, but
+total scan time is not; deterministic selection and binary checks scan every
+eligible file. Scoped guidance checks the explicit root, and snippets from a
+`SKILL.md` file do not activate that skill.
+
+#### Embedded crates and licenses
+
+The lockfile resolves these ripgrep ecosystem crates, all under
+`Unlicense OR MIT`, compatible with Bee's MIT license:
+
+| Crate | Version | Purpose |
+| --- | --- | --- |
+| `grep-regex` | 0.1.14 | Unicode Rust regex compilation and matching |
+| `grep-matcher` | 0.1.9 | Supported matcher interface |
+| `ignore` | 0.4.33 | Repository-local traversal and ignore rules |
+| `globset` | 0.4.20 | Portable include/exclude filters |
+
+Their package metadata and MIT license texts were checked; the MIT option allows
+embedding with preservation of the dependency copyright and permission notices
+when distributing copies or substantial portions. Bee uses its own bounded,
+cooperative reader around the supported matcher API rather than the synchronous
+`grep-searcher` full-reader loop, so nonmatching reads also provide cancellation
+checkpoints. No missing regex API requires another engine or executable fallback.
 
 ### Custom tools
 
