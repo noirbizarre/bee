@@ -7,6 +7,91 @@ use serde_json::json;
 use support::{Echo, Response, Server, chat_text, event, profile, tool};
 
 #[tokio::test]
+async fn a_model_creates_reads_edits_and_verifies_a_file_through_native_tools() {
+    let root = tempfile::tempdir().unwrap();
+    let call = |id: &str, name: &str, arguments: serde_json::Value| {
+        Response::json(json!({"choices":[{"index":0,"message":{"tool_calls":[{
+            "id":id,"type":"function","function":{"name":name,"arguments":arguments.to_string()}
+        }]},"finish_reason":"tool_calls"}]}))
+    };
+    let server = Server::start(vec![
+        call(
+            "create",
+            "write",
+            json!({"path":"text","content":"héllo\r\nlast"}),
+        ),
+        call("inspect", "read", json!({"path":"text"})),
+        call(
+            "replace",
+            "edit",
+            json!({"path":"text","old_text":"héllo","new_text":"goodbye"}),
+        ),
+        call("verify", "read", json!({"path":"text"})),
+        Response::json(chat_text("done")),
+    ]);
+    let model = Model::new(
+        profile("openai-chat", &server.url, ""),
+        "opaque".into(),
+        None,
+    )
+    .unwrap();
+    let mut registry = bee::tool::Registry::default();
+    registry.register(bee::tool::write::Write).unwrap();
+    registry.register(bee::tool::read::Read).unwrap();
+    registry.register(bee::tool::edit::Edit).unwrap();
+    let context = bee::tool::Context::new(
+        root.path(),
+        tokio_util::sync::CancellationToken::new(),
+        4096,
+    )
+    .unwrap();
+    let executor = bee::agent::NativeExecutor::new(&registry, context);
+    let result = bee::agent::run(
+        &model,
+        vec![Message::User("create and edit text".into())],
+        &executor.definitions(),
+        Some(&executor),
+        &mut |_| {},
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.stop, Stop::End);
+    let first = server.request();
+    let names: Vec<_> = first.body["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["function"]["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["edit", "read", "write"]);
+    for (index, id, expected) in [
+        (2, "create", json!({"bytes_written":12})),
+        (
+            4,
+            "inspect",
+            json!({"content":"1: héllo\n2: last\n","truncated":false,"next_line":null}),
+        ),
+        (6, "replace", json!({"bytes_written":13})),
+        (
+            8,
+            "verify",
+            json!({"content":"1: goodbye\n2: last\n","truncated":false,"next_line":null}),
+        ),
+    ] {
+        let request = server.request();
+        let message = &request.body["messages"][index];
+        assert_eq!(message["tool_call_id"], id);
+        let output: serde_json::Value =
+            serde_json::from_str(message["content"].as_str().unwrap()).unwrap();
+        assert_eq!(output, json!({"data":expected}));
+    }
+    assert_eq!(
+        std::fs::read(root.path().join("text")).unwrap(),
+        b"goodbye\r\nlast"
+    );
+}
+
+#[tokio::test]
 async fn a_model_discovers_lists_and_reads_project_files() {
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir(root.path().join("src")).unwrap();

@@ -33,6 +33,75 @@ explicit symlinks are allowed, including targets outside cwd. This is **not a
 sandbox**: metadata checks do not prevent concurrent filesystem changes. No file
 contents or arbitrary OS error messages enter diagnostic or debug output.
 
+### Built-in file writing and editing
+
+Register `bee::tool::write::Write` and `bee::tool::edit::Edit` alongside `Read`:
+
+```rust
+# fn main() -> Result<(), bee::tool::Error> {
+let mut registry = bee::tool::Registry::default();
+registry.register(bee::tool::write::Write)?;
+registry.register(bee::tool::edit::Edit)?;
+# Ok(())
+# }
+```
+
+`write` requires `path` and complete UTF-8 `content`. Optional `overwrite` defaults
+to false: existing files fail unless `overwrite: true` explicitly authorizes
+replacement. For example, `{"path":"notes.txt","content":"hello\n"}` creates a
+file; adding `"overwrite":true` permits replacing its complete contents. An
+initially absent target is always published without overwriting a competing
+creator, even when overwrite was requested. Empty files are supported.
+
+`edit` requires `path`, nonempty `old_text`, and `new_text`. For example,
+`{"path":"notes.txt","old_text":"hello","new_text":"goodbye"}` replaces one
+literal fragment. Exactly one matching start position is required: missing,
+multiple, and overlapping matches fail without guessing. Thus `old_text: "aa"`
+is ambiguous in `"aaa"`. Include surrounding text to disambiguate. Empty
+`new_text` deletes the match. Identical old/new text is a validated no-op.
+
+Both reject unknown fields. Success data is `{"bytes_written":123}`, counting
+the entire published file's UTF-8 bytes, or zero for an edit no-op. No contents or
+paths are echoed. Each text argument, edit source, and resulting file must fit
+`context.output_limit()` in UTF-8 bytes, independently of JSON escaping. Source
+reads and intermediate buffers are bounded; several bounded buffers may coexist.
+Oversized/NUL arguments and oversized edit results return `invalid_arguments`;
+unsupported/oversized source files and filesystem/conflict errors return `execution`.
+Neither tool supports NUL content; edit also rejects invalid UTF-8 source files.
+
+Edits preserve untouched bytes, including BOM, mixed LF/CRLF endings, and missing
+final newlines. Matching does not normalize line endings: include `\r\n` when
+matching a CRLF boundary. The numbered, normalized text returned by `read` is a
+presentation, not a byte-for-byte source fragment.
+
+Paths follow the execution-cwd policy described above, including absolute paths
+and parent traversal. Parents must already exist; neither tool creates directories.
+Final-component symlinks (including dangling links), readonly files, directories,
+and special files are rejected. Parent-directory symlinks are allowed. Replacements
+preserve Unix permission bits; new files use tempfile defaults (0600 on Unix,
+platform defaults on Windows). Ownership, ACLs, extended attributes, Windows
+attributes, and hardlink relationships are not preserved. Updating one hardlink
+path replaces that entry; other links retain the original file.
+
+Content is staged in the same directory, synchronized, and then published as a
+complete file. Errors before publication leave the original intact, with staging
+cleaned up on ordinary failures or future drop. No-clobber publication never
+overwrites an existing entry, but on some platforms an extra staging hardlink can
+remain if unlinking it fails or publication is interrupted. Atomic visibility is
+not a power-loss durability guarantee: the parent directory is not synchronized.
+
+Edit takes a bounded source snapshot, then compares bytes and available metadata
+again immediately before publication. Changes detected **during the invocation**,
+including removal and detectable replacement, abort the edit. Earlier reads are
+not tracked. This is optimistic detection, **not atomic compare-and-swap**: changes
+can race with the final check; same-content replacements may evade portable
+metadata checks. Parent redirection and hostile filesystem races are not prevented.
+
+Reads/staging cooperate with cancellation at checkpoints; synchronous filesystem
+calls, including final validation, can block. Cancellation before publication leaves
+the target intact. Cancellation after publication can report a cancelled invocation
+even though a complete file change committed; it cannot roll back that change.
+
 ### Built-in discovery
 
 Register `bee::tool::glob::Glob` and `bee::tool::list::List` alongside `Read`.
