@@ -137,7 +137,9 @@ async fn a_timeout_retains_partial_output_and_reports_termination() {
     let root = TempDir::new().unwrap();
     let result = run(
         &root,
-        json!({"command":"printf started; printf problem >&2; sleep 30", "timeout_ms":1000}),
+        // A builtin loop tests direct-child termination on every platform; Unix
+        // descendant cleanup is exercised separately below.
+        json!({"command":"printf started; printf problem >&2; while :; do :; done", "timeout_ms":1000}),
         4096,
     )
     .await;

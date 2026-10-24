@@ -136,7 +136,8 @@ impl Agent {
 fn bash_output_is_captured_without_corrupting_the_protocol_stream() {
     let server = support::Server::start(vec![
         support::Response::json(
-            json!({"choices":[{"index":0,"message":{"tool_calls":[{"id":"bash-call","type":"function","function":{"name":"bash","arguments":"{\"command\":\"printf child-stdout; printf child-stderr >&2; sleep 30\"}"}}]},"finish_reason":"tool_calls"}]}),
+            // Use only shell builtins so the Windows direct-child guarantee is sufficient.
+            json!({"choices":[{"index":0,"message":{"tool_calls":[{"id":"bash-call","type":"function","function":{"name":"bash","arguments":"{\"command\":\"printf child-stdout; printf child-stderr >&2; while :; do :; done\"}"}}]},"finish_reason":"tool_calls"}]}),
         ),
         support::Response::json(
             json!({"choices":[{"index":0,"message":{"content":"done"},"finish_reason":"stop"}]}),

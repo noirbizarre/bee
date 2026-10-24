@@ -17,7 +17,8 @@ pub fn native_bash_config(text: &str) -> String {
     #[cfg(windows)]
     {
         let shell = std::path::PathBuf::from(std::env::var_os("ProgramFiles").unwrap())
-            .join("Git/bin/bash.exe");
+            // bin/bash.exe is a launcher; direct-child termination must own Bash itself.
+            .join("Git/usr/bin/bash.exe");
         assert!(
             shell.is_file(),
             "the Windows test host must have Git Bash installed"
