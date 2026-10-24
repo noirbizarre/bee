@@ -117,9 +117,10 @@ jobs:
         run: Set-MpPreference -DisableRealtimeMonitoring $true
 
       - name: Run tests (with coverage)
+        # Select Cargo's reduced-debug profile as well as nextest's CI reporting profile.
         run: |
-          cargo llvm-cov nextest --profile ci
-          cargo llvm-cov report --lcov --output-path lcov.info
+          cargo llvm-cov nextest --profile ci --cargo-profile ci
+          cargo llvm-cov report --profile ci --lcov --output-path lcov.info
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v7
