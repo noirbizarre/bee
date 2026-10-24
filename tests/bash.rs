@@ -1,5 +1,7 @@
 //! Bash behavior through the public native-tool boundary.
 
+mod support;
+
 use bee::tool::{
     Context, Registry,
     bash::{Bash, Settings},
@@ -28,7 +30,7 @@ fn registry(settings: Settings) -> Registry {
 
 async fn run(root: &TempDir, input: Value, budget: usize) -> Value {
     let context = Context::new(root.path(), CancellationToken::new(), budget).unwrap();
-    let output = registry(Settings::default())
+    let output = registry(support::bash_settings())
         .invoke("bash", &input, &context)
         .await
         .unwrap();
@@ -99,7 +101,7 @@ async fn missing_commands_are_completed_processes_but_missing_shells_are_launch_
     let context =
         Context::new(root.path().join("missing"), CancellationToken::new(), 4096).unwrap();
     assert!(
-        registry(Settings::default())
+        registry(support::bash_settings())
             .invoke("bash", &json!({"command":"true"}), &context)
             .await
             .unwrap()
@@ -135,7 +137,7 @@ async fn a_timeout_retains_partial_output_and_reports_termination() {
     let root = TempDir::new().unwrap();
     let result = run(
         &root,
-        json!({"command":"printf started; printf problem >&2; sleep 30", "timeout_ms":200}),
+        json!({"command":"printf started; printf problem >&2; sleep 30", "timeout_ms":1000}),
         4096,
     )
     .await;

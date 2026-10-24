@@ -155,7 +155,10 @@ async fn acp_executes_shipped_tools_in_the_session_directory_and_retains_results
     ]);
     native_turns(
         providers(protocol, &server.url, ""),
-        bee::acp::Runtime::builtins(bee::agent::Limits::default()).unwrap(),
+        bee::acp::Runtime::new(
+            bee::agent::Limits::default(),
+            bee::tool::builtins_with_bash(support::bash_settings()).unwrap(),
+        ),
         vec![(root.path().into(), vec![true, true])],
     )
     .await;

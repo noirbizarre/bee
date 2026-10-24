@@ -38,7 +38,7 @@ impl Agent {
         let isolated = tempfile::tempdir().expect("a temp directory").keep();
         let path = bee::config::project_config_path(&isolated);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, config).unwrap();
+        std::fs::write(path, support::native_bash_config(config)).unwrap();
         let mut child = Command::new(env!("CARGO_BIN_EXE_bee"))
             .env("HOME", &isolated)
             .env("XDG_CONFIG_HOME", isolated.join("xdg"))
@@ -143,7 +143,7 @@ fn bash_output_is_captured_without_corrupting_the_protocol_stream() {
         ),
     ]);
     let mut agent = Agent::configured(&format!(
-        "[tools.bash]\ntimeout_ms=200\n[providers.test]\nmodel='test'\n[providers.test.protocols.openai-chat]\nbase_url='{}'",
+        "[tools.bash]\ntimeout_ms=1000\n[providers.test]\nmodel='test'\n[providers.test.protocols.openai-chat]\nbase_url='{}'",
         server.url
     ));
     agent.initialize(1);
