@@ -1,8 +1,6 @@
-<p align="center">
-  <img src="docs/images/icon.svg" alt="bee" width="160">
-</p>
-
-<h1 align="center">bee</h1>
+<h1 align="center">
+  <img src="docs/images/logo.svg" alt="Bee">
+</h1>
 
 <p align="center"><strong>A minimal, headless Rust agent runtime implementing ACPv2.</strong></p>
 

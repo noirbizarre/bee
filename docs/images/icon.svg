@@ -1,13 +1,39 @@
-<!--
-  A placeholder mark: two glyph-free shapes, so it reads as "not yet designed"
-  rather than as a logo somebody chose. Replace it — the README, the
-  documentation header and the favicon all point here, so one file changes all
-  three.
-
-  Keep it a square viewBox. The header slot scales to a fixed height, and a
-  non-square source is letterboxed rather than cropped.
--->
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="placeholder mark">
-  <rect width="64" height="64" rx="14" fill="currentColor" opacity="0.12"/>
-  <circle cx="32" cy="32" r="14" fill="none" stroke="currentColor" stroke-width="4"/>
-</svg>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:shaipe="https://shaipe.dev/ns/2026" width="512" height="512" viewBox="0 0 512 512"><defs>
+<clipPath id="bodyclip"><ellipse rx="190" ry="125"/></clipPath>
+<!-- Restrict the collar to the body footprint so it cannot outline the exposed head. -->
+<clipPath id="collar-bodyclip"><ellipse rx="190" ry="125" transform="scale(3.00003) translate(228 465) rotate(-42)"/></clipPath>
+<linearGradient id="bodyg" gradientUnits="userSpaceOnUse" x1="-60" y1="-125" x2="60" y2="125"><stop offset="0.2" stop-color="#fde339"/><stop offset="1" stop-color="#f9920f"/></linearGradient>
+<linearGradient id="capg" gradientUnits="userSpaceOnUse" x1="-60" y1="-125" x2="60" y2="125"><stop offset="0" stop-color="#fdc926"/><stop offset="1" stop-color="#f98f10"/></linearGradient>
+<linearGradient id="headg" x1="0.35" y1="0" x2="0.6" y2="1"><stop offset="0.1" stop-color="#fde339"/><stop offset="1" stop-color="#f9a010"/></linearGradient>
+<linearGradient id="antg" x1="0" y1="1" x2="0" y2="0"><stop offset="0" stop-color="#f9920f"/><stop offset="1" stop-color="#fbb615"/></linearGradient>
+<linearGradient id="stingg" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#f9920f"/><stop offset="1" stop-color="#fbc21b"/></linearGradient>
+<linearGradient id="wingg" x1="0.1" y1="0" x2="0.9" y2="1"><stop offset="0.45" stop-color="#fdfaf5"/><stop offset="0.451" stop-color="#f8e6c8"/><stop offset="1" stop-color="#f1d3a0"/></linearGradient>
+<linearGradient id="wing2g" x1="0" y1="0" x2="1" y2="1"><stop offset="0.3" stop-color="#fbf8f2"/><stop offset="1" stop-color="#ddd6dc"/></linearGradient>
+<linearGradient id="eyeg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fdee6a"/><stop offset="1" stop-color="#fcd83a"/></linearGradient>
+<filter id="glow" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="9"/></filter>
+<g id="bee-mark">
+<ellipse cx="425" cy="522" rx="112" ry="68" transform="rotate(22 425 522)" fill="url(#wing2g)"/>
+<ellipse cx="490" cy="425" rx="152" ry="95" transform="rotate(53 490 425)" fill="url(#wingg)"/>
+<!-- Sharing the body's local axis keeps the stinger centred on its rear pole. -->
+<g transform="translate(588 655) rotate(-42)">
+<path d="M-170 -43 Q-213 -23 -260 0 Q-213 23 -170 43 Z" fill="url(#stingg)"/>
+<ellipse rx="190" ry="125" fill="url(#bodyg)"/>
+<g clip-path="url(#bodyclip)">
+<path d="M35 -140 Q0 0 35 140 L-55 140 Q-90 0 -55 -140 Z" fill="#141416"/>
+<path d="M-105 -140 Q-140 0 -105 140 L-130 140 Q-165 0 -130 -140 Z" fill="#141416"/>
+<path d="M-130 -140 Q-165 0 -130 140 L-200 140 L-200 -140 Z" fill="url(#capg)"/>
+<path d="M-190 100 Q0 190 190 40 L190 140 L-190 140 Z" fill="#f98f10" opacity="0.35"/>
+</g></g>
+<g transform="translate(360 190) scale(0.33333)">
+<!-- Only the head/body intersection receives a dark separator. -->
+<path d="M790 690 C900 580 1050 515 1200 520 C1500 530 1730 760 1730 1000 C1730 1250 1560 1375 1300 1375 C1080 1375 900 1250 790 1100 C740 980 740 800 790 690 Z" clip-path="url(#collar-bodyclip)" fill="#0d0d10" stroke="#0d0d10" stroke-width="80" stroke-linejoin="round" shaipe:fill="bg" shaipe:stroke="bg"/>
+<g fill="none" stroke="url(#antg)" stroke-width="60" stroke-linecap="butt"><path d="M985 600 Q1000 270 1215 150"/><path d="M1430 600 Q1480 450 1640 385"/></g>
+<circle cx="1310" cy="148" r="100" fill="#fcd22a"/><circle cx="1715" cy="375" r="95" fill="#fcd22a"/>
+<path d="M790 690 C900 580 1050 515 1200 520 C1500 530 1730 760 1730 1000 C1730 1250 1560 1375 1300 1375 C1080 1375 900 1250 790 1100 C740 980 740 800 790 690 Z" fill="url(#headg)"/>
+<path d="M1105 745 Q1110 665 1220 658 L1400 668 Q1660 700 1690 900 L1685 1120 Q1675 1250 1590 1272 Q1500 1282 1380 1255 L1190 1212 Q1100 1190 1097 1100 Z" fill="#0d0d10" shaipe:fill="bg"/>
+<g fill="#ff9d0a" filter="url(#glow)" opacity="0.9"><rect x="1255" y="810" width="120" height="270" rx="60"/><rect x="1550" y="900" width="95" height="235" rx="47"/></g>
+<g fill="url(#eyeg)" stroke="#f9a010" stroke-width="6"><rect x="1260" y="815" width="110" height="260" rx="55"/><rect x="1555" y="905" width="85" height="225" rx="42"/></g>
+<circle cx="835" cy="890" r="150" fill="#0d0d10" shaipe:fill="bg"/><circle cx="815" cy="890" r="125" fill="url(#headg)"/><ellipse cx="800" cy="890" rx="65" ry="82" fill="#0d0d10" shaipe:fill="bg"/>
+</g></g>
+<text id="bee-type" x="0" y="0" font-family="Poppins" font-weight="800" font-size="285" textLength="548" lengthAdjust="spacingAndGlyphs" fill="#ffc61a" shaipe:fill="yellow" data-shaipe-confidence="high" data-shaipe-note="Poppins ExtraBold selected for the Bee wordmark.">Bee</text>
+</defs><symbol id="icon" viewBox="0 0 512 512"><use href="#bee-mark" transform="translate(-126 -79) scale(.6)"/></symbol><symbol id="logo" viewBox="0 0 512 512"><use href="#bee-mark" transform="translate(-24 -30) scale(.44)"/><text x="0" y="0" transform="translate(119 451) scale(.5)" font-family="Poppins" font-weight="800" font-size="285" textLength="548" lengthAdjust="spacingAndGlyphs" fill="#ffc61a" shaipe:fill="yellow" data-shaipe-confidence="high" data-shaipe-note="Poppins ExtraBold selected for the Bee wordmark.">Bee</text></symbol><symbol id="social" viewBox="0 0 1280 640"><rect width="1280" height="640" fill="#0d0d10" shaipe:fill="bg"/><use href="#bee-mark" transform="translate(-42 -8) scale(.65)"/><use href="#bee-type" transform="translate(670 410) scale(.85)"/></symbol><use href="#icon"/></svg>
