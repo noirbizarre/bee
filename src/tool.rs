@@ -28,6 +28,15 @@ pub const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 /// Minimum budget, leaving room for a complete fixed failure envelope.
 pub const MIN_OUTPUT_BYTES: usize = 256;
 
+/// Compose shipped tools once, keeping registration outside the inference loop.
+pub fn builtins() -> Result<Registry, Error> {
+    let mut registry = Registry::default();
+    registry.register(read::Read)?;
+    registry.register(glob::Glob)?;
+    registry.register(list::List)?;
+    Ok(registry)
+}
+
 /// Safe-to-display registration, context, or cancellation failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error, miette::Diagnostic)]
 pub enum Error {

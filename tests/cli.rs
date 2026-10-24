@@ -56,6 +56,22 @@ fn isolated(dir: &std::path::Path) -> Command {
 const SECRET: &str = "sk-super-secret-token";
 
 #[test]
+fn invalid_agent_limits_fail_before_protocol_output_without_echoing_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("selected.toml");
+    std::fs::write(&file, format!("[agent]\nmax_steps = '{SECRET}'")).unwrap();
+    isolated(dir.path())
+        .env("BEE_CONFIG", &file)
+        .write_stdin("")
+        .assert()
+        .failure()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("bee::agent::setting"))
+        .stderr(predicate::str::contains("agent.max_steps"))
+        .stderr(predicate::str::contains(SECRET).not());
+}
+
+#[test]
 fn a_malformed_selected_config_fails_startup_with_a_diagnostic() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("selected.toml");

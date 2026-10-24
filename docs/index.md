@@ -18,8 +18,9 @@ stream answers over ACP. Cancellation and close interrupt pending inference. Suc
 across close/resume; ACP update replay is unsupported. Cancelled, failed and refused turns do not enter model context.
 Prompts accept text and resource links, represented as references without fetching their contents.
 
-The SDK-free loop supports injected function executors. Production ACP tool execution remains deferred and no tools
-are advertised. All three native backends support function calls through the injected executor interface.
+The bounded SDK-free loop supports injected function executors. Normal ACP sessions advertise and execute the native
+`read`, `glob`, and `list` tools across all three backends, using each session's working directory.
+See [native tools](tools.md) for their contract and execution context.
 
 ## Configuration
 
@@ -37,6 +38,18 @@ errors, which line and column. Diagnostics never repeat the contents of a file, 
 Tables merge key by key, and for a scalar the higher layer wins. An array in a higher layer **replaces** the lower one
 instead of extending it. Giving one key different types in two layers (a string over an integer, say) is an error that
 names the key and both files. See [ADR-006](adr/006-layered-xdg-configuration.md).
+
+### Agent execution
+
+```toml
+[agent]
+max_steps = 16        # model requests per turn, including the final response
+max_tool_calls = 64   # individual tool calls across all batches in a turn
+```
+
+Both settings are positive integers and merge independently across configuration layers.
+Tools execute sequentially; a batch exceeding a budget is rejected before execution.
+See [turn execution limits](inference.md#turn-execution-limits) for boundary behavior.
 
 ### Providers and models
 

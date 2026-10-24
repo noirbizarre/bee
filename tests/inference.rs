@@ -22,6 +22,418 @@ fn answer(protocol: &str, text: &str) -> Value {
     }
 }
 
+fn native_call(protocol: &str, id: &str, name: &str, arguments: Value) -> Value {
+    match protocol {
+        "openai-chat" => {
+            json!({"choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":id,"type":"function","function":{"name":name,"arguments":arguments.to_string()}}]},"finish_reason":"tool_calls"}]})
+        }
+        "openai-responses" => {
+            json!({"status":"completed","output":[{"id":format!("item-{id}"),"type":"function_call","call_id":id,"name":name,"arguments":arguments.to_string()}]})
+        }
+        "anthropic-messages" => {
+            json!({"type":"message","role":"assistant","content":[{"type":"tool_use","id":id,"name":name,"input":arguments}],"stop_reason":"tool_use"})
+        }
+        _ => unreachable!(),
+    }
+}
+
+/// Drive ordinary ACP prompts, retaining each session's history between prompts.
+async fn native_turns(
+    profiles: bee::provider::Providers,
+    runtime: bee::acp::Runtime,
+    sessions: Vec<(std::path::PathBuf, Vec<bool>)>,
+) {
+    let (tx, mut updates) = tokio::sync::mpsc::unbounded_channel();
+    let client = Client.v2().on_receive_notification(
+        async move |update: v2::UpdateSessionNotification, _connection| {
+            tx.send(update).map_err(Error::into_internal_error)
+        },
+        agent_client_protocol::on_receive_notification!(),
+    );
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        client.connect_with(
+            bee::acp::agent_with_runtime(profiles, runtime),
+            async move |connection| {
+                connection
+                    .send_request(v2::InitializeRequest::new(
+                        ProtocolVersion::V2,
+                        v2::Implementation::new("test", "0"),
+                    ))
+                    .block_task()
+                    .await?;
+                for (cwd, successes) in sessions {
+                    let session = connection
+                        .send_request(v2::NewSessionRequest::new(cwd))
+                        .block_task()
+                        .await?
+                        .session_id;
+                    for (index, success) in successes.into_iter().enumerate() {
+                        connection
+                            .send_request(v2::PromptRequest::new(
+                                session.clone(),
+                                vec![format!("question {index}").into()],
+                            ))
+                            .block_task()
+                            .await?;
+                        loop {
+                            if let v2::SessionUpdate::StateUpdate(v2::StateUpdate::Idle(idle)) =
+                                updates.recv().await.unwrap().update
+                            {
+                                if success {
+                                    assert_eq!(idle.stop_reason, Some(v2::StopReason::EndTurn));
+                                } else {
+                                    assert!(matches!(
+                                        idle.stop_reason,
+                                        Some(v2::StopReason::Error(_))
+                                    ));
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+}
+
+#[rstest::rstest]
+#[case("openai-chat")]
+#[case("openai-responses")]
+#[case("anthropic-messages")]
+#[tokio::test]
+async fn acp_executes_shipped_tools_in_the_session_directory_and_retains_results(
+    #[case] protocol: &str,
+) {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("note.txt"), "session-specific-content\n").unwrap();
+    let server = Server::start(vec![
+        Response::json(native_call(
+            protocol,
+            "a",
+            "glob",
+            json!({"pattern":"*.txt"}),
+        )),
+        Response::json(native_call(protocol, "b", "list", json!({"path":"."}))),
+        Response::json(native_call(
+            protocol,
+            "c",
+            "read",
+            json!({"path":"note.txt"}),
+        )),
+        Response::json(answer(protocol, "done")),
+        Response::json(answer(protocol, "remembered")),
+    ]);
+    native_turns(
+        providers(protocol, &server.url, ""),
+        bee::acp::Runtime::builtins(bee::agent::Limits::default()).unwrap(),
+        vec![(root.path().into(), vec![true, true])],
+    )
+    .await;
+    let first = server.request();
+    let names: Vec<_> = first.body["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| {
+            if protocol == "openai-chat" {
+                tool["function"]["name"].as_str().unwrap()
+            } else {
+                tool["name"].as_str().unwrap()
+            }
+        })
+        .collect();
+    assert_eq!(names, ["glob", "list", "read"]);
+    for id in ["a", "b"] {
+        let body = server.request().body.to_string();
+        assert!(body.contains("note.txt"));
+        assert!(body.contains(id));
+    }
+    let final_request = server.request();
+    assert!(
+        final_request
+            .body
+            .to_string()
+            .contains("session-specific-content")
+    );
+    let next = server.request();
+    assert!(next.body.to_string().contains("session-specific-content"));
+    assert!(next.body.to_string().contains("question 1"));
+}
+
+#[tokio::test]
+async fn separate_acp_sessions_resolve_the_same_relative_path_independently() {
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    std::fs::write(first.path().join("note.txt"), "first-directory").unwrap();
+    std::fs::write(second.path().join("note.txt"), "second-directory").unwrap();
+    let server = Server::start(vec![
+        Response::json(native_call(
+            "openai-chat",
+            "a",
+            "read",
+            json!({"path":"note.txt"}),
+        )),
+        Response::json(chat_text("done")),
+        Response::json(native_call(
+            "openai-chat",
+            "b",
+            "read",
+            json!({"path":"note.txt"}),
+        )),
+        Response::json(chat_text("done")),
+    ]);
+    native_turns(
+        providers("openai-chat", &server.url, ""),
+        bee::acp::Runtime::builtins(bee::agent::Limits::default()).unwrap(),
+        vec![
+            (first.path().into(), vec![true]),
+            (second.path().into(), vec![true]),
+        ],
+    )
+    .await;
+    server.request();
+    let first = server.request().body.to_string();
+    server.request();
+    let second = server.request().body.to_string();
+    assert!(first.contains("first-directory"));
+    assert!(!first.contains("second-directory"));
+    assert!(second.contains("second-directory"));
+    assert!(!second.contains("first-directory"));
+}
+
+#[rstest::rstest]
+#[case::provider_failure(false)]
+#[case::limit_exhaustion(true)]
+#[tokio::test]
+async fn failed_tool_turns_do_not_enter_the_next_prompt_context(#[case] limit: bool) {
+    let mut failure = Response::json(json!({"error":"failed"}));
+    failure.status = 503;
+    let mut responses = vec![Response::json(native_call(
+        "openai-chat",
+        "a",
+        "echo",
+        json!({"text":"discarded-result"}),
+    ))];
+    if !limit {
+        responses.push(failure);
+    }
+    responses.push(Response::json(chat_text("recovered")));
+    let server = Server::start(responses);
+    let runtime = bee::acp::Runtime::new(
+        bee::agent::Limits::new(if limit { 1 } else { 3 }, 2).unwrap(),
+        support::native_registry(),
+    );
+    native_turns(
+        providers("openai-chat", &server.url, ""),
+        runtime,
+        vec![(std::env::temp_dir(), vec![false, true])],
+    )
+    .await;
+    server.request();
+    if !limit {
+        assert!(
+            server
+                .request()
+                .body
+                .to_string()
+                .contains("discarded-result")
+        );
+    }
+    let replacement = server.request();
+    assert_eq!(
+        replacement.body["messages"],
+        json!([{"role":"user","content":"question 1"}])
+    );
+    server.assert_no_more_requests();
+}
+
+#[tokio::test]
+async fn ordinary_native_failures_are_returned_to_the_model_for_recovery() {
+    let server = Server::start(vec![
+        Response::json(native_call(
+            "anthropic-messages",
+            "a",
+            "echo",
+            json!({"text":"fail"}),
+        )),
+        Response::json(answer("anthropic-messages", "recovered")),
+    ]);
+    native_turns(
+        providers("anthropic-messages", &server.url, ""),
+        bee::acp::Runtime::new(bee::agent::Limits::default(), support::native_registry()),
+        vec![(std::env::temp_dir(), vec![true])],
+    )
+    .await;
+    server.request();
+    let result = server.request();
+    assert_eq!(result.body["messages"][2]["content"][0]["is_error"], true);
+    assert!(result.body.to_string().contains("Choose different text."));
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct Empty {}
+
+struct PendingNative {
+    started: tokio::sync::mpsc::UnboundedSender<tokio_util::sync::CancellationToken>,
+    dropped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+struct DropSignal(std::sync::Arc<std::sync::atomic::AtomicBool>);
+impl Drop for DropSignal {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl bee::tool::Tool for PendingNative {
+    type Input = Empty;
+    type Output = Value;
+    fn name(&self) -> &str {
+        "pending"
+    }
+    fn description(&self) -> &str {
+        "Wait for cancellation"
+    }
+    async fn execute(
+        &self,
+        _: Empty,
+        context: &bee::tool::Context,
+    ) -> Result<Value, bee::tool::Failure> {
+        let _guard = DropSignal(self.dropped.clone());
+        self.started.send(context.cancellation().clone()).unwrap();
+        std::future::pending().await
+    }
+}
+
+#[rstest::rstest]
+#[case::cancel(false)]
+#[case::close_and_resume(true)]
+#[tokio::test]
+async fn acp_cancellation_drops_native_work_and_allows_a_clean_replacement(#[case] close: bool) {
+    let server = Server::start(vec![
+        Response::json(native_call("openai-chat", "a", "pending", json!({}))),
+        Response::json(chat_text("replacement")),
+    ]);
+    let (started, mut starts) = tokio::sync::mpsc::unbounded_channel();
+    let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut registry = bee::tool::Registry::default();
+    registry
+        .register(PendingNative {
+            started,
+            dropped: dropped.clone(),
+        })
+        .unwrap();
+    let runtime = bee::acp::Runtime::new(bee::agent::Limits::default(), registry);
+    let (tx, mut updates) = tokio::sync::mpsc::unbounded_channel();
+    let client = Client.v2().on_receive_notification(
+        async move |update: v2::UpdateSessionNotification, _connection| {
+            tx.send(update).map_err(Error::into_internal_error)
+        },
+        agent_client_protocol::on_receive_notification!(),
+    );
+    let profiles = providers("openai-chat", &server.url, "");
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        client.connect_with(
+            bee::acp::agent_with_runtime(profiles, runtime),
+            async move |connection| {
+                connection
+                    .send_request(v2::InitializeRequest::new(
+                        ProtocolVersion::V2,
+                        v2::Implementation::new("test", "0"),
+                    ))
+                    .block_task()
+                    .await?;
+                let cwd = std::env::temp_dir();
+                let session = connection
+                    .send_request(v2::NewSessionRequest::new(cwd.clone()))
+                    .block_task()
+                    .await?
+                    .session_id;
+                connection
+                    .send_request(v2::PromptRequest::new(
+                        session.clone(),
+                        vec!["discard this".into()],
+                    ))
+                    .block_task()
+                    .await?;
+                // Wait for actual native execution, not just HTTP acceptance.
+                let token = starts.recv().await.unwrap();
+                assert!(!token.is_cancelled());
+                if close {
+                    connection
+                        .send_request(v2::CloseSessionRequest::new(session.clone()))
+                        .block_task()
+                        .await?;
+                } else {
+                    connection
+                        .send_notification(v2::CancelSessionNotification::new(session.clone()))?;
+                }
+                loop {
+                    let update = updates.recv().await.unwrap();
+                    assert!(!matches!(
+                        update.update,
+                        v2::SessionUpdate::AgentMessageChunk(_)
+                    ));
+                    if let v2::SessionUpdate::StateUpdate(v2::StateUpdate::Idle(idle)) =
+                        update.update
+                    {
+                        assert_eq!(idle.stop_reason, Some(v2::StopReason::Cancelled));
+                        break;
+                    }
+                }
+                token.cancelled().await;
+                assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
+                if close {
+                    connection
+                        .send_request(v2::ResumeSessionRequest::new(session.clone(), cwd))
+                        .block_task()
+                        .await?;
+                    // Resume reports current state independently of turn completion.
+                    loop {
+                        if let v2::SessionUpdate::StateUpdate(v2::StateUpdate::Idle(idle)) =
+                            updates.recv().await.unwrap().update
+                        {
+                            assert_eq!(idle.stop_reason, None);
+                            break;
+                        }
+                    }
+                }
+                connection
+                    .send_request(v2::PromptRequest::new(session, vec!["replacement".into()]))
+                    .block_task()
+                    .await?;
+                loop {
+                    if let v2::SessionUpdate::StateUpdate(v2::StateUpdate::Idle(idle)) =
+                        updates.recv().await.unwrap().update
+                    {
+                        // Any duplicate cancelled terminal update would fail this assertion.
+                        assert_eq!(idle.stop_reason, Some(v2::StopReason::EndTurn));
+                        break;
+                    }
+                }
+                Ok(())
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    server.request();
+    assert_eq!(
+        server.request().body["messages"],
+        json!([{"role":"user","content":"replacement"}])
+    );
+    server.assert_no_more_requests();
+}
+
 fn mixed_profiles(url: &str, preferred: &str) -> bee::provider::Providers {
     support::configured_providers(&format!(
         r#"

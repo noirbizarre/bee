@@ -2,8 +2,9 @@
 
 Bee's SDK-free `tool` module defines typed native operations, their advertised
 schemas, and their execution context. `agent::NativeExecutor` connects a registry
-to the existing bounded inference loop. Production ACP sessions do not register
-or advertise native tools yet.
+to the bounded inference loop. Normal ACP sessions advertise and execute the
+shipped `read`, `glob`, and `list` tools. Their execution base is the session cwd,
+not the launch directory used to load configuration.
 
 ## Implement and register a tool
 
@@ -196,6 +197,28 @@ Duplicate names are rejected without replacing the original implementation.
 Definitions are returned in name order. Metadata is captured on registration;
 changing a returned definition clone does not change validation or dispatch.
 
+### ACP runtime composition
+
+`tool::builtins()` compiles a registry containing all shipped tools; `Registry::default()`
+remains empty. Embedders can extend either registry and supply the complete catalog:
+
+```rust
+# fn main() -> bee::Result<()> {
+let tools = bee::tool::builtins()?;
+let limits = bee::agent::Limits::new(8, 32)?;
+let runtime = bee::acp::Runtime::new(limits, tools);
+let agent = bee::acp::agent_with_runtime(bee::provider::Providers::default(), runtime);
+// Connect the agent to an ACP client transport.
+# let _ = agent;
+# Ok(())
+# }
+```
+
+`Runtime::builtins(limits)` is the shorthand for a shipped catalog with explicit
+budgets. `serve_with_runtime` and `serve_stdio_with_runtime` accept the same runtime.
+Supplied catalogs replace the default catalog rather than implicitly merging with it.
+The runtime is shared by sessions; each turn receives its own directory and cancellation context.
+
 ## Validation and errors
 
 Schemars generates a Draft 2020-12 object schema from `Tool::Input`. The registry
@@ -230,6 +253,8 @@ result formats do not carry a separate error flag. Invalid arguments and executi
 failures allow the model to correct its next call. Cancellation aborts the turn.
 Whole-batch checks for unknown advertised names, duplicate call IDs, and budgets
 still precede any execution; per-tool argument validation occurs during dispatch.
+The final allowed model step cannot execute a tool batch, since its results would
+have no subsequent model request. See [turn execution limits](inference.md#turn-execution-limits).
 
 ## Execution context and bounds
 

@@ -33,8 +33,24 @@ together. The provider's credential, custom headers and common limits are shared
   HTTPS-only. Diagnostics classify failures without repeating response bodies, URLs or header values.
 
 Streams must have a valid terminal lifecycle. Truncated streams are errors, not successful partial answers. Each wire
-event/tool argument is limited to 1 MiB and each response to 16 MiB. The loop permits sixteen model requests and
-sixty-four tool calls per turn, with sequential execution and no automatic retry after side effects.
+event/tool argument is limited to 1 MiB and each response to 16 MiB. Tools execute sequentially with no automatic retry
+after side effects.
+
+## Turn execution limits
+
+The layered configuration accepts positive integer budgets, with these defaults:
+
+```toml
+[agent]
+max_steps = 16
+max_tool_calls = 64
+```
+
+Each step is one model request, including the final answer. Tool calls count individually across all batches, and both
+budgets reset per turn. A final answer on the last permitted step succeeds. A tool batch on that step fails before
+execution because no model request remains to consume its results. Over-budget batches likewise execute no calls.
+Unknown settings, invalid types and nonpositive budgets fail at startup; layers override each setting independently.
+These turn budgets are separate from per-request timeouts, token limits and response-size bounds.
 
 Successful conversation context is retained within the ACP connection, including close/resume. Cancelled, failed and
 refused turns may already have visible text but are excluded from future context. Changing provider/model preserves
@@ -43,9 +59,11 @@ portable text and drops protocol-specific continuation. This does not implement 
 The SDK-free `agent::run` accepts tool definitions and an injected `Executor`, with correlated call/result history.
 The [native tool contract](tools.md) provides typed schema validation, registration, bounded results, and
 `agent::NativeExecutor` for this seam.
-This is exercised against local HTTP servers. **Production ACP does not discover or execute tools yet**: no tool
-definitions are sent, and unsolicited calls fail clearly. Cancelling an injected executor drops its future; an executor
-must cooperate with cancellation, and external side effects cannot be rolled back.
+Normal ACP sessions advertise and execute the shipped `read`, `glob`, and `list` tools through this same interface.
+They resolve relative paths against the session cwd, while configuration is loaded from the launch directory.
+Cancelling or closing a session drops pending inference and tool futures and signals native-tool cancellation tokens.
+Executors must cooperate with cancellation, and external side effects cannot be rolled back.
+Library callers can use `agent::run_with_limits` for explicit policy or `acp::Runtime` for a custom catalog and policy.
 
 ## Chat Completions manual smoke test
 
@@ -64,6 +82,8 @@ timeout_ms = 120000
 2. Initialize, create a session and prompt for a short answer. Expect running, streamed text, then idle/end-turn.
 3. Ask a follow-up referring to the answer. Check that context is retained.
 4. Submit a longer prompt and cancel after output begins. Expect exactly one cancelled idle and no later chunks.
+5. Ask the model to discover files, list a directory and read a text file in the session directory. Expect a final
+   answer using the tool results; a follow-up can refer to those results.
 
 For a third-party/local compatible server, repeat using its documented base URL and model. For example:
 

@@ -4,6 +4,8 @@
 //! under test (a clean stdout, exit codes, shutdown on EOF) belong to the
 //! process, not to the library.
 
+mod support;
+
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
@@ -25,11 +27,18 @@ struct Agent {
 
 impl Agent {
     fn spawn() -> Self {
+        Self::configured("")
+    }
+
+    fn configured(config: &str) -> Self {
         // An empty directory as home, config home and working directory, so a
         // developer's real configuration (or a malformed one) cannot change
         // what these tests observe. Leaked deliberately: the child outlives
         // this function and the OS temp cleaner owns it.
         let isolated = tempfile::tempdir().expect("a temp directory").keep();
+        let path = bee::config::project_config_path(&isolated);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, config).unwrap();
         let mut child = Command::new(env!("CARGO_BIN_EXE_bee"))
             .env("HOME", &isolated)
             .env("XDG_CONFIG_HOME", isolated.join("xdg"))
@@ -121,6 +130,39 @@ impl Agent {
             .expect("stderr is readable");
         (status, stderr)
     }
+}
+
+#[test]
+fn configured_turn_limits_reach_real_stdio_inference() {
+    let server = support::Server::start(vec![support::Response::json(
+        json!({"choices":[{"index":0,"message":{"tool_calls":[{"id":"a","type":"function","function":{"name":"list","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}),
+    )]);
+    let mut agent = Agent::configured(&format!(
+        "[agent]\nmax_steps = 1\n[providers.test]\nmodel = 'test'\n[providers.test.protocols.openai-chat]\nbase_url = '{}'",
+        server.url
+    ));
+    agent.initialize(1);
+    agent.send(&json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":std::env::temp_dir()}}));
+    let session = agent.recv()["result"]["sessionId"].clone();
+    agent.send(&json!({"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"text","text":"inspect"}]}}));
+    loop {
+        let message = agent.recv();
+        let update = &message["params"]["update"];
+        if update["sessionUpdate"] == "state_update" && update["state"] == "idle" {
+            assert_eq!(update["stopReason"], "error");
+            assert!(
+                update
+                    .to_string()
+                    .contains("execution or response-size limit")
+            );
+            break;
+        }
+    }
+    assert_eq!(server.request().body["tools"].as_array().unwrap().len(), 3);
+    server.assert_no_more_requests();
+    let (status, stderr) = agent.finish();
+    assert!(status.success());
+    assert!(stderr.is_empty());
 }
 
 #[test]

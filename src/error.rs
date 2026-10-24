@@ -17,6 +17,24 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, Error, Diagnostic)]
 #[non_exhaustive]
 pub enum Error {
+    /// Invalid runtime policy; values are deliberately excluded from diagnostics.
+    #[error("agent setting `{key}` in `{path}` {reason}")]
+    #[diagnostic(code(bee::agent::setting), help("{instruction}"))]
+    AgentSetting {
+        /// Setting requiring correction.
+        key: String,
+        /// File which supplied the setting.
+        path: String,
+        /// Safe classification of the failure.
+        reason: &'static str,
+        /// How to correct it.
+        instruction: &'static str,
+    },
+
+    /// Native catalog or execution context construction failed.
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Tool(#[from] crate::tool::Error),
     /// The ACPv2 connection ended with an error.
     // Holds the SDK error's text, not the SDK error: this module must not
     // import the SDK, or an upgrade would leak out of `acp.rs` (ADR-001).
