@@ -34,3 +34,4 @@ by editing the old one. The history is the value.
 - [ADR-009](009-provider-presets-and-login-flows.md) — Describe provider presets and browser sign-ins as data
 - [ADR-010](010-several-protocols-per-provider.md) — Let a provider speak several protocols, ordered by `prefer`
 - [ADR-011](011-openai-responses-protocol.md) — Add `openai-responses` as a protocol of its own
+- [ADR-012](012-streaming-inference.md) — SDK-free inference with cancellable HTTP and caller-owned tools

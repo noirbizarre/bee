@@ -500,7 +500,7 @@ async fn a_panicking_turn_ends_with_an_error_idle_update_and_the_connection_surv
     };
 
     run(body, async |connection, mut updates| {
-        assert_failed_then_recovers(&connection, &mut updates, "the turn blew up").await
+        assert_failed_then_recovers(&connection, &mut updates, "the turn panicked").await
     })
     .await;
 }

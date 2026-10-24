@@ -38,6 +38,8 @@ const PROFILE_KEYS: &[&str] = &[
     "models",
     "credential",
     "headers",
+    "timeout_ms",
+    "max_output_tokens",
 ];
 
 /// The keys a table under `protocols` accepts.
@@ -52,6 +54,8 @@ const PRESET_KEYS: &[&str] = &[
     "models",
     "credential",
     "headers",
+    "timeout_ms",
+    "max_output_tokens",
 ];
 
 /// How Bee talks to an endpoint.
@@ -253,6 +257,8 @@ pub struct Profile {
     // so a dangling or malformed flow stops Bee at launch.
     login: Option<Arc<LoginSpec>>,
     headers: Vec<(String, String)>,
+    timeout_ms: u32,
+    max_output_tokens: u32,
 }
 
 // Written by hand: header values are routinely secrets (`Authorization`), and
@@ -282,6 +288,17 @@ impl fmt::Debug for Profile {
 }
 
 impl Profile {
+    /// Whole-request deadline, including streamed body reads. Defaults to 120s.
+    #[must_use]
+    pub fn timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(u64::from(self.timeout_ms))
+    }
+
+    /// Common output limit, defaulting to 4096 tokens.
+    #[must_use]
+    pub fn max_output_tokens(&self) -> u32 {
+        self.max_output_tokens
+    }
     /// The profile's name, as written in configuration.
     #[must_use]
     pub fn name(&self) -> &str {
@@ -677,7 +694,23 @@ impl Reader<'_> {
             credential,
             login,
             headers,
+            timeout_ms: self.positive(table, &key, "timeout_ms", 120_000)?,
+            max_output_tokens: self.positive(table, &key, "max_output_tokens", 4096)?,
         })
+    }
+
+    fn positive(&self, table: &Table, key: &str, field: &str, default: u32) -> Result<u32> {
+        let Some(value) = table.get(field) else {
+            return Ok(default);
+        };
+        let key = format!("{key}.{field}");
+        let value = value
+            .as_integer()
+            .ok_or_else(|| self.wrong_type(&key, "a positive integer", value))?;
+        u32::try_from(value)
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or_else(|| self.invalid(&key, "must be a positive 32-bit integer"))
     }
 
     /// Read `protocols` and `prefer` into endpoints, most preferred first.

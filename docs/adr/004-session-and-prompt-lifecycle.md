@@ -5,6 +5,8 @@
 Accepted. Superseded in part by [ADR-005](005-prompt-cancellation-and-error-mapping.md): `session/cancel`
 is no longer a no-op, turns no longer run inside the handler, and overlapping prompts are refused.
 
+Placeholder execution and lack of model context are superseded by [ADR-012](012-streaming-inference.md).
+
 ## Context
 
 Bee answered `initialize` and nothing else. The next step is sessions and

@@ -6,6 +6,8 @@ Accepted. Supersedes parts of [ADR-004](004-session-and-prompt-lifecycle.md).
 
 ## Context
 
+These lifecycle guarantees now apply to real inference and model history; see [ADR-012](012-streaming-inference.md).
+
 ADR-004 ran the placeholder turn inside the `session/prompt` handler and made
 `session/cancel` a no-op. That held only because the turn never waited. From
 reading `agent-client-protocol` 3.5.0 and `agent-client-protocol-schema` 1.12.0:

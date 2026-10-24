@@ -12,10 +12,12 @@
 #![warn(missing_docs)]
 
 pub mod acp;
+pub mod agent;
 pub mod auth;
 pub mod config;
 pub mod error;
 pub mod http;
+pub mod llm;
 pub mod login;
 pub mod preset;
 pub mod provider;
@@ -48,8 +50,13 @@ pub fn run() -> Result<()> {
     // launch, not surface as a connection error on the first prompt (ADR-007).
     let providers = provider::Providers::from_config(&config)?;
 
-    // The one place an executor is chosen. The SDK does its stdio on its own
-    // thread pool, so a plain executor suffices and the library stays free of
-    // an async runtime (ADR-003).
-    futures::executor::block_on(acp::serve_stdio(providers))
+    // Async model sockets and timers need a reactor even while ACP is idle.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|source| Error::Io {
+            path: "<async runtime>".into(),
+            source,
+        })?;
+    runtime.block_on(acp::serve_stdio(providers))
 }

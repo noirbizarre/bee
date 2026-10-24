@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
+use crate::llm::Message;
 use crate::provider::{Providers, check_model_id};
 
 /// Why a session operation was refused.
@@ -112,6 +113,14 @@ pub struct Turn {
 /// protocol layer decides how work is aborted.
 type Cancel = Box<dyn FnOnce() + Send>;
 
+fn portable(history: &mut [Message]) {
+    for message in history {
+        if let Message::Assistant { native, .. } = message {
+            *native = None;
+        }
+    }
+}
+
 /// What `session/list` reports about one session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Listing {
@@ -138,6 +147,7 @@ struct Session {
     provider: Option<String>,
     /// The model the client chose, if it overrode the profile's.
     model: Option<String>,
+    history: Vec<Message>,
 }
 
 struct ActiveTurn {
@@ -199,6 +209,30 @@ impl Sessions {
         Ok(Self::describe(&self.providers, session))
     }
 
+    /// Snapshot the selected configuration and committed model context.
+    /// Called under the same registry lock that registers the turn.
+    pub(crate) fn inference(
+        &self,
+        id: &str,
+    ) -> Option<(crate::provider::Profile, String, Vec<Message>)> {
+        let settings = self.settings(id).ok()??;
+        let profile = self.providers.get(&settings.provider)?.clone();
+        Some((
+            profile,
+            settings.model?,
+            self.by_id.get(id)?.history.clone(),
+        ))
+    }
+
+    /// Commit only while this turn owns the session; cancelled work is stale.
+    pub(crate) fn commit(&mut self, id: &str, token: u64, history: Vec<Message>) {
+        if self.is_current(id, token)
+            && let Some(session) = self.by_id.get_mut(id)
+        {
+            session.history = history;
+        }
+    }
+
     fn describe(providers: &Providers, session: &Session) -> Option<Settings> {
         let name = session
             .provider
@@ -249,6 +283,7 @@ impl Sessions {
         let session = self.settable_session(id)?;
         if current.as_deref() != Some(name) {
             session.model = None;
+            portable(&mut session.history);
         }
         session.provider = Some(name.to_owned());
         Ok(())
@@ -267,7 +302,11 @@ impl Sessions {
             return Err(SessionError::NoProvider);
         }
         check_model_id(model).map_err(SessionError::InvalidModel)?;
-        self.settable_session(id)?.model = Some(model.to_owned());
+        let session = self.settable_session(id)?;
+        if session.model.as_deref() != Some(model) {
+            portable(&mut session.history);
+        }
+        session.model = Some(model.to_owned());
         Ok(())
     }
 
@@ -294,6 +333,7 @@ impl Sessions {
                 active: None,
                 provider: None,
                 model: None,
+                history: Vec::new(),
             },
         );
         id

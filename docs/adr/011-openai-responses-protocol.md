@@ -34,9 +34,10 @@ Models.dev expresses the same split as the AI SDK package a model uses:
   `anthropic-messages` there, so a configuration that did not name the new protocol resolves as
   before; the only profiles whose result can change are ones that list it.
 
-Like the other two, it is configuration only: no backend exists for any protocol yet. Chat is
+At the time of this decision, all three protocols were configuration only. Chat is
 [#8](https://github.com/noirbizarre/bee/issues/8) and Messages is
-[#23](https://github.com/noirbizarre/bee/issues/23); the Responses backend has no issue yet.
+[#23](https://github.com/noirbizarre/bee/issues/23); Responses is now tracked by
+[#26](https://github.com/noirbizarre/bee/issues/26). See [ADR-012](012-streaming-inference.md) for inference execution.
 
 ### Presets
 
