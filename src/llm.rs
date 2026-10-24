@@ -14,6 +14,10 @@ use crate::provider::{Profile, Protocol};
 /// A normalized, safe-to-display inference failure. Never stores wire values.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, miette::Diagnostic)]
 pub enum Error {
+    /// Applicable guidance could not be loaded or retained.
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Instructions(#[from] crate::instructions::Diagnostic),
     /// The credential was rejected.
     #[error(
         "the model endpoint rejected authentication; check the configured credential or run `bee auth login`"
@@ -182,6 +186,7 @@ pub struct Step {
 /// A selected endpoint and its reusable async transport.
 #[derive(Clone)]
 pub struct Model {
+    instructions: String,
     profile: Profile,
     model: String,
     credential: Option<Secret>,
@@ -192,6 +197,7 @@ impl Model {
     /// Construct a model without a vendor registry or catalog lookup.
     pub fn new(profile: Profile, model: String, credential: Option<Secret>) -> Result<Self, Error> {
         Ok(Self {
+            instructions: String::new(),
             http: crate::http::InferenceHttp::new()?,
             profile,
             model,
@@ -216,6 +222,12 @@ impl Model {
 }
 
 impl Model {
+    /// Additional persistent instructions, kept outside evictable user-led turns.
+    pub fn with_instructions(mut self, instructions: String) -> Self {
+        self.instructions = instructions;
+        self
+    }
+
     /// Estimate the exact selected protocol representation without exposing content.
     pub fn context(
         &self,

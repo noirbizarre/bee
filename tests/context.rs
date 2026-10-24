@@ -67,6 +67,56 @@ fn model(server: &Server, protocol: &str, settings: &str) -> Model {
 #[case("openai-responses")]
 #[case("anthropic-messages")]
 #[tokio::test]
+async fn persistent_instructions_are_counted_once_and_cannot_be_evicted(#[case] protocol: &str) {
+    let server = Server::start(vec![Response::json(answer(protocol))]);
+    let instructions = "persistent-guidance ".repeat(500);
+    let messages = vec![Message::User("question".into())];
+    let report = model(&server, protocol, "max_output_tokens=10")
+        .with_instructions(instructions.clone())
+        .context(&messages, &[])
+        .unwrap();
+    let window = report.estimated_input + report.reserved_output;
+    model(
+        &server,
+        protocol,
+        &format!("max_output_tokens=10\ncontext_window={window}"),
+    )
+    .with_instructions(instructions.clone())
+    .step(&messages, &[], &mut |_| {})
+    .await
+    .unwrap();
+    let body = server.request().body;
+    let bytes: usize = ["messages", "input", "tools", "system", "instructions"]
+        .into_iter()
+        .filter_map(|key| body.get(key))
+        .map(|value| value.to_string().len())
+        .sum();
+    assert_eq!(report.estimated_input, (bytes as u64).div_ceil(3) + 256);
+    assert_eq!(body.to_string().matches("persistent-guidance").count(), 500);
+    let error = run_with_limits(
+        &model(
+            &server,
+            protocol,
+            &format!("max_output_tokens=10\ncontext_window={}", window - 1),
+        )
+        .with_instructions(instructions),
+        messages,
+        &[],
+        None,
+        &mut |_| {},
+        Limits::default(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error, Error::ContextLimit);
+    server.assert_no_more_requests();
+}
+
+#[rstest::rstest]
+#[case("openai-chat")]
+#[case("openai-responses")]
+#[case("anthropic-messages")]
+#[tokio::test]
 async fn only_oldest_complete_turns_are_removed_and_tool_pairs_remain(#[case] protocol: &str) {
     let server = Server::start(vec![Response::json(answer(protocol))]);
     let recent = vec![

@@ -32,6 +32,13 @@ pub struct Output {
 impl Tool for Edit {
     type Input = Input;
     type Output = Output;
+    fn target(&self, input: &Input) -> Option<super::Target> {
+        Some(super::Target {
+            path: input.path.clone().into(),
+            directory: false,
+            read: false,
+        })
+    }
 
     fn name(&self) -> &str {
         "edit"

@@ -23,6 +23,9 @@ registers the native bash, read, glob, list, write and edit tools with session-r
 Client-hosted MCP tools are discovered per prompt and invoked through ACP's MCP transport, with session-scoped
 attachments, offline schema validation and complete JSON result envelopes. The client owns permission policy.
 Each native backend preserves its own continuation and tool-result semantics.
+Project/nested AGENTS.md and additive user instructions feed a separate counted system payload. Standard Agent Skills
+use metadata-first discovery and read-based activation; semantic snapshots commit with successful history and survive
+whole-turn eviction. Typed native targets defer calls when new scoped guidance must first reach the model.
 
 ## Non-negotiable invariants
 
@@ -63,6 +66,8 @@ src/
 ├── llm/        native wire adapters
 ├── agent.rs    bounded model/tool loop with an injected executor
 ├── context.rs  SDK-free context estimates, explicit budgets and whole-turn eviction
+├── instructions.rs scoped AGENTS.md, persistent payloads and transactional guidance
+├── skills.rs   standard YAML skill metadata, deterministic discovery and configured roots
 ├── tool.rs     typed native tools, validation, execution context and registry
 ├── cli.rs      argument types only
 ├── commands.rs what `bee auth` does and prints (binary only)

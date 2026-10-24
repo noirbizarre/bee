@@ -75,6 +75,11 @@ impl fmt::Debug for Environment {
 }
 
 impl Environment {
+    /// Explicit home directory, also available to hermetic discovery callers.
+    pub fn home_dir(&self) -> Option<&Path> {
+        self.home.as_deref()
+    }
+
     /// Describe an environment explicitly.
     ///
     /// Values are interpreted as the process environment would be: an empty

@@ -24,6 +24,10 @@ Client-hosted MCP tools are discovered and invoked through ACPv2's `session.mcp.
 catalog. The client supplies server attachments and enforces permissions. See [tools](tools.md) for the contracts,
 execution context and supported MCP subset.
 
+Bee loads project and nested `AGENTS.md` instructions, additive `~/.agents/AGENTS.md`, and standard Agent Skills from
+project/user `.agents/skills` directories. Additional skill roots use `[skills] extra_roots = ["/opt/team/skills"]` in the
+normal configuration hierarchy. See [project instructions and skills](instructions.md) for scope, precedence and loading.
+
 ## Configuration
 
 Bee reads TOML configuration from up to three files, merged in this order, lowest precedence first:

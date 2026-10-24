@@ -133,6 +133,7 @@ pub struct Listing {
 /// One atomic turn snapshot, including the execution base for native tools.
 #[derive(Clone)]
 pub(crate) struct InferenceInput {
+    pub(crate) instructions: crate::instructions::State,
     pub(crate) profile: crate::provider::Profile,
     pub(crate) model: String,
     pub(crate) messages: Vec<Message>,
@@ -141,6 +142,7 @@ pub(crate) struct InferenceInput {
 
 #[derive(Debug)]
 struct Session {
+    instructions: crate::instructions::State,
     cwd: PathBuf,
     open: bool,
     /// Turns started so far. Per session, so one session's prompts can never
@@ -225,6 +227,7 @@ impl Sessions {
         let profile = self.providers.get(&settings.provider)?.clone();
         let session = self.by_id.get(id)?;
         Some(InferenceInput {
+            instructions: session.instructions.clone(),
             profile,
             model: settings.model?,
             messages: session.history.clone(),
@@ -233,11 +236,18 @@ impl Sessions {
     }
 
     /// Commit only while this turn owns the session; cancelled work is stale.
-    pub(crate) fn commit(&mut self, id: &str, token: u64, history: Vec<Message>) {
+    pub(crate) fn commit(
+        &mut self,
+        id: &str,
+        token: u64,
+        history: Vec<Message>,
+        instructions: crate::instructions::State,
+    ) {
         if self.is_current(id, token)
             && let Some(session) = self.by_id.get_mut(id)
         {
             session.history = history;
+            session.instructions = instructions;
         }
     }
 
@@ -334,6 +344,7 @@ impl Sessions {
         self.by_id.insert(
             id.clone(),
             Session {
+                instructions: crate::instructions::State::default(),
                 cwd: cwd.into(),
                 open: true,
                 turns: 0,

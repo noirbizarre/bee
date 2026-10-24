@@ -38,7 +38,7 @@ impl Report {
 
 pub(crate) fn estimate(body: &serde_json::Value, window: Option<u32>) -> Report {
     // Estimate the representation actually sent, not both native and portable copies.
-    let bytes = ["messages", "input", "tools"]
+    let bytes = ["messages", "input", "tools", "system", "instructions"]
         .iter()
         .filter_map(|key| body.get(key))
         .fold(0u64, |total, value| {

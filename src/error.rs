@@ -17,6 +17,18 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, Error, Diagnostic)]
 #[non_exhaustive]
 pub enum Error {
+    /// Invalid skill discovery configuration, without configuration values.
+    #[error("skills configuration in `{path}` {reason}")]
+    #[diagnostic(
+        code(bee::skills::setting),
+        help("use [skills] extra_roots = [\"/path/to/skills\"] with nonempty paths")
+    )]
+    SkillsSetting {
+        /// File supplying the setting.
+        path: String,
+        /// Static classification, never the offending value or unknown key.
+        reason: &'static str,
+    },
     /// Invalid Bash policy; configuration values never enter diagnostics.
     #[error("Bash setting `{key}` in `{path}` {reason}")]
     #[diagnostic(code(bee::bash::setting), help("{instruction}"))]

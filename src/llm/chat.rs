@@ -30,7 +30,7 @@ pub(super) async fn run(
 }
 
 pub(super) fn request(model: &Model, messages: &[Message], tools: &[Tool]) -> Result<Value, Error> {
-    let messages: Vec<_> = messages.iter().map(|message| match message {
+    let mut messages: Vec<_> = messages.iter().map(|message| match message {
         Message::User(text) => json!({"role":"user", "content":text}),
         Message::Assistant { text, calls, .. } => {
             let mut value = json!({"role":"assistant", "content":text});
@@ -41,6 +41,9 @@ pub(super) fn request(model: &Model, messages: &[Message], tools: &[Tool]) -> Re
         }
         Message::Tool { id, output, .. } => json!({"role":"tool", "tool_call_id":id,"content":output}),
     }).collect();
+    if !model.instructions.is_empty() {
+        messages.insert(0, json!({"role":"system","content":model.instructions}));
+    }
     let mut body = json!({"model":model.model,"messages":messages,"stream":true,"stream_options":{"include_usage":true}});
     let field = match model.endpoint().options() {
         ProtocolOptions::OpenAiChat {

@@ -123,6 +123,24 @@ pub struct ToolResult {
 
 /// Implemented by a caller that owns actual tool execution.
 pub trait Executor: Send + Sync {
+    /// Bound synthesized guidance results by the same budget as native output.
+    fn output_limit(&self) -> usize {
+        crate::tool::MAX_OUTPUT_BYTES
+    }
+
+    /// Optional structured target; defaults preserve caller-owned executor behavior.
+    fn target(&self, _call: &Call) -> Option<crate::tool::Target> {
+        None
+    }
+
+    /// Execute a skill read against the same complete snapshot retained as guidance.
+    fn execute_snapshot<'a>(
+        &'a self,
+        call: &'a Call,
+        _snapshot: std::sync::Arc<str>,
+    ) -> Pin<Box<dyn Future<Output = Result<ToolResult, Error>> + Send + 'a>> {
+        self.execute(call)
+    }
     /// Execute a complete call. Dropping the future must stop pending work.
     fn execute<'a>(
         &'a self,
@@ -159,6 +177,31 @@ impl<'a> NativeExecutor<'a> {
 }
 
 impl Executor for NativeExecutor<'_> {
+    fn output_limit(&self) -> usize {
+        self.context.output_limit()
+    }
+
+    fn target(&self, call: &Call) -> Option<crate::tool::Target> {
+        self.registry.target(&call.name, &call.arguments)
+    }
+
+    fn execute_snapshot<'a>(
+        &'a self,
+        call: &'a Call,
+        snapshot: std::sync::Arc<str>,
+    ) -> Pin<Box<dyn Future<Output = Result<ToolResult, Error>> + Send + 'a>> {
+        Box::pin(async move {
+            let result = self
+                .registry
+                .invoke_snapshot(&call.name, &call.arguments, &self.context, snapshot)
+                .await
+                .map_err(|_| Error::Cancelled)?;
+            Ok(ToolResult {
+                output: result.json,
+                is_error: result.is_error,
+            })
+        })
+    }
     fn execute<'a>(
         &'a self,
         call: &'a Call,
@@ -185,6 +228,8 @@ impl Executor for NativeExecutor<'_> {
 /// Successful turn additions, committed by the caller only if still current.
 #[derive(Debug)]
 pub struct Outcome {
+    /// Semantic guidance committed with successful history, never orphaned tool results.
+    pub instructions: crate::instructions::State,
     /// Complete conversation, including all correlated tool results.
     pub messages: Vec<Message>,
     /// Final completion classification.
@@ -209,12 +254,25 @@ pub async fn run(
 /// Run with explicit budgets; a last-step tool batch never executes.
 pub async fn run_with_limits(
     model: &Model,
-    mut messages: Vec<Message>,
+    messages: Vec<Message>,
     tools: &[Tool],
     executor: Option<&dyn Executor>,
     text: &mut (dyn FnMut(&str) + Send),
     limits: Limits,
 ) -> Result<Outcome, Error> {
+    run_with_guidance(model, messages, tools, executor, text, limits, None).await
+}
+
+pub(crate) async fn run_with_guidance(
+    model: &Model,
+    mut messages: Vec<Message>,
+    tools: &[Tool],
+    executor: Option<&dyn Executor>,
+    text: &mut (dyn FnMut(&str) + Send),
+    limits: Limits,
+    mut guidance: Option<crate::instructions::Turn>,
+) -> Result<Outcome, Error> {
+    let mut model = model.clone();
     let mut usage = Usage::default();
     // ACP adds exactly one user message per turn; no user means nothing is evictable.
     let mut active = messages
@@ -230,7 +288,12 @@ pub async fn run_with_limits(
         return Err(Error::Tool);
     }
     for index in 0..limits.max_steps {
-        removed_turns += crate::context::fit(model, &mut messages, tools, &mut active)?;
+        if let Some(guidance) = &mut guidance {
+            // Final/targetless operations can change an already-observed instruction source.
+            guidance.refresh().await?;
+            model = model.with_instructions(guidance.render()?);
+        }
+        removed_turns += crate::context::fit(&model, &mut messages, tools, &mut active)?;
         let step = model.step(&messages, tools, text).await?;
         input_steps += usize::from(step.usage.input.is_some());
         output_steps += usize::from(step.usage.output.is_some());
@@ -256,6 +319,7 @@ pub async fn run_with_limits(
             context.input_steps = input_steps;
             context.output_steps = output_steps;
             return Ok(Outcome {
+                instructions: guidance.map(|g| g.state).unwrap_or_default(),
                 messages,
                 stop: step.stop,
                 usage,
@@ -282,8 +346,54 @@ pub async fn run_with_limits(
         }
         let calls = calls.clone();
         messages.push(step.message);
+        // Inspect the whole batch before side effects: a later path can reveal
+        // instructions that invalidate arguments generated for an earlier call.
+        let mut defer = false;
+        if let Some(guidance) = &mut guidance {
+            defer |= guidance.refresh().await?;
+            for call in &calls {
+                if let Some(target) = executor.target(call) {
+                    defer |= guidance.preflight(&target).await?;
+                }
+            }
+        }
         for call in calls {
-            let result = executor.execute(&call).await?;
+            let target = executor.target(&call);
+            if let (Some(guidance), Some(target)) = (&mut guidance, &target) {
+                // Earlier operations can rewrite AGENTS.md, including via bash.
+                defer |= guidance.preflight(target).await?;
+            }
+            let result = if defer {
+                deferred()
+            } else if let Some((guidance, skill)) = guidance.as_mut().and_then(|guidance| {
+                let skill = target.as_ref().and_then(|target| guidance.skill(target))?;
+                Some((guidance, skill))
+            }) {
+                match skill.snapshot() {
+                    Ok(body) => {
+                        let result = executor
+                            .execute_snapshot(&call, std::sync::Arc::from(body.as_str()))
+                            .await?;
+                        if !result.is_error {
+                            defer |= guidance.activate(&skill, body)?;
+                        }
+                        result
+                    }
+                    Err(error) => {
+                        let mut output = serde_json::json!({"error":{"code":"skill_activation","message":error.to_string()}}).to_string();
+                        // Source paths can exceed a tiny budget; preserve a complete envelope.
+                        if output.len() > executor.output_limit() {
+                            output = "{\"error\":{\"code\":\"skill_activation\",\"message\":\"Skill activation failed; check SKILL.md metadata, encoding and size.\"}}".into();
+                        }
+                        ToolResult {
+                            output,
+                            is_error: true,
+                        }
+                    }
+                }
+            } else {
+                executor.execute(&call).await?
+            };
             if result.output.len() > crate::tool::MAX_OUTPUT_BYTES {
                 return Err(Error::Limit);
             }
@@ -292,7 +402,18 @@ pub async fn run_with_limits(
                 output: result.output,
                 is_error: result.is_error,
             });
+            if let Some(guidance) = &mut guidance {
+                // This barrier also covers a following Bash or custom call with no target.
+                defer |= guidance.refresh().await?;
+            }
         }
     }
     Err(Error::Limit)
+}
+
+fn deferred() -> ToolResult {
+    ToolResult {
+        output: "{\"error\":{\"code\":\"guidance_required\",\"message\":\"Not executed. New scoped guidance is in the next request. Reconsider this batch and reissue needed calls with fresh IDs.\"}}".into(),
+        is_error: true,
+    }
 }

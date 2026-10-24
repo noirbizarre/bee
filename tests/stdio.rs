@@ -294,7 +294,16 @@ fn context_truncation_reports_committed_history_and_failures_leave_it_intact_ove
             }
         }
     }
-    assert_eq!(server.request().body["messages"][0]["content"], first);
+    let request = server.request();
+    assert_eq!(request.body["messages"][0]["role"], "system");
+    // Persistent instructions precede history without becoming an evictable user turn.
+    let user = request.body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["role"] == "user")
+        .unwrap();
+    assert_eq!(user["content"], first);
     let recovered = server.request().body.to_string();
     assert!(recovered.contains("first-answer"));
     assert!(!recovered.contains("oversized"));

@@ -83,6 +83,9 @@ pub(super) fn request(model: &Model, messages: &[Message], tools: &[Tool]) -> Re
         return Err(Error::Malformed);
     };
     let mut body = json!({"model":model.model,"messages":input,"stream":true,"max_tokens":max_tokens.unwrap_or(model.profile.max_output_tokens())});
+    if !model.instructions.is_empty() {
+        body["system"] = model.instructions.clone().into();
+    }
     if !tools.is_empty() {
         body["tools"] = tools.iter().map(|tool| json!({"name":tool.name,"description":tool.description,"input_schema":tool.parameters})).collect();
     }

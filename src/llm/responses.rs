@@ -61,6 +61,9 @@ pub(super) fn request(model: &Model, messages: &[Message], tools: &[Tool]) -> Re
         }
     }
     let mut body = json!({"model":model.model,"input":input,"stream":true,"store":false,"max_output_tokens":model.profile.max_output_tokens(),"include":["reasoning.encrypted_content"]});
+    if !model.instructions.is_empty() {
+        body["instructions"] = model.instructions.clone().into();
+    }
     if !tools.is_empty() {
         // Responses defaults strictness differently from Chat; explicitly opt
         // out so the same caller-owned JSON schema retains its meaning.

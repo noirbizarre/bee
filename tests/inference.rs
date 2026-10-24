@@ -178,6 +178,238 @@ fn native_call(protocol: &str, id: &str, name: &str, arguments: Value) -> Value 
     }
 }
 
+fn native_batch(protocol: &str, calls: Vec<(&str, &str, Value)>) -> Value {
+    let mut calls = calls.into_iter();
+    let (id, name, args) = calls.next().unwrap();
+    let mut value = native_call(protocol, id, name, args);
+    for (id, name, args) in calls {
+        let other = native_call(protocol, id, name, args);
+        match protocol {
+            "openai-chat" => value["choices"][0]["message"]["tool_calls"]
+                .as_array_mut()
+                .unwrap()
+                .extend(
+                    other["choices"][0]["message"]["tool_calls"]
+                        .as_array()
+                        .unwrap()
+                        .clone(),
+                ),
+            "openai-responses" => value["output"]
+                .as_array_mut()
+                .unwrap()
+                .extend(other["output"].as_array().unwrap().clone()),
+            _ => value["content"]
+                .as_array_mut()
+                .unwrap()
+                .extend(other["content"].as_array().unwrap().clone()),
+        }
+    }
+    value
+}
+
+fn instruction_text<'a>(protocol: &str, body: &'a Value) -> &'a str {
+    match protocol {
+        "openai-chat" => body["messages"][0]["content"].as_str().unwrap(),
+        "openai-responses" => body["instructions"].as_str().unwrap(),
+        _ => body["system"].as_str().unwrap(),
+    }
+}
+
+#[rstest::rstest]
+#[case("openai-chat", true)]
+#[case("openai-responses", true)]
+#[case("anthropic-messages", true)]
+#[case("openai-chat", false)]
+#[case("openai-responses", false)]
+#[case("anthropic-messages", false)]
+#[tokio::test]
+async fn activated_skills_survive_eviction_but_failed_turns_do_not_commit_them(
+    #[case] protocol: &str,
+    #[case] succeeds: bool,
+) {
+    let project = tempfile::tempdir().unwrap();
+    let skill = project.path().join(".agents/skills/demo/SKILL.md");
+    std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
+    std::fs::write(
+        &skill,
+        "---\nname: demo\ndescription: Demo\n---\nACTIVE-SNAPSHOT\n",
+    )
+    .unwrap();
+    let mut finish = Response::json(answer(protocol, &"OLD-ANSWER".repeat(3000)));
+    if !succeeds {
+        finish.status = 500;
+    }
+    let server = Server::start(vec![
+        Response::json(native_call(
+            protocol,
+            "skill",
+            "read",
+            json!({"path":".agents/skills/demo/SKILL.md","limit":1}),
+        )),
+        finish,
+        Response::json(answer(protocol, "done")),
+    ]);
+    let runtime = bee::acp::Runtime::builtins(bee::agent::Limits::default())
+        .unwrap()
+        .with_instructions(bee::instructions::Sources::default());
+    native_turns(
+        providers(
+            protocol,
+            &server.url,
+            "context_window=12000\nmax_output_tokens=100",
+        ),
+        runtime,
+        vec![(project.path().into(), vec![succeeds, true])],
+    )
+    .await;
+    let first = server.request();
+    assert!(!instruction_text(protocol, &first.body).contains("ACTIVE-SNAPSHOT"));
+    let second = server.request();
+    assert!(instruction_text(protocol, &second.body).contains("ACTIVE-SNAPSHOT"));
+    let third = server.request();
+    assert_eq!(
+        instruction_text(protocol, &third.body).contains("ACTIVE-SNAPSHOT"),
+        succeeds
+    );
+    assert!(!third.body.to_string().contains("OLD-ANSWER"));
+    // Eviction must remove the call and result together, not preserve orphan results.
+    match protocol {
+        "openai-chat" => assert!(
+            third.body["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|m| m["role"] != "tool" && m.get("tool_calls").is_none())
+        ),
+        "openai-responses" => assert!(
+            third.body["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|m| m["type"] != "function_call" && m["type"] != "function_call_output")
+        ),
+        _ => assert!(
+            third.body["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|m| m["content"].as_array().unwrap())
+                .all(|b| b["type"] != "tool_use" && b["type"] != "tool_result")
+        ),
+    }
+}
+
+#[rstest::rstest]
+#[case("openai-chat")]
+#[case("openai-responses")]
+#[case("anthropic-messages")]
+#[tokio::test]
+async fn scoped_guidance_and_skill_activation_reach_the_model_before_batched_mutations(
+    #[case] protocol: &str,
+) {
+    let root = tempfile::tempdir().unwrap();
+    let project = root.path().join("project");
+    let home = root.path().join("home");
+    for directory in ["sub", "sibling", ".agents/skills/demo/references"] {
+        std::fs::create_dir_all(project.join(directory)).unwrap();
+    }
+    std::fs::create_dir_all(home.join(".agents")).unwrap();
+    std::fs::write(home.join(".agents/AGENTS.md"), "USER-GUIDANCE").unwrap();
+    std::fs::write(project.join("AGENTS.md"), "ROOT-GUIDANCE").unwrap();
+    std::fs::write(project.join("sub/AGENTS.md"), "NESTED-GUIDANCE").unwrap();
+    std::fs::write(project.join("sibling/AGENTS.md"), "UNRELATED-GUIDANCE").unwrap();
+    std::fs::write(
+        project.join(".agents/skills/demo/SKILL.md"),
+        "---\nname: demo\ndescription: Demo skill\n---\nACTIVATED-BODY\nSee references/guide.md\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join(".agents/skills/demo/references/guide.md"),
+        "SUPPORTING-RESOURCE",
+    )
+    .unwrap();
+    let write = |path| json!({"path":path,"content":"written"});
+    let (second, release_second) = Response::json(native_batch(
+        protocol,
+        vec![
+            ("w3", "write", write("root.txt")),
+            ("w4", "write", write("sub/file.txt")),
+        ],
+    ))
+    .gated();
+    let (fourth, release_fourth) =
+        Response::json(native_call(protocol, "w6", "write", write("activated.txt"))).gated();
+    let server = Server::start(vec![
+        Response::json(native_batch(
+            protocol,
+            vec![
+                ("w1", "write", write("root.txt")),
+                ("w2", "write", write("sub/file.txt")),
+            ],
+        )),
+        second,
+        Response::json(native_batch(
+            protocol,
+            vec![
+                (
+                    "s1",
+                    "read",
+                    json!({"path":".agents/skills/demo/SKILL.md","limit":1}),
+                ),
+                ("w5", "write", write("activated.txt")),
+            ],
+        )),
+        fourth,
+        Response::json(native_call(
+            protocol,
+            "r1",
+            "read",
+            json!({"path":".agents/skills/demo/references/guide.md"}),
+        )),
+        Response::json(answer(protocol, "done")),
+        Response::json(answer(protocol, "retained")),
+    ]);
+    let runtime = bee::acp::Runtime::builtins(bee::agent::Limits::default())
+        .unwrap()
+        .with_instructions(bee::instructions::Sources::new(Some(home)));
+    let profiles = providers(protocol, &server.url, "");
+    let drive = native_turns(profiles, runtime, vec![(project.clone(), vec![true, true])]);
+    let inspect = async {
+        let first = server.request_async().await;
+        let text = instruction_text(protocol, &first.body);
+        assert!(text.contains("You are Bee"));
+        assert!(text.contains("ROOT-GUIDANCE") && text.contains("USER-GUIDANCE"));
+        assert!(text.contains("Demo skill"));
+        assert!(!text.contains("ACTIVATED-BODY") && !text.contains("NESTED-GUIDANCE"));
+        let second = server.request_async().await;
+        assert!(!project.join("root.txt").exists());
+        assert!(!project.join("sub/file.txt").exists());
+        let text = instruction_text(protocol, &second.body);
+        assert!(text.contains("NESTED-GUIDANCE"));
+        assert!(!text.contains("UNRELATED-GUIDANCE"));
+        assert_eq!(
+            second.body.to_string().matches("guidance_required").count(),
+            2
+        );
+        release_second.send(()).unwrap();
+        server.request_async().await;
+        let fourth = server.request_async().await;
+        assert!(!project.join("activated.txt").exists());
+        assert!(instruction_text(protocol, &fourth.body).contains("ACTIVATED-BODY"));
+        release_fourth.send(()).unwrap();
+        server.request_async().await;
+        let sixth = server.request_async().await;
+        assert!(sixth.body.to_string().contains("SUPPORTING-RESOURCE"));
+        let seventh = server.request_async().await;
+        assert!(instruction_text(protocol, &seventh.body).contains("ACTIVATED-BODY"));
+    };
+    tokio::join!(drive, inspect);
+    assert_eq!(
+        std::fs::read_to_string(project.join("activated.txt")).unwrap(),
+        "written"
+    );
+}
+
 /// Drive ordinary ACP prompts, retaining each session's history between prompts.
 async fn native_turns(
     profiles: bee::provider::Providers,
@@ -232,6 +464,291 @@ async fn native_turns(
                                 break;
                             }
                         }
+                    }
+                }
+                Ok(())
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+}
+
+#[rstest::rstest]
+#[case::targeted(0)]
+#[case::bash(1)]
+#[case::final_call(2)]
+#[tokio::test]
+async fn changing_agents_refreshes_guidance_before_targeted_targetless_and_followup_operations(
+    #[case] kind: u8,
+) {
+    let project = tempfile::tempdir().unwrap();
+    let (revised, release_revised) = Response::json(native_call(
+        "openai-chat",
+        "fresh",
+        "write",
+        json!({"path":"file","content":"revised"}),
+    ))
+    .gated();
+    let mut calls = vec![(
+        "rules",
+        "write",
+        json!({"path":"AGENTS.md","content":"NEW-GUIDANCE"}),
+    )];
+    if kind == 0 {
+        calls.push(("stale", "write", json!({"path":"file","content":"stale"})));
+    }
+    if kind == 1 {
+        calls.push(("stale", "bash", json!({"command":"printf stale > file"})));
+    }
+    let server = Server::start(vec![
+        Response::json(native_batch("openai-chat", calls)),
+        revised,
+        Response::json(chat_text("done")),
+    ]);
+    let runtime = bee::acp::Runtime::new(
+        bee::agent::Limits::default(),
+        bee::tool::builtins_with_bash(support::bash_settings()).unwrap(),
+    )
+    .with_instructions(bee::instructions::Sources::default());
+    let inspect = async {
+        server.request_async().await;
+        let second = server.request_async().await;
+        assert!(!project.path().join("file").exists());
+        assert!(instruction_text("openai-chat", &second.body).contains("NEW-GUIDANCE"));
+        assert_eq!(
+            second.body.to_string().matches("guidance_required").count(),
+            usize::from(kind != 2)
+        );
+        release_revised.send(()).unwrap();
+        server.request_async().await;
+    };
+    tokio::join!(
+        native_turns(
+            providers("openai-chat", &server.url, ""),
+            runtime,
+            vec![(project.path().into(), vec![true])]
+        ),
+        inspect
+    );
+    assert_eq!(
+        std::fs::read_to_string(project.path().join("file")).unwrap(),
+        "revised"
+    );
+}
+
+#[tokio::test]
+async fn malformed_skills_emit_actionable_acp_notices_even_when_inference_fails() {
+    let project = tempfile::tempdir().unwrap();
+    let skill = project.path().join(".agents/skills/demo/SKILL.md");
+    std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
+    std::fs::write(
+        skill,
+        "---\nname: demo\ndescription: [secret-sentinel\n---\n",
+    )
+    .unwrap();
+    let mut failure = Response::json(json!({"error":"fixture"}));
+    failure.status = 500;
+    let server = Server::start(vec![failure]);
+    let runtime = bee::acp::Runtime::builtins(bee::agent::Limits::default())
+        .unwrap()
+        .with_instructions(bee::instructions::Sources::default());
+    let (tx, mut updates) = tokio::sync::mpsc::unbounded_channel();
+    let client = Client.v2().on_receive_notification(
+        async move |update: v2::UpdateSessionNotification, _| {
+            tx.send(update).map_err(Error::into_internal_error)
+        },
+        agent_client_protocol::on_receive_notification!(),
+    );
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        client.connect_with(
+            bee::acp::agent_with_runtime(providers("openai-chat", &server.url, ""), runtime),
+            async move |connection| {
+                connection
+                    .send_request(v2::InitializeRequest::new(
+                        ProtocolVersion::V2,
+                        v2::Implementation::new("test", "0"),
+                    ))
+                    .block_task()
+                    .await?;
+                let session = connection
+                    .send_request(v2::NewSessionRequest::new(project.path()))
+                    .block_task()
+                    .await?
+                    .session_id;
+                connection
+                    .send_request(v2::PromptRequest::new(session, vec!["question".into()]))
+                    .block_task()
+                    .await?;
+                let mut warnings = 0;
+                loop {
+                    match updates.recv().await.unwrap().update {
+                        v2::SessionUpdate::Notice(notice) => {
+                            warnings += 1;
+                            let wire = serde_json::to_string(&notice).unwrap();
+                            assert!(
+                                wire.contains("bee::skills::metadata")
+                                    && wire.contains("fix SKILL.md")
+                            );
+                            assert!(!wire.contains("secret-sentinel"));
+                        }
+                        v2::SessionUpdate::StateUpdate(v2::StateUpdate::Idle(idle)) => {
+                            assert!(matches!(idle.stop_reason, Some(v2::StopReason::Error(_))));
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                assert_eq!(warnings, 1);
+                Ok(())
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    server.request();
+}
+
+#[rstest::rstest]
+#[case::successful(0)]
+#[case::refused(1)]
+#[case::cancelled(2)]
+#[tokio::test]
+async fn resume_and_model_changes_retain_only_committed_skill_activations(#[case] kind: u8) {
+    let project = tempfile::tempdir().unwrap();
+    let skill = project.path().join(".agents/skills/demo/SKILL.md");
+    std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
+    std::fs::write(
+        skill,
+        "---\nname: demo\ndescription: Demo\n---\nTRANSACTIONAL-SKILL\n",
+    )
+    .unwrap();
+    let terminal = Response::json(if kind == 1 {
+        json!({"choices":[{"index":0,"message":{"role":"assistant","refusal":"declined"},"finish_reason":"stop"}]})
+    } else {
+        chat_text("first answer")
+    });
+    let (terminal, release_terminal) = if kind == 2 {
+        let (terminal, release) = terminal.gated();
+        (terminal, Some(release))
+    } else {
+        (terminal, None)
+    };
+    let server = Server::start(vec![
+        Response::json(native_call(
+            "openai-chat",
+            "skill",
+            "read",
+            json!({"path":".agents/skills/demo/SKILL.md","limit":1}),
+        )),
+        terminal,
+        Response::json(chat_text("replacement answer")),
+    ]);
+    let runtime = bee::acp::Runtime::builtins(bee::agent::Limits::default())
+        .unwrap()
+        .with_instructions(bee::instructions::Sources::default());
+    let (tx, mut updates) = tokio::sync::mpsc::unbounded_channel();
+    let client = Client.v2().on_receive_notification(
+        async move |update: v2::UpdateSessionNotification, _| {
+            tx.send(update).map_err(Error::into_internal_error)
+        },
+        agent_client_protocol::on_receive_notification!(),
+    );
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        client.connect_with(
+            bee::acp::agent_with_runtime(providers("openai-chat", &server.url, ""), runtime),
+            async move |connection| {
+                connection
+                    .send_request(v2::InitializeRequest::new(
+                        ProtocolVersion::V2,
+                        v2::Implementation::new("test", "0"),
+                    ))
+                    .block_task()
+                    .await?;
+                let session = connection
+                    .send_request(v2::NewSessionRequest::new(project.path()))
+                    .block_task()
+                    .await?
+                    .session_id;
+                connection
+                    .send_request(v2::PromptRequest::new(
+                        session.clone(),
+                        vec!["activate".into()],
+                    ))
+                    .block_task()
+                    .await?;
+                server.request_async().await;
+                let second = server.request_async().await;
+                assert!(
+                    instruction_text("openai-chat", &second.body).contains("TRANSACTIONAL-SKILL")
+                );
+                if kind == 2 {
+                    connection
+                        .send_notification(v2::CancelSessionNotification::new(session.clone()))?;
+                }
+                loop {
+                    if let v2::SessionUpdate::StateUpdate(v2::StateUpdate::Idle(idle)) =
+                        updates.recv().await.unwrap().update
+                    {
+                        assert_eq!(
+                            idle.stop_reason,
+                            Some(match kind {
+                                0 => v2::StopReason::EndTurn,
+                                1 => v2::StopReason::Refusal,
+                                _ => v2::StopReason::Cancelled,
+                            })
+                        );
+                        break;
+                    }
+                }
+                if let Some(release) = release_terminal {
+                    // The cancelled idle proves cancellation was processed before HTTP can finish.
+                    release.send(()).unwrap();
+                }
+                connection
+                    .send_request(v2::CloseSessionRequest::new(session.clone()))
+                    .block_task()
+                    .await?;
+                connection
+                    .send_request(v2::ResumeSessionRequest::new(
+                        session.clone(),
+                        project.path(),
+                    ))
+                    .block_task()
+                    .await?;
+                // Consume the resume snapshot before observing the replacement prompt.
+                assert!(matches!(
+                    updates.recv().await.unwrap().update,
+                    v2::SessionUpdate::StateUpdate(v2::StateUpdate::Idle(_))
+                ));
+                connection
+                    .send_request(v2::SetSessionConfigOptionRequest::new(
+                        session.clone(),
+                        "model",
+                        "replacement-model",
+                    ))
+                    .block_task()
+                    .await?;
+                connection
+                    .send_request(v2::PromptRequest::new(session, vec!["continue".into()]))
+                    .block_task()
+                    .await?;
+                let third = server.request_async().await;
+                assert_eq!(third.body["model"], "replacement-model");
+                assert_eq!(
+                    instruction_text("openai-chat", &third.body).contains("TRANSACTIONAL-SKILL"),
+                    kind == 0
+                );
+                loop {
+                    if let v2::SessionUpdate::StateUpdate(v2::StateUpdate::Idle(idle)) =
+                        updates.recv().await.unwrap().update
+                    {
+                        assert_eq!(idle.stop_reason, Some(v2::StopReason::EndTurn));
+                        break;
                     }
                 }
                 Ok(())

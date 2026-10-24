@@ -39,6 +39,10 @@ It also discovers and invokes client-hosted MCP tools through ACPv2's `session.m
 tools. The client owns MCP configuration and permission policy; denials are returned to the model as tool errors.
 All three protocols use native wire adapters, with provider identity, model, endpoint and authentication kept separate.
 
+Project and nested `AGENTS.md` instructions and additive `~/.agents/AGENTS.md` guide execution. Standard Agent Skills are
+discovered from project/user `.agents/skills` directories and configurable extra roots, then loaded progressively through
+the native tools. See [instructions and skills](docs/instructions.md) for scope and precedence.
+
 The "Scope" and "Non-goals" sections describe the intended design, not current behaviour.
 
 ## Configuration

@@ -323,6 +323,31 @@ impl Composite<'_> {
 }
 
 impl Executor for Composite<'_> {
+    fn output_limit(&self) -> usize {
+        self.native.output_limit()
+    }
+
+    fn target(&self, call: &Call) -> Option<crate::tool::Target> {
+        // Remote tools retain client-owned semantics even if names resemble native tools.
+        if self.catalog.routes.contains_key(&call.name) {
+            None
+        } else {
+            self.native.target(call)
+        }
+    }
+
+    fn execute_snapshot<'a>(
+        &'a self,
+        call: &'a Call,
+        snapshot: std::sync::Arc<str>,
+    ) -> Pin<Box<dyn Future<Output = Result<ToolResult, crate::llm::Error>> + Send + 'a>> {
+        if self.catalog.routes.contains_key(&call.name) {
+            self.execute(call)
+        } else {
+            self.native.execute_snapshot(call, snapshot)
+        }
+    }
+
     fn execute<'a>(
         &'a self,
         call: &'a Call,
