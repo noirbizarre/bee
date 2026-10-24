@@ -25,6 +25,7 @@ mod mcp;
 
 /// Immutable execution policy and complete native catalog for one connection.
 pub struct Runtime {
+    instructions: Option<crate::instructions::Sources>,
     limits: crate::agent::Limits,
     tools: crate::tool::Registry,
 }
@@ -32,7 +33,17 @@ pub struct Runtime {
 impl Runtime {
     /// Supply a complete catalog, which may be empty or extended by the caller.
     pub fn new(limits: crate::agent::Limits, tools: crate::tool::Registry) -> Self {
-        Self { limits, tools }
+        Self {
+            limits,
+            tools,
+            instructions: None,
+        }
+    }
+
+    /// Enable instruction discovery with explicitly injected home and configuration.
+    pub fn with_instructions(mut self, sources: crate::instructions::Sources) -> Self {
+        self.instructions = Some(sources);
+        self
     }
 
     /// Compile the shipped catalog before accepting prompts.
@@ -84,6 +95,23 @@ pub struct Reply {
 }
 
 impl Reply {
+    fn diagnostic(&self, diagnostic: &crate::instructions::Diagnostic) {
+        let sessions = lock(&self.sessions);
+        if sessions.is_current(&self.id, self.token) {
+            let description = match diagnostic.position {
+                Some((line, column)) => format!("{diagnostic} (line {line}, column {column})"),
+                None => diagnostic.to_string(),
+            };
+            let _ = send_update(
+                &self.connection,
+                &self.session_id,
+                v2::SessionUpdate::Notice(
+                    v2::Notice::new(v2::NoticeSeverity::Warning, "Agent skill discovery warning")
+                        .description(description),
+                ),
+            );
+        }
+    }
     /// Send `text` as a chunk of the agent's answer, unless the turn was
     /// cancelled or has ended.
     pub fn text(&self, text: &str) {
@@ -108,7 +136,7 @@ impl Reply {
 
 /// Credentials are resolved at request time, not while loading configuration.
 async fn inference(reply: Reply, runtime: Arc<Runtime>) -> std::result::Result<(), TurnFailure> {
-    let crate::session::InferenceInput { profile, model, messages, cwd } = reply.input.clone().ok_or_else(|| TurnFailure::new(
+    let crate::session::InferenceInput { profile, model, messages, cwd, instructions } = reply.input.clone().ok_or_else(|| TurnFailure::new(
         "configure a provider and model in Bee's configuration or select a model over ACP before prompting"
     ))?;
     let env = crate::config::Environment::from_process();
@@ -128,6 +156,29 @@ async fn inference(reply: Reply, runtime: Arc<Runtime>) -> std::result::Result<(
     let credential = credential.map(|value| value.secret().clone());
     let model = crate::llm::Model::new(profile, model, credential)
         .map_err(|error| TurnFailure::new(error.to_string()))?;
+    let guidance = if let Some(sources) = &runtime.instructions {
+        Some(
+            sources
+                .start(&cwd, instructions)
+                .await
+                .map_err(|error| TurnFailure::new(error.to_string()))?,
+        )
+    } else {
+        None
+    };
+    if let Some(guidance) = &guidance {
+        for diagnostic in guidance.diagnostics.iter().take(16) {
+            reply.diagnostic(diagnostic);
+        }
+        if guidance.diagnostics.len() > 16 {
+            reply.diagnostic(&crate::instructions::Diagnostic::new(
+                "bee::skills::warnings",
+                std::path::Path::new("<discovery>"),
+                "additional discovery warnings omitted after 16 notices",
+                "fix the reported sources and retry to see remaining warnings",
+            ));
+        }
+    }
     let cancellation = tokio_util::sync::CancellationToken::new();
     // ACP owns the terminal update; dropping its future also signals tool observers.
     let _guard = cancellation.clone().drop_guard();
@@ -148,13 +199,14 @@ async fn inference(reply: Reply, runtime: Arc<Runtime>) -> std::result::Result<(
         connection: &reply.connection,
         bindings: &reply.mcp,
     };
-    let outcome = crate::agent::run_with_limits(
+    let outcome = crate::agent::run_with_guidance(
         &model,
         messages,
         executor.definitions(),
         Some(&executor),
         &mut |text| reply.text(text),
         runtime.limits,
+        guidance,
     )
     .await
     .map_err(|error| TurnFailure::new(error.to_string()))?;
@@ -697,7 +749,7 @@ where
         && outcome.stop != crate::llm::Stop::Refusal
         && sessions.is_current(&id, token)
     {
-        sessions.commit(&id, token, outcome.messages);
+        sessions.commit(&id, token, outcome.messages, outcome.instructions);
         // Report only committed context, under the same lock as cancellation/idle.
         if let Some(window) = outcome.context.window {
             let meta = serde_json::json!({"bee.dev/context": {"estimated":true,"method":"utf8-json-bytes/3+256","reservedOutput":outcome.context.reserved_output}});

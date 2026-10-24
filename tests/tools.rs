@@ -71,6 +71,27 @@ fn registry() -> Registry {
     registry
 }
 
+#[test]
+fn structured_targets_belong_to_the_registered_implementation_not_its_name() {
+    let mut custom = Registry::default();
+    custom.register(Echo::new("write")).unwrap();
+    assert!(custom.target("write", &json!({"text":"hello"})).is_none());
+    let builtins = bee::tool::builtins().unwrap();
+    assert!(
+        builtins
+            .target("write", &json!({"path":"file","content":"hello"}))
+            .is_some()
+    );
+    assert!(
+        builtins
+            .target("write", &json!({"path":12,"content":"hello"}))
+            .is_none()
+    );
+    let target = builtins.target("glob", &json!({"pattern":"**/*"})).unwrap();
+    assert!(target.directory);
+    assert!(!target.read);
+}
+
 fn envelope(output: &bee::tool::Output) -> Value {
     serde_json::from_str(&output.json).unwrap()
 }

@@ -44,6 +44,7 @@ pub fn bash_settings() -> bee::tool::bash::Settings {
 }
 
 pub struct Response {
+    gate: Option<Receiver<()>>,
     pub status: u16,
     pub kind: &'static str,
     pub body: String,
@@ -54,6 +55,7 @@ pub struct Response {
 impl Response {
     pub fn json(value: Value) -> Self {
         Self {
+            gate: None,
             status: 200,
             kind: "application/json",
             body: value.to_string(),
@@ -64,12 +66,20 @@ impl Response {
 
     pub fn sse(body: String) -> Self {
         Self {
+            gate: None,
             status: 200,
             kind: "text/event-stream",
             body,
             delay: Duration::ZERO,
             pause: None,
         }
+    }
+
+    /// Hold a response until the observing task acknowledges its assertions/cancellation.
+    pub fn gated(mut self) -> (Self, mpsc::Sender<()>) {
+        let (release, gate) = mpsc::channel();
+        self.gate = Some(gate);
+        (self, release)
     }
 }
 
@@ -127,6 +137,13 @@ impl Server {
                 };
                 let response = respond(&request);
                 tx.send(request).unwrap();
+                // Publishing a request is not itself a synchronization barrier: the
+                // observer must explicitly release responses whose ordering matters.
+                if let Some(gate) = response.gate
+                    && gate.recv_timeout(Duration::from_secs(10)).is_err()
+                {
+                    continue;
+                }
                 std::thread::sleep(response.delay);
                 let head = format!(
                     "HTTP/1.1 {} Fixture\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",

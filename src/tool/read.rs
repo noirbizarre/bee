@@ -53,6 +53,13 @@ impl Tool for Read {
     fn name(&self) -> &str {
         "read"
     }
+    fn target(&self, input: &Input) -> Option<super::Target> {
+        Some(super::Target {
+            path: input.path.clone().into(),
+            directory: false,
+            read: true,
+        })
+    }
     fn description(&self) -> &str {
         "Read a UTF-8 regular file with 1-based offset and limit (defaults 1 and 2000). Returns numbered lines and explicit truncation. Relative paths use cwd; absolute paths, .. and explicit symlinks are allowed: not a sandbox. Binary/NUL content and lines exceeding the byte budget are unsupported."
     }
@@ -73,8 +80,15 @@ impl Tool for Read {
                 "Expected a regular file; use list for directories.",
             ));
         }
-        let file = File::open(path).map_err(fs::io)?;
-        let mut reader = BufReader::with_capacity(8192, file);
+        // Skill activation and displayed content must refer to one immutable revision.
+        let mut reader: Box<dyn BufRead + Send> = if let Some(snapshot) = &context.read_snapshot {
+            Box::new(std::io::Cursor::new(snapshot.as_bytes().to_vec()))
+        } else {
+            Box::new(BufReader::with_capacity(
+                8192,
+                File::open(path).map_err(fs::io)?,
+            ))
+        };
         let mut result = Output {
             content: String::new(),
             truncated: false,

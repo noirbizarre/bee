@@ -38,3 +38,4 @@ by editing the old one. The history is the value.
 - [ADR-013](013-per-model-protocol-selection.md) — Select protocols by exact model ID independently of catalogs
 - [ADR-014](014-conversation-context-and-token-limits.md) — Budget explicit context windows and truncate whole turns
 - [ADR-015](015-client-hosted-mcp-execution.md) — Execute client-hosted MCP tools through the ACP boundary
+- [ADR-016](016-project-instructions-and-agent-skills.md) — Load scoped AGENTS.md instructions and standard Agent Skills

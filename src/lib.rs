@@ -18,11 +18,13 @@ pub mod config;
 pub mod context;
 pub mod error;
 pub mod http;
+pub mod instructions;
 pub mod llm;
 pub mod login;
 pub mod preset;
 pub mod provider;
 pub mod session;
+pub mod skills;
 pub mod tool;
 
 pub use error::{Error, Result};
@@ -49,12 +51,16 @@ pub fn run() -> Result<()> {
         path: ".".to_owned(),
         source,
     })?;
-    let config = config::Config::load(&config::Environment::from_process(), &project_dir)?;
+    let environment = config::Environment::from_process();
+    let config = config::Config::load(&environment, &project_dir)?;
     // Validated here for the same reason: a typo in a base URL must stop the
     // launch, not surface as a connection error on the first prompt (ADR-007).
     let providers = provider::Providers::from_config(&config)?;
     let tools = tool::builtins_with_bash(tool::bash::Settings::from_config(&config)?)?;
-    let runtime_options = acp::Runtime::new(agent::Limits::from_config(&config)?, tools);
+    let runtime_options =
+        acp::Runtime::new(agent::Limits::from_config(&config)?, tools).with_instructions(
+            instructions::Sources::from_config(&config, &environment, &project_dir)?,
+        );
 
     // Async model sockets and timers need a reactor even while ACP is idle.
     let runtime = tokio::runtime::Builder::new_current_thread()

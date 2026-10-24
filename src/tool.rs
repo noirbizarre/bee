@@ -78,6 +78,7 @@ pub enum Error {
 /// Per-turn execution inputs, supplied by the session owner.
 #[derive(Clone)]
 pub struct Context {
+    read_snapshot: Option<std::sync::Arc<str>>,
     cwd: PathBuf,
     cancellation: CancellationToken,
     output_limit: usize,
@@ -97,6 +98,7 @@ impl Context {
             return Err(Error::Limit);
         }
         Ok(Self {
+            read_snapshot: None,
             cwd: cwd.into(),
             cancellation,
             output_limit,
@@ -123,6 +125,16 @@ impl fmt::Debug for Context {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("Context([redacted])")
     }
+}
+
+/// A validated native filesystem target, used for instruction scope discovery.
+pub struct Target {
+    /// Path relative to the execution context, or absolute.
+    pub path: PathBuf,
+    /// Whether the target itself is a directory rather than a file.
+    pub directory: bool,
+    /// Whether a successful operation can activate a cataloged skill.
+    pub read: bool,
 }
 
 /// Stable model-facing failure classifications, not diagnostic codes.
@@ -179,6 +191,10 @@ pub trait Tool: Send + Sync + 'static {
     fn name(&self) -> &str;
     /// Model-facing explanation of when and how to use this operation.
     fn description(&self) -> &str;
+    /// Describe a filesystem target without executing; custom tools opt in explicitly.
+    fn target(&self, _input: &Self::Input) -> Option<Target> {
+        None
+    }
     /// Execute validated input. Dropping this future must stop pending work.
     ///
     /// Await cancellation for cooperative cleanup, but do not depend on async
@@ -224,10 +240,15 @@ impl fmt::Debug for Output {
 type Execution<'a> = Pin<Box<dyn Future<Output = Output> + Send + 'a>>;
 
 trait Erased: Send + Sync {
+    fn target(&self, arguments: Value) -> Option<Target>;
     fn execute<'a>(&'a self, arguments: Value, context: &'a Context) -> Execution<'a>;
 }
 
 impl<T: Tool> Erased for T {
+    fn target(&self, arguments: Value) -> Option<Target> {
+        let input = serde_json::from_value(arguments).ok()?;
+        Tool::target(self, &input)
+    }
     fn execute<'a>(&'a self, arguments: Value, context: &'a Context) -> Execution<'a> {
         Box::pin(async move {
             // Never retain Serde's error: it can quote arguments containing keys.
@@ -259,6 +280,26 @@ pub struct Registry {
 }
 
 impl Registry {
+    /// Inspect schema-valid arguments using the registered implementation's decoder.
+    pub fn target(&self, name: &str, arguments: &Value) -> Option<Target> {
+        let entry = self.entries.get(name)?;
+        if !entry.validator.is_valid(arguments) {
+            return None;
+        }
+        entry.implementation.target(arguments.clone())
+    }
+
+    pub(crate) async fn invoke_snapshot(
+        &self,
+        name: &str,
+        arguments: &Value,
+        context: &Context,
+        snapshot: std::sync::Arc<str>,
+    ) -> Result<Output, Error> {
+        let mut context = context.clone();
+        context.read_snapshot = Some(snapshot);
+        self.invoke(name, arguments, &context).await
+    }
     /// Validate and register a typed implementation without replacing collisions.
     pub fn register<T: Tool>(&mut self, tool: T) -> Result<(), Error> {
         let name = tool.name();
@@ -343,6 +384,7 @@ impl Registry {
             ));
         }
         let execution = Context {
+            read_snapshot: context.read_snapshot.clone(),
             cwd: context.cwd.clone(),
             cancellation: context.cancellation.child_token(),
             output_limit: context.output_limit,

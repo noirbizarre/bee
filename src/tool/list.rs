@@ -33,6 +33,13 @@ fn limit() -> usize {
 impl Tool for List {
     type Input = Input;
     type Output = Output;
+    fn target(&self, input: &Input) -> Option<super::Target> {
+        Some(super::Target {
+            path: input.path.clone().into(),
+            directory: true,
+            read: false,
+        })
+    }
     fn name(&self) -> &str {
         "list"
     }
