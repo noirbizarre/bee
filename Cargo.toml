@@ -118,6 +118,9 @@ serde = { version = "1", features = ["derive"] }
 schemars = "1"
 # Schemas are local code, not a reason to fetch URLs or read referenced files.
 jsonschema = { version = "0.60", default-features = false }
+# Repository-local discovery rules and portable, validated glob syntax.
+ignore = "0.4"
+globset = "0.4"
 
 # Layered configuration (ADR-006). Only the generic `Table`/`Value` types are
 # used, which sit behind the `serde` feature; `display` (serialization) is not

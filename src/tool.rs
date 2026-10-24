@@ -14,6 +14,12 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
+mod discovery;
+mod fs;
+pub mod glob;
+pub mod list;
+pub mod read;
+
 /// Maximum serialized bytes per tool result, including its JSON envelope.
 pub const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 /// Minimum budget, leaving room for a complete fixed failure envelope.

@@ -7,6 +7,77 @@ or advertise native tools yet.
 
 ## Implement and register a tool
 
+### Built-in file reading
+
+Register `bee::tool::read::Read` with `registry.register(bee::tool::read::Read)?`.
+Its `read` input requires `path`; optional `offset` is 1-based (default 1), and
+`limit` is a positive line count (default 2000). Unknown fields are rejected.
+An offset beyond EOF returns empty content. Zero or overflowing ranges fail.
+
+Success data contains `content` formatted as `1: text\n`, `truncated`, and
+`next_line` (null at EOF). LF and CRLF endings are normalized; an initial UTF-8
+BOM is removed. Empty files have no lines; a final newline does not create a
+phantom line. Truncation reports omitted content at either the requested line
+limit or the serialized byte budget. Repeat with `offset: next_line` to continue.
+If one line cannot fit, increase the execution budget; the tool never silently
+splits a logical line. Even skipped lines have bounded buffers, so an oversized
+line before the requested offset can also produce an `output_limit` failure.
+
+Only regular UTF-8 text files are supported. Invalid UTF-8 and NUL bytes in
+scanned content fail; unread portions are not prevalidated. Missing, inaccessible,
+directory and special-file paths produce actionable tool errors. Reads use bounded
+buffers and cooperative cancellation between chunks; filesystem syscalls can block.
+
+Paths resolve relative to the execution cwd; absolute paths, parent traversal and
+explicit symlinks are allowed, including targets outside cwd. This is **not a
+sandbox**: metadata checks do not prevent concurrent filesystem changes. No file
+contents or arbitrary OS error messages enter diagnostic or debug output.
+
+### Built-in discovery
+
+Register `bee::tool::glob::Glob` and `bee::tool::list::List` alongside `Read`.
+For example, invoke `glob` with `{"pattern":"**/*.rs"}`, then `list` with
+`{"path":"src"}`, and `read` with a discovered file path. All three use the
+same context and can be advertised through `NativeExecutor`.
+
+`glob` requires a root-relative, case-sensitive `pattern` (up to 4096 bytes).
+`*` matches within a component, `?` one character, `[ab]` a character class,
+`{rs,toml}` alternatives, and `**` recursive components. Use `/` as a separator
+on every platform; backslash escapes metacharacters. For example, `*.rs` matches
+root files while `**/*.rs` also matches nested files. Malformed patterns fail.
+Only regular files and symlink entries are returned, not directories or devices.
+
+Optional `path` defaults to cwd; `limit` defaults to 1000 and accepts 1–10000.
+`include_hidden` and `include_ignored` both default to false and are independent:
+including dotfiles does not disable ignore rules. Rules from `.ignore`, nested
+and parent `.gitignore` files, and repository-local `.git/info/exclude` apply,
+including negation and rules outside a Git checkout. Global user ignore files
+are disabled for reproducibility. `include_ignored` disables all these local
+ignore sources. Hidden directories are not traversed unless requested.
+
+`list` accepts optional `path` and `limit` with the same defaults and bounds.
+It returns immediate entries of every kind, including hidden and ignored names,
+without recursion or ignore filtering. Entry kinds are `file`, `directory`,
+`symlink`, and `other`.
+
+Both return `entries` containing root-relative UTF-8 `path` and `kind`, sorted
+lexically using `/` separators, plus `truncated`. Count and complete serialized
+byte budgets select a lexical prefix independently of enumeration order. A
+single oversized entry can yield an empty truncated result. Discover a smaller
+subdirectory or increase the budget/count to inspect more entries. The tools
+scan all eligible entries to select this deterministic prefix, retaining only
+bounded result storage. Glob stops descending at depth 64 and reports truncation
+when a directory reaches that boundary, even if it might be empty.
+
+Explicit symlink roots are followed; nested symlink entries (including dangling
+links) are reported without traversal, preventing recursive symlink cycles.
+Missing/non-directory roots, inaccessible descendants, malformed ignore rules,
+I/O failures and non-UTF-8 names produce actionable errors rather than silently
+incomplete success. Filesystem changes can still race with enumeration. Path
+resolution and cancellation have the same non-sandbox limitations as `read`.
+
+### Custom tools
+
 ```rust
 use bee::tool::{Context, Failure, Registry, Tool, MAX_OUTPUT_BYTES};
 use schemars::JsonSchema;
