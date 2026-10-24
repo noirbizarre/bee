@@ -1,6 +1,7 @@
 //! SDK-free inference types and protocol dispatch.
 
 pub mod chat;
+pub mod responses;
 
 use std::fmt;
 
@@ -196,6 +197,7 @@ impl Model {
     ) -> Result<Step, Error> {
         match self.profile.protocol() {
             Protocol::OpenAiChat => chat::run(self, messages, tools, text).await,
+            Protocol::OpenAiResponses => responses::run(self, messages, tools, text).await,
             _ => Err(Error::Unsupported(
                 "the preferred protocol backend is not implemented",
             )),

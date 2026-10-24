@@ -240,9 +240,9 @@ async fn invalid_tool_arguments_never_reach_an_executor() {
 #[tokio::test]
 async fn a_preferred_unimplemented_protocol_does_not_fall_back_to_chat() {
     let profiles = support::providers(
-        "openai-responses",
+        "anthropic-messages",
         "http://127.0.0.1:1",
-        "prefer=['openai-responses','openai-chat']\n[providers.test.protocols.openai-chat]",
+        "prefer=['anthropic-messages','openai-chat']\n[providers.test.protocols.openai-chat]",
     );
     let model = Model::new(profiles.get("test").unwrap().clone(), "opaque".into(), None).unwrap();
     assert!(matches!(

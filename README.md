@@ -29,11 +29,12 @@ Bee is at the **bootstrap stage**. The repository, tooling, CI and release autom
 binary serves ACPv2 over stdio: a client can start it, complete the `initialize` handshake, create sessions and submit
 prompts. Bee advertises the baseline session lifecycle (`session/new`, `list`, `resume`, `close`, `prompt`, `cancel`).
 
-**Chat Completions inference is implemented.** Prompts stream responses from the selected endpoint. Running turns can
+**Chat Completions and Responses inference are implemented.** Prompts stream responses from the selected endpoint.
+Turns can
 be cancelled or closed, and another prompt is refused until the session is idle. Successful conversation context is
 retained in memory; ACP update replay is unsupported. Prompts accept text and resource links (references only, never
 fetched). The SDK-free loop supports injected function executors; production ACP tool execution remains deferred.
-Responses and Anthropic profiles are configurable, but their inference backends are not implemented yet.
+Presets preferring Responses (including OpenAI and xAI) can now run inference. Anthropic inference remains unimplemented.
 
 The "Scope" and "Non-goals" sections describe the intended design, not current behaviour.
 

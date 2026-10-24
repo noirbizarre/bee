@@ -1,7 +1,7 @@
 # Inference and smoke tests
 
-Bee implements text and function-calling Chat Completions. Responses and Anthropic are configuration-only until their
-backends land. A profile's preferred protocol is used exactly; failures never trigger protocol fallback. Any opaque
+Bee implements text and function-calling Chat Completions and Responses. Anthropic remains configuration-only.
+A profile's preferred protocol is used exactly; failures never trigger protocol fallback. Any opaque
 model ID is accepted without a catalog lookup, but the endpoint must support that model and the selected protocol.
 
 ## Request settings and supported subset
@@ -9,6 +9,10 @@ model ID is accepted without a catalog lookup, but the endpoint must support tha
 - `timeout_ms`: positive 32-bit integer, default 120000, for each HTTP exchange including streamed body reads.
 - `max_output_tokens`: positive 32-bit integer, default 4096. Chat maps this through `options.max_tokens_field`.
 - Configured base paths are preserved. Chat appends `/chat/completions` to its base URL.
+- Responses appends `/responses` and uses `max_output_tokens`. It uses stateless, client-managed continuation
+  (`store = false`) with native output items and encrypted reasoning state. Function outputs correlate by call ID,
+  not output-item ID. Built-in server tools and non-text message content are unsupported. Streams require item completion
+  followed by a completed/incomplete response; usage and final objects never duplicate streamed text.
 - Text, streamed function calls, optional usage, and ordinary JSON answers are supported. Chat supports one choice,
   modern function tools, and `max_tokens` or `max_completion_tokens`. Legacy functions, audio and other meaningful
   unsupported output fail explicitly. Compatible servers need only implement this practical subset.
@@ -59,3 +63,27 @@ base_url = "http://127.0.0.1:11434/v1"
 
 Run official and compatible endpoint checks separately; passing local fixtures does not claim compatibility with
 every server or model. Live tests require user-supplied credentials and are not part of automated CI.
+
+## Responses manual smoke test
+
+Repeat the text, follow-up and cancellation checks above with an OpenAI model supporting Responses:
+
+```toml
+[providers.smoke]
+preset = "openai"
+model = "YOUR_RESPONSES_MODEL_ID"
+```
+
+The OpenAI preset prefers Responses, so no preference override is needed. For a compatible gateway, use its documented
+Responses base URL and credentials explicitly:
+
+```toml
+[providers.compatible]
+model = "YOUR_RESPONSES_MODEL_ID"
+credential = { env = "COMPATIBLE_API_KEY" }
+[providers.compatible.protocols.openai-responses]
+base_url = "https://YOUR_COMPATIBLE_HOST/v1"
+```
+
+Supply the key only in the launch environment. Verify both endpoints independently, including a multi-turn follow-up.
+Some compatible endpoints do not support stateless encrypted reasoning; those fail explicitly rather than losing state.

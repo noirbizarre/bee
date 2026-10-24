@@ -17,6 +17,7 @@ pub struct Response {
     pub kind: &'static str,
     pub body: String,
     pub delay: Duration,
+    pub pause: Option<(usize, Duration)>,
 }
 
 impl Response {
@@ -26,6 +27,7 @@ impl Response {
             kind: "application/json",
             body: value.to_string(),
             delay: Duration::ZERO,
+            pause: None,
         }
     }
 
@@ -35,6 +37,7 @@ impl Response {
             kind: "text/event-stream",
             body,
             delay: Duration::ZERO,
+            pause: None,
         }
     }
 }
@@ -90,6 +93,17 @@ impl Server {
                     response.body.len()
                 );
                 if socket.write_all(head.as_bytes()).is_ok() {
+                    if let Some((index, delay)) = response.pause {
+                        if socket
+                            .write_all(&response.body.as_bytes()[..index])
+                            .is_err()
+                        {
+                            continue;
+                        }
+                        std::thread::sleep(delay);
+                        let _ = socket.write_all(&response.body.as_bytes()[index..]);
+                        continue;
+                    }
                     // Tiny writes exercise framing independently of JSON boundaries.
                     for chunk in response.body.as_bytes().chunks(3) {
                         if socket.write_all(chunk).is_err() {
