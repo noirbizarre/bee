@@ -132,6 +132,26 @@ fn an_invalid_provider_profile_fails_startup_without_echoing_secrets() {
 }
 
 // ---- `bee auth` ---------------------------------------------------------------
+#[test]
+fn invalid_model_mappings_fail_startup_without_echoing_model_keys_or_protocol_values() {
+    for value in [
+        format!("'{SECRET}'"),
+        "1".into(),
+        "'openai-responses'".into(),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join(".config/bee.toml");
+        std::fs::create_dir_all(project.parent().unwrap()).unwrap();
+        std::fs::write(&project, format!("[providers.p]\nprotocols={{openai-chat={{}}}}\nmodel_protocols={{'{SECRET}'={value}}}")).unwrap();
+        isolated(dir.path())
+            .write_stdin("")
+            .assert()
+            .failure()
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::contains("model_protocols"))
+            .stderr(predicate::str::contains(SECRET).not());
+    }
+}
 
 const AUTH_CONFIG: &str = r#"
 provider = "stored"

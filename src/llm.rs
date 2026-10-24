@@ -200,7 +200,7 @@ impl Model {
         tools: &[Tool],
         text: &mut (dyn FnMut(&str) + Send),
     ) -> Result<Step, Error> {
-        match self.profile.protocol() {
+        match self.endpoint().protocol() {
             Protocol::OpenAiChat => chat::run(self, messages, tools, text).await,
             Protocol::OpenAiResponses => responses::run(self, messages, tools, text).await,
             Protocol::AnthropicMessages => anthropic::run(self, messages, tools, text).await,
@@ -209,6 +209,10 @@ impl Model {
 }
 
 impl Model {
+    fn endpoint(&self) -> &crate::provider::Endpoint {
+        self.profile.endpoint_for_model(&self.model)
+    }
+
     pub(crate) fn headers(
         &self,
         version: Option<&str>,
@@ -227,7 +231,7 @@ impl Model {
             );
         }
         if let Some(secret) = &self.credential {
-            let (name, value) = crate::auth::header_for(self.profile.protocol(), secret);
+            let (name, value) = crate::auth::header_for(self.endpoint().protocol(), secret);
             let mut value = HeaderValue::from_str(value.expose()).map_err(|_| Error::Headers)?;
             value.set_sensitive(true);
             headers.insert(

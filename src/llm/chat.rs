@@ -25,7 +25,7 @@ pub(super) async fn run(
         Message::Tool { id, output, .. } => json!({"role":"tool", "tool_call_id":id,"content":output}),
     }).collect();
     let mut body = json!({"model":model.model,"messages":messages,"stream":true});
-    let field = match model.profile.options() {
+    let field = match model.endpoint().options() {
         ProtocolOptions::OpenAiChat {
             max_tokens_field: MaxTokensField::MaxCompletionTokens,
         } => "max_completion_tokens",
@@ -39,7 +39,7 @@ pub(super) async fn run(
     model
         .http
         .post(
-            &format!("{}/chat/completions", model.profile.base_url()),
+            &format!("{}/chat/completions", model.endpoint().base_url()),
             model.headers(None)?,
             body,
             model.profile.timeout(),

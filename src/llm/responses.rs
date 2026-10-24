@@ -53,7 +53,7 @@ pub(super) async fn run(
     model
         .http
         .post(
-            &format!("{}/responses", model.profile.base_url()),
+            &format!("{}/responses", model.endpoint().base_url()),
             model.headers(None)?,
             body,
             model.profile.timeout(),

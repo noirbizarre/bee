@@ -61,12 +61,13 @@ options = { max_tokens_field = "max_completion_tokens" }   # settings only this 
 ```
 
 A provider can speak several protocols, each at its own URL and with its own options. Several protocols need `prefer`,
-which orders them, most preferred first; Bee does not guess among them. The first is the one requests use. Choosing a
-protocol per model is a planned, additive change.
+which orders them, most preferred first; Bee does not guess among them. An optional `model_protocols` table maps exact
+model IDs to configured protocols. Unmapped IDs use the first endpoint in preference order.
 
 ```toml
 [providers.gateway]
 prefer = ["anthropic-messages", "openai-chat"]
+model_protocols = { "vendor/model.v2" = "openai-chat" }
 
 [providers.gateway.protocols.openai-chat]
 base_url = "https://gw.example/openai/v1"
@@ -75,6 +76,16 @@ base_url = "https://gw.example/openai/v1"
 base_url = "https://gw.example/anthropic"
 options = { max_tokens = 2048 }
 ```
+
+Mapping keys are literal, case-sensitive model IDs: quote IDs containing dots, slashes or other TOML punctuation.
+There is no prefix matching or vendor inference. Mapping targets must be supported protocols configured on the final
+profile, including endpoints inherited from a preset; invalid targets stop Bee at launch. Mappings do not add model
+suggestions or restrict which IDs can be selected. Unknown/private models remain usable without Models.dev or another
+catalog. `prefer` is still required for multi-protocol profiles because unmapped models need a fallback.
+
+`model_protocols` merges key by key across global, `BEE_CONFIG` and project files, and over presets: a higher-priority
+entry replaces the same model ID while retaining other entries. An empty table (`model_protocols = {}`) does not clear
+inherited mappings. See [ADR-013](adr/013-per-model-protocol-selection.md).
 
 Several profiles can use the same protocol, so a gateway, a local server and a vendor API are just three profiles.
 Layers merge as above: a project file can override one header or the model of a global profile. Unknown keys,
@@ -89,7 +100,10 @@ credential. The provider is the client's choice, else `provider`, else the only 
 choice, else the profile's `model`, else the first of its `models`. Choosing another provider resets the model, and
 settings cannot change while a turn is running. See [ADR-007](adr/007-provider-profiles-and-model-selection.md).
 
-Requests use the preferred protocol exactly; Bee never silently falls back to another protocol. `openai-chat`,
+Protocol resolution uses that effective model ID for every prompt, whether selected by the client or supplied by a
+default. Changing models resolves the endpoint again, retains portable history and drops native continuation.
+
+Requests use the resolved protocol exactly; failures never trigger a retry on another protocol. `openai-chat`,
 `openai-responses` and `anthropic-messages` can run inference, including presets preferring Responses or Messages.
 See [Inference and smoke tests](inference.md) for the supported subset and verification instructions.
 
@@ -135,12 +149,12 @@ Shipped presets, with the variable each reads its key from:
 | `xai`        | `openai-responses`, `openai-chat`                       | `XAI_API_KEY`                     |
 | `ollama`     | `openai-chat`, local server                             | none                              |
 
-Scalars and arrays in the profile replace the preset's, `headers` and each protocol's table under `protocols` merge key
-by key, `prefer` replaces, and `credential` is replaced whole. Every URL is taken from the vendor's own documentation,
+Scalars and arrays in the profile replace the preset's, `model_protocols`, `headers` and each protocol's table under
+`protocols` merge key by key, `prefer` replaces, and `credential` is replaced whole. Every URL comes from vendor documentation,
 and a vendor is listed by the protocols Bee speaks: OpenCode Zen serves its GPT, Grok and Muse models over
 `openai-responses`, its Claude models over `anthropic-messages` and the rest over `openai-chat`, and only its Gemini
-models (Google's native protocol) cannot be reached. Today one protocol serves a whole profile, the first of `prefer`;
-choosing per model is tracked in [#24](https://github.com/noirbizarre/bee/issues/24). OpenCode Go uses other endpoints
+models (Google's native protocol) cannot be reached. Set exact `model_protocols` entries for models needing a protocol
+other than the preset's preference. OpenCode Go uses other endpoints
 (`/inference/go`) and needs a profile of its own. The catalogue deliberately has no model lists: name your own
 `model`.
 

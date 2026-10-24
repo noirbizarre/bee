@@ -59,6 +59,111 @@ fn load(text: &str) -> bee::Result<Providers> {
 }
 
 #[test]
+fn exact_model_mappings_override_preference_without_restricting_unknown_models() {
+    let providers = load(r#"
+[providers.gateway]
+prefer = ["openai-chat"]
+model = "vendor/model.v2"
+models = ["suggested"]
+model_protocols = { "vendor/model.v2" = "openai-responses", "模型 / custom:1" = "anthropic-messages" }
+protocols = { openai-chat = {}, openai-responses = {}, anthropic-messages = {} }
+"#).unwrap();
+    let profile = providers.get("gateway").unwrap();
+    assert_eq!(
+        profile
+            .endpoint_for_model(profile.default_model().unwrap())
+            .protocol(),
+        Protocol::OpenAiResponses
+    );
+    assert_eq!(
+        profile.endpoint_for_model("模型 / custom:1").protocol(),
+        Protocol::AnthropicMessages
+    );
+    for model in [
+        "suggested",
+        "unknown",
+        "Vendor/model.v2",
+        "vendor/model.v2-extra",
+    ] {
+        assert_eq!(
+            profile.endpoint_for_model(model).protocol(),
+            Protocol::OpenAiChat
+        );
+    }
+    assert_eq!(profile.suggested_models(), ["vendor/model.v2", "suggested"]);
+}
+
+#[test]
+fn invalid_model_mappings_are_rejected_without_printing_keys_or_values() {
+    for mapping in [
+        format!("'{SECRET}'"),
+        format!("{{ '{SECRET}' = 1 }}"),
+        format!("{{ '{SECRET}' = '{SECRET}' }}"),
+        format!("{{ '{SECRET}' = 'openai-responses' }}"),
+        "{ '' = 'openai-chat' }".into(),
+        "{ ' trailing ' = 'openai-chat' }".into(),
+        "{ \"control\\nkey\" = 'openai-chat' }".into(),
+    ] {
+        let error = load(&format!(
+            "[providers.p]\nprotocols={{openai-chat={{}}}}\nmodel_protocols={mapping}"
+        ))
+        .unwrap_err();
+        assert!(!format!("{error} {error:?}").contains(SECRET));
+        let diagnostic = rendered(error);
+        assert!(diagnostic.contains("model_protocols"));
+        assert!(!diagnostic.contains(SECRET));
+    }
+}
+
+#[test]
+fn layered_model_mappings_merge_literal_ids_and_preserve_entry_origins() {
+    let sandbox = Sandbox::new();
+    sandbox.write(&sandbox.global(), "[providers.p]\nprefer=['openai-chat']\nprotocols={openai-chat={},openai-responses={},anthropic-messages={}}\nmodel_protocols={'vendor/a.v2'='openai-chat',other='anthropic-messages'}");
+    let selected = sandbox.root.path().join("selected.toml");
+    sandbox.write(
+        &selected,
+        "[providers.p.model_protocols]\n'vendor/a.v2'='openai-responses'",
+    );
+    sandbox.write(&sandbox.project(), "[providers.p]\nmodel_protocols={}");
+    let env = Environment::new(None, Some(sandbox.root.path().join("home")), Some(selected));
+    let config = Config::load(&env, &sandbox.project_dir()).unwrap();
+    let providers = Providers::from_config(&config).unwrap();
+    let profile = providers.get("p").unwrap();
+    assert_eq!(
+        profile.endpoint_for_model("vendor/a.v2").protocol(),
+        Protocol::OpenAiResponses
+    );
+    assert_eq!(
+        profile.endpoint_for_model("other").protocol(),
+        Protocol::AnthropicMessages
+    );
+
+    sandbox.write(&sandbox.global(), &format!("[providers.p]\nprotocols={{openai-chat={{}}}}\nmodel_protocols={{'{SECRET}'='openai-responses'}}"));
+    // An unrelated contribution must not move the invalid entry's origin.
+    sandbox.write(
+        &sandbox.project(),
+        "[providers.p.model_protocols]\nother='openai-chat'",
+    );
+    let env = Environment::new(None, Some(sandbox.root.path().join("home")), None);
+    let config = Config::load(&env, &sandbox.project_dir()).unwrap();
+    assert!(!format!("{config:?}").contains(SECRET));
+    let error = Providers::from_config(&config).unwrap_err();
+    let Error::ProviderInvalid { path, .. } = &error else {
+        panic!("expected an invalid mapping, got {error:?}");
+    };
+    // Windows accepts both separators; compare paths rather than rendered text.
+    assert_eq!(Path::new(path), sandbox.global());
+    assert!(!format!("{error:?}").contains(SECRET));
+    sandbox.write(
+        &sandbox.project(),
+        &format!("[providers.p.model_protocols]\n'{SECRET}'=1"),
+    );
+    let error = Config::load(&env, &sandbox.project_dir()).unwrap_err();
+    assert!(matches!(error, Error::ConfigConflict { .. }));
+    assert!(!format!("{error} {error:?}").contains(SECRET));
+}
+
+#[test]
 fn inference_limits_are_positive_and_work_in_presets() {
     let providers = load("[presets.local]\ntimeout_ms=456\nmax_output_tokens=123\n[ presets.local.protocols.openai-chat ]\n[providers.work]\npreset='local'\n").unwrap();
     let profile = providers.get("work").unwrap();

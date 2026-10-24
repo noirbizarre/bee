@@ -62,7 +62,7 @@ pub(super) async fn run(
     let ProtocolOptions::AnthropicMessages {
         version,
         max_tokens,
-    } = model.profile.options()
+    } = model.endpoint().options()
     else {
         return Err(Error::Malformed);
     };
@@ -74,7 +74,7 @@ pub(super) async fn run(
     model
         .http
         .post(
-            &format!("{}/v1/messages", model.profile.base_url()),
+            &format!("{}/v1/messages", model.endpoint().base_url()),
             model.headers(Some(version.as_deref().unwrap_or("2023-06-01")))?,
             body,
             model.profile.timeout(),

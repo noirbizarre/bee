@@ -20,6 +20,50 @@ use tempfile::TempDir;
 /// A secret that must never appear in any diagnostic or debug output.
 const SECRET: &str = "sk-super-secret-token";
 
+#[test]
+fn preset_model_mappings_merge_with_profile_overrides_and_added_endpoints() {
+    let sandbox = Sandbox::new();
+    sandbox.write(&sandbox.global(), "[presets.gateway]\nprefer=['openai-chat']\nprotocols={openai-chat={}}\nmodel_protocols={'vendor/model.v2'='openai-chat',inherited='openai-chat'}");
+    sandbox.write(
+        &sandbox.selected(),
+        "[presets.gateway.model_protocols]\nadded='openai-responses'",
+    );
+    sandbox.write(&project_config_path(&sandbox.project_dir()), "[providers.p]\npreset='gateway'\nmodel_protocols={'vendor/model.v2'='openai-responses'}\nprotocols={openai-responses={}}");
+    let providers = sandbox.providers().unwrap();
+    let profile = providers.get("p").unwrap();
+    for model in ["vendor/model.v2", "added"] {
+        assert_eq!(
+            profile.endpoint_for_model(model).protocol(),
+            Protocol::OpenAiResponses
+        );
+    }
+    assert_eq!(
+        profile.endpoint_for_model("inherited").protocol(),
+        Protocol::OpenAiChat
+    );
+}
+
+#[test]
+fn invalid_inherited_model_mappings_name_the_file_that_supplied_the_entry() {
+    let sandbox = Sandbox::new();
+    sandbox.write(&sandbox.global(), &format!("[presets.gateway]\nprotocols={{openai-chat={{}}}}\nmodel_protocols={{'{SECRET}'='openai-responses'}}"));
+    sandbox.write(
+        &sandbox.selected(),
+        "[presets.gateway.model_protocols]\nother='openai-chat'",
+    );
+    sandbox.write(
+        &project_config_path(&sandbox.project_dir()),
+        "[providers.p]\npreset='gateway'",
+    );
+    let error = sandbox.providers().unwrap_err();
+    let Error::ProviderInvalid { path, .. } = &error else {
+        panic!("expected an invalid mapping, got {error:?}");
+    };
+    // Windows accepts both separators; compare paths rather than rendered text.
+    assert_eq!(Path::new(path), sandbox.global());
+    assert!(!format!("{error} {error:?}").contains(SECRET));
+}
+
 /// A login flow that shares no parameter name with the shipped one.
 const ACME_FLOW: &str = r#"
 [login_flows.acme]
