@@ -101,11 +101,11 @@ fn context_model_map_diagnostics_preserve_leaf_provenance_and_redact_debug() {
     sandbox.write(&sandbox.global(), &format!("[providers.work]\nmodel_context_windows={{'{SECRET}'=0}}\n[providers.work.protocols.openai-chat]"));
     sandbox.write(&sandbox.project(), "[providers.work]\ncontext_window=2000");
     let error = sandbox.providers().unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains(&sandbox.global().display().to_string())
-    );
+    let Error::ProviderInvalid { path, .. } = error else {
+        panic!("invalid context limit must retain its typed provenance");
+    };
+    // Diagnostic formatting escapes Windows separators; compare filesystem paths.
+    assert_eq!(Path::new(&path), sandbox.global());
     sandbox.write(&sandbox.global(), &format!("[providers.work]\nmodel_context_windows={{'{SECRET}'=1000}}\n[providers.work.protocols.openai-chat]"));
     assert!(!format!("{:?}", sandbox.providers().unwrap()).contains(SECRET));
 }
