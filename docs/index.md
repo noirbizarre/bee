@@ -34,21 +34,37 @@ names the key and both files. See [ADR-006](adr/006-layered-xdg-configuration.md
 
 ### Providers and models
 
-A provider is a named connection profile, separate from the protocol it speaks and from the model:
+A provider is a named connection profile, separate from the protocols it speaks and from the model:
 
 ```toml
 provider = "work"                  # the default profile (optional when there is only one)
 
 [providers.work]                   # any name; it is a label, never looked up
-protocol = "openai-chat"           # required: "openai-chat" or "anthropic-messages"
-base_url = "https://gateway.corp.example/v1"   # optional; defaults per protocol
 model = "corp/ft-2026"             # optional default model: any id, listed anywhere or not
 models = ["corp/base"]             # optional suggestions for model selectors, not a limit
 credential = { env = "GATEWAY_KEY" }           # optional: names where the secret lives, see Authentication
 headers = { "X-Team" = "infra" }   # optional, sent only to this profile
 
-[providers.work.options]           # settings specific to the profile's protocol
-max_tokens_field = "max_completion_tokens"
+# `protocols` is required: one table per protocol the provider speaks, "openai-chat" or "anthropic-messages".
+[providers.work.protocols.openai-chat]
+base_url = "https://gateway.corp.example/v1"   # optional; defaults per protocol
+options = { max_tokens_field = "max_completion_tokens" }   # settings only this protocol understands
+```
+
+A provider can speak several protocols, each at its own URL and with its own options. Several protocols need `prefer`,
+which orders them, most preferred first; Bee does not guess among them. The first is the one requests use. Choosing a
+protocol per model is a planned, additive change.
+
+```toml
+[providers.gateway]
+prefer = ["anthropic-messages", "openai-chat"]
+
+[providers.gateway.protocols.openai-chat]
+base_url = "https://gw.example/openai/v1"
+
+[providers.gateway.protocols.anthropic-messages]
+base_url = "https://gw.example/anthropic"
+options = { max_tokens = 2048 }
 ```
 
 Several profiles can use the same protocol, so a gateway, a local server and a vendor API are just three profiles.
@@ -89,24 +105,26 @@ Bee ships ready-made profiles, so a well-known provider is one line. A profile n
 
 ```toml
 [providers.work]
-preset = "openrouter"              # protocol, base_url and credential come from the preset
+preset = "openrouter"              # protocols and credential come from the preset
 model = "anthropic/claude-sonnet-4"
 ```
 
 Shipped presets: `openrouter` (a stored credential with browser sign-in), `openai` (`OPENAI_API_KEY`), `anthropic`
 (`ANTHROPIC_API_KEY`) and `ollama` (a local server, no credential). Scalars and arrays in the profile replace the
-preset's, `headers` and `options` merge key by key, and `credential` is replaced whole. The catalogue deliberately has
+preset's, `headers` and each protocol's table under `protocols` merge key by key, `prefer` replaces, and `credential`
+is replaced whole. The catalogue deliberately has
 no model lists: name your own `model`.
 
 Define your own preset, or override a shipped one by name, in a `presets` table of any configuration file:
 
 ```toml
 [presets.corp]
-protocol = "anthropic-messages"
-base_url = "https://llm.corp.example"
 credential = { env = "CORP_KEY" }
 
-[presets.ollama]                   # overrides one key of the shipped preset
+[presets.corp.protocols.anthropic-messages]
+base_url = "https://llm.corp.example"
+
+[presets.ollama.protocols.openai-chat]   # overrides one key of the shipped preset
 base_url = "http://gpu-box:11434/v1"
 ```
 
@@ -164,7 +182,8 @@ These are different things and Bee keeps them apart:
 - **Cloudflare** (Workers AI, AI Gateway) uses a *scoped API token* from the environment or the store. Bee does not
   read or reuse Wrangler's browser-login token: it belongs to Wrangler and is not interchangeable with an API token's
   scopes. Put the account id in `base_url`, for example
-  `https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/ai/v1`, with `protocol = "openai-chat"`.
+  `https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/ai/v1` under `protocols.openai-chat`; a provider that also
+  serves the Anthropic protocol lists it beside it, with `prefer`.
 - **Inference credentials** (everything above) authenticate Bee to an *LLM provider*. **MCP server authorization**
   (OAuth 2.1 for a remote tool server) is a separate audience: the credential store keeps the two in separate tables so
   one can never be offered for the other. The MCP authorization flow itself is not implemented; MCP configuration stays

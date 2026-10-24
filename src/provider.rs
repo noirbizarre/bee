@@ -1,10 +1,12 @@
 //! Provider profiles, free of the ACPv2 SDK.
 //!
-//! A *profile* is a named connection: which protocol to speak, where, with
-//! which headers, and which model to ask for by default. The protocol is a
-//! property of the profile, never inferred from its name, and nothing here
-//! knows a commercial provider: any name and any model id is accepted. See
-//! ADR-007.
+//! A *profile* is a named connection: which protocols the endpoint speaks and
+//! where, with which headers, and which model to ask for by default. The
+//! protocols are properties of the profile, never inferred from its name, and
+//! nothing here knows a commercial provider: any name and any model id is
+//! accepted. One provider can serve several protocols, each at its own URL
+//! and with its own options; which one a request uses is `prefer`'s order. See
+//! ADR-007 and ADR-010.
 //!
 //! Profiles are read from the merged [`Config`] (ADR-006) under `provider`
 //! (the default profile) and `providers.<name>`, optionally laid over a preset
@@ -30,25 +32,26 @@ use crate::preset::{Catalog, LoginSpec, SpecError, deep_merge};
 /// The keys a profile table accepts.
 const PROFILE_KEYS: &[&str] = &[
     "preset",
-    "protocol",
-    "base_url",
+    "protocols",
+    "prefer",
     "model",
     "models",
     "credential",
     "headers",
-    "options",
 ];
+
+/// The keys a table under `protocols` accepts.
+const ENDPOINT_KEYS: &[&str] = &["base_url", "options"];
 
 /// The keys a preset table accepts: a profile's, but a preset cannot be built
 /// on another, so chains and cycles cannot exist.
 const PRESET_KEYS: &[&str] = &[
-    "protocol",
-    "base_url",
+    "protocols",
+    "prefer",
     "model",
     "models",
     "credential",
     "headers",
-    "options",
 ];
 
 /// How Bee talks to an endpoint.
@@ -186,12 +189,46 @@ impl ProtocolOptions {
     }
 }
 
+/// One protocol a profile's provider speaks, and where.
+///
+/// The unit a backend is handed: the URL and the options belong to the
+/// protocol, since a provider that serves two usually serves them from two
+/// places.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Endpoint {
+    protocol: Protocol,
+    base_url: String,
+    options: ProtocolOptions,
+}
+
+impl Endpoint {
+    /// How to talk to it.
+    #[must_use]
+    pub fn protocol(&self) -> Protocol {
+        self.protocol
+    }
+
+    /// Its base URL: the profile's own for this protocol, else the protocol's
+    /// default. Never ends with a slash.
+    #[must_use]
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    /// The settings only this protocol understands.
+    #[must_use]
+    pub fn options(&self) -> &ProtocolOptions {
+        &self.options
+    }
+}
+
 /// One named connection profile.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Profile {
     name: String,
-    protocol: Protocol,
-    base_url: String,
+    // In preference order, never empty. The order is data, not an accident of
+    // how the file was written: see `prefer`.
+    endpoints: Vec<Endpoint>,
     model: Option<String>,
     models: Vec<String>,
     credential: Option<CredentialSource>,
@@ -199,7 +236,6 @@ pub struct Profile {
     // so a dangling or malformed flow stops Bee at launch.
     login: Option<Arc<LoginSpec>>,
     headers: Vec<(String, String)>,
-    options: ProtocolOptions,
 }
 
 // Written by hand: header values are routinely secrets (`Authorization`), and
@@ -209,8 +245,7 @@ impl fmt::Debug for Profile {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Profile")
             .field("name", &self.name)
-            .field("protocol", &self.protocol)
-            .field("base_url", &self.base_url)
+            .field("endpoints", &self.endpoints)
             .field("model", &self.model)
             .field("models", &self.models)
             .field(
@@ -225,7 +260,6 @@ impl fmt::Debug for Profile {
                     .map(|(name, _)| name)
                     .collect::<Vec<_>>(),
             )
-            .field("options", &self.options)
             .finish()
     }
 }
@@ -237,17 +271,40 @@ impl Profile {
         &self.name
     }
 
-    /// How to talk to the endpoint.
+    /// Every protocol the provider speaks, most preferred first.
     #[must_use]
-    pub fn protocol(&self) -> Protocol {
-        self.protocol
+    pub fn endpoints(&self) -> &[Endpoint] {
+        &self.endpoints
     }
 
-    /// The endpoint's base URL: the profile's own, else the protocol's default.
-    /// Never ends with a slash.
+    /// The endpoint for `protocol`, if the profile lists it.
+    #[must_use]
+    pub fn endpoint(&self, protocol: Protocol) -> Option<&Endpoint> {
+        self.endpoints
+            .iter()
+            .find(|endpoint| endpoint.protocol == protocol)
+    }
+
+    /// The endpoint requests use today: the first of [`Profile::endpoints`].
+    ///
+    /// Choosing by model is a later, additive change; until then the
+    /// preference is the whole rule.
+    #[must_use]
+    pub fn preferred(&self) -> &Endpoint {
+        // Validation guarantees at least one endpoint.
+        &self.endpoints[0]
+    }
+
+    /// The preferred endpoint's protocol.
+    #[must_use]
+    pub fn protocol(&self) -> Protocol {
+        self.preferred().protocol
+    }
+
+    /// The preferred endpoint's base URL.
     #[must_use]
     pub fn base_url(&self) -> &str {
-        &self.base_url
+        &self.preferred().base_url
     }
 
     /// The configured default model id, if any.
@@ -302,10 +359,10 @@ impl Profile {
         &self.headers
     }
 
-    /// The protocol-specific settings.
+    /// The preferred endpoint's protocol-specific settings.
     #[must_use]
     pub fn options(&self) -> &ProtocolOptions {
-        &self.options
+        &self.preferred().options
     }
 }
 
@@ -545,33 +602,7 @@ impl Reader<'_> {
     /// under the profile's own keys.
     fn profile_from(&self, name: &str, key: &str, table: &Table) -> Result<Profile> {
         let key = key.to_owned();
-        let protocol_key = format!("{key}.protocol");
-        let protocol = match table.get("protocol") {
-            None => {
-                return Err(Error::ProviderMissingKey {
-                    profile: name.to_owned(),
-                    key: "protocol",
-                    path: self.path(&key),
-                });
-            }
-            Some(value) => {
-                let text = self.string(&protocol_key, value)?;
-                Protocol::from_name(text).ok_or_else(|| Error::ProviderUnknownProtocol {
-                    path: self.path(&protocol_key),
-                    key: protocol_key.clone(),
-                    supported: Protocol::supported(),
-                })?
-            }
-        };
-
-        let base_url = match table.get("base_url") {
-            None => protocol.default_base_url().to_owned(),
-            Some(value) => {
-                let key = format!("{key}.base_url");
-                normalize_base_url(self.string(&key, value)?)
-                    .map_err(|reason| self.invalid(&key, reason))?
-            }
-        };
+        let endpoints = self.endpoints(name, &key, table)?;
 
         let model = table
             .get("model")
@@ -615,22 +646,143 @@ impl Reader<'_> {
             Some(value) => self.headers(&format!("{key}.headers"), value)?,
         };
 
-        let options = match table.get("options") {
-            None => ProtocolOptions::defaults(protocol),
-            Some(value) => self.options(&format!("{key}.options"), protocol, value)?,
-        };
-
         Ok(Profile {
             name: name.to_owned(),
-            protocol,
-            base_url,
+            endpoints,
             model,
             models,
             credential,
             login,
             headers,
-            options,
         })
+    }
+
+    /// Read `protocols` and `prefer` into endpoints, most preferred first.
+    fn endpoints(&self, name: &str, key: &str, table: &Table) -> Result<Vec<Endpoint>> {
+        let protocols_key = format!("{key}.protocols");
+        let protocols = match table.get("protocols") {
+            None => {
+                return Err(Error::ProviderMissingKey {
+                    profile: name.to_owned(),
+                    key: "protocols",
+                    path: self.path(key),
+                });
+            }
+            Some(value) => self.table(&protocols_key, value)?,
+        };
+        if protocols.is_empty() {
+            return Err(self.invalid(
+                &protocols_key,
+                "name at least one protocol under `protocols`",
+            ));
+        }
+
+        // Keyed by protocol so layers and presets merge per protocol. A name
+        // that is not one is refused *without* being echoed, as a value would
+        // be: the table is named instead.
+        let mut endpoints: Vec<Endpoint> = Vec::with_capacity(protocols.len());
+        for (protocol_name, value) in protocols {
+            let protocol = Protocol::from_name(protocol_name).ok_or_else(|| {
+                Error::ProviderUnknownProtocol {
+                    path: self.path(&protocols_key),
+                    key: protocols_key.clone(),
+                    supported: Protocol::supported(),
+                }
+            })?;
+            let endpoint_key = format!("{protocols_key}.{protocol_name}");
+            let endpoint = self.table(&endpoint_key, value)?;
+            self.only_keys(&endpoint_key, endpoint, ENDPOINT_KEYS)?;
+
+            let base_url = match endpoint.get("base_url") {
+                None => protocol.default_base_url().to_owned(),
+                Some(value) => {
+                    let url_key = format!("{endpoint_key}.base_url");
+                    normalize_base_url(self.string(&url_key, value)?)
+                        .map_err(|reason| self.invalid(&url_key, reason))?
+                }
+            };
+            let options = match endpoint.get("options") {
+                None => ProtocolOptions::defaults(protocol),
+                Some(value) => self.options(&format!("{endpoint_key}.options"), protocol, value)?,
+            };
+            endpoints.push(Endpoint {
+                protocol,
+                base_url,
+                options,
+            });
+        }
+
+        // The preference. The table has no order of its own (it is sorted, and
+        // layers merge into it), so the order is stated: guessing among several
+        // would make the choice depend on how the names happen to sort.
+        let prefer = match table.get("prefer") {
+            None => None,
+            Some(Value::Array(items)) => {
+                let prefer_key = format!("{key}.prefer");
+                let mut order: Vec<Protocol> = Vec::with_capacity(items.len());
+                for (index, item) in items.iter().enumerate() {
+                    let item_key = format!("{prefer_key}[{index}]");
+                    // The index is not a configuration key, so the file is
+                    // looked up under the array itself.
+                    let at = |reason: &'static str| Error::ProviderInvalid {
+                        key: item_key.clone(),
+                        path: self.path(&prefer_key),
+                        reason,
+                    };
+                    let text = self.string(&item_key, item)?;
+                    let protocol = Protocol::from_name(text).ok_or_else(|| {
+                        Error::ProviderUnknownProtocol {
+                            path: self.path(&prefer_key),
+                            key: item_key.clone(),
+                            supported: Protocol::supported(),
+                        }
+                    })?;
+                    if !endpoints.iter().any(|e| e.protocol == protocol) {
+                        return Err(at(
+                            "`prefer` names a protocol that is not under `protocols`",
+                        ));
+                    }
+                    if order.contains(&protocol) {
+                        return Err(at("`prefer` names this protocol twice"));
+                    }
+                    order.push(protocol);
+                }
+                Some(order)
+            }
+            Some(other) => {
+                return Err(self.wrong_type(&format!("{key}.prefer"), "an array", other));
+            }
+        };
+        match prefer {
+            None if endpoints.len() > 1 => Err(Error::ProviderNoPreference {
+                profile: name.to_owned(),
+                available: endpoints
+                    .iter()
+                    .map(|e| e.protocol.name())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            }),
+            None => Ok(endpoints),
+            Some(order) => {
+                // Named protocols first, in the order given; any the list left
+                // out follow in the fixed order of `Protocol::ALL`, so the
+                // result never depends on the file.
+                let rank = |protocol: Protocol| {
+                    order
+                        .iter()
+                        .position(|p| *p == protocol)
+                        .unwrap_or_else(|| {
+                            order.len()
+                                + Protocol::ALL
+                                    .iter()
+                                    .position(|p| *p == protocol)
+                                    .unwrap_or(0)
+                        })
+                };
+                endpoints.sort_by_key(|endpoint| rank(endpoint.protocol));
+                Ok(endpoints)
+            }
+        }
     }
 
     fn credential(

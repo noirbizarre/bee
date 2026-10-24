@@ -132,7 +132,7 @@ pub enum Error {
     #[diagnostic(
         code(bee::provider::unknown_protocol),
         help(
-            "`protocol` selects how Bee talks to the endpoint, not who runs it; use one of: {supported}"
+            "each name under `protocols` selects how Bee talks to the endpoint, not who runs it; use one of: {supported}"
         )
     )]
     ProviderUnknownProtocol {
@@ -142,6 +142,22 @@ pub enum Error {
         path: String,
         /// The protocols Bee supports, comma separated.
         supported: String,
+    },
+
+    /// A profile serves several protocols and does not say which to prefer.
+    #[error("provider profile `{profile}` lists several protocols ({available}) but no `prefer`")]
+    #[diagnostic(
+        code(bee::provider::no_preference),
+        help(
+            "set `prefer = [\"<protocol>\", ...]` in `[providers.{profile}]`, most preferred first; \
+             Bee does not guess among the protocols"
+        )
+    )]
+    ProviderNoPreference {
+        /// The profile name.
+        profile: String,
+        /// The protocols it lists, comma separated.
+        available: String,
     },
 
     /// A provider table holds a key Bee does not know.

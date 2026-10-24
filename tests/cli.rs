@@ -92,7 +92,7 @@ fn valid_layered_configuration_does_not_disturb_stdout() {
     std::fs::create_dir_all(global.parent().unwrap()).unwrap();
     std::fs::write(
         &global,
-        "[providers.gw]\nprotocol = \"openai-chat\"\nmodel = \"x\"\n",
+        "[providers.gw]\nprotocols = { openai-chat = {} }\nmodel = \"x\"\n",
     )
     .unwrap();
     let project = dir.path().join(".config/bee.toml");
@@ -114,7 +114,7 @@ fn an_invalid_provider_profile_fails_startup_without_echoing_secrets() {
     std::fs::create_dir_all(project.parent().unwrap()).unwrap();
     std::fs::write(
         &project,
-        format!("[providers.p]\nprotocol = \"openai-chat\"\nbase_url = \"https://u:{SECRET}@x.example\"\n"),
+        format!("[providers.p]\nprotocols = {{ openai-chat = {{ base_url = \"https://u:{SECRET}@x.example\" }} }}\n"),
     )
     .unwrap();
 
@@ -125,7 +125,9 @@ fn an_invalid_provider_profile_fails_startup_without_echoing_secrets() {
         // Stdout is protocol-only, so a failed launch must leave it empty.
         .stdout(predicate::str::is_empty())
         .stderr(predicate::str::contains("bee::provider::invalid"))
-        .stderr(predicate::str::contains("providers.p.base_url"))
+        .stderr(predicate::str::contains(
+            "providers.p.protocols.openai-chat.base_url",
+        ))
         .stderr(predicate::str::contains(SECRET).not());
 }
 
@@ -135,20 +137,19 @@ const AUTH_CONFIG: &str = r#"
 provider = "stored"
 
 [providers.stored]
-protocol = "openai-chat"
+protocols = { openai-chat = {} }
 credential = { store = true }
 
 [providers.browser]
-protocol = "openai-chat"
+protocols = { openai-chat = {} }
 credential = { store = true, login = "openrouter" }
 
 [providers.env]
-protocol = "anthropic-messages"
+protocols = { anthropic-messages = {} }
 credential = { env = "BEE_TEST_KEY" }
 
 [providers.local]
-protocol = "openai-chat"
-base_url = "http://localhost:11434/v1"
+protocols = { openai-chat = { base_url = "http://localhost:11434/v1" } }
 "#;
 
 /// A project directory configured with [`AUTH_CONFIG`].

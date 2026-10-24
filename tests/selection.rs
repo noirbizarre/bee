@@ -22,14 +22,12 @@ const TWO_PROFILES: &str = r#"
 provider = "work"
 
 [providers.work]
-protocol = "openai-chat"
-base_url = "https://gateway.corp.example/v1"
+protocols = { openai-chat = { base_url = "https://gateway.corp.example/v1" } }
 model = "corp/ft-2026"
 models = ["corp/base"]
 
 [providers.local]
-protocol = "openai-chat"
-base_url = "http://localhost:11434/v1"
+protocols = { openai-chat = { base_url = "http://localhost:11434/v1" } }
 model = "llama3:8b"
 "#;
 

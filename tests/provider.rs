@@ -77,13 +77,11 @@ fn several_profiles_can_share_one_protocol_with_their_own_endpoints() {
 provider = "work"
 
 [providers.work]
-protocol = "openai-chat"
-base_url = "https://gateway.corp.example/v1/"
+protocols = { openai-chat = { base_url = "https://gateway.corp.example/v1/" } }
 model = "corp/ft-2026"
 
 [providers.local]
-protocol = "openai-chat"
-base_url = "http://localhost:11434/v1"
+protocols = { openai-chat = { base_url = "http://localhost:11434/v1" } }
 model = "llama3:8b"
 "#,
     )
@@ -102,7 +100,7 @@ model = "llama3:8b"
 fn a_profile_name_says_nothing_about_its_protocol() {
     // Named like a commercial provider, and not speaking its protocol.
     let providers = load(
-        "[providers.anthropic]\nprotocol = \"openai-chat\"\nbase_url = \"http://proxy.local\"",
+        "[providers.anthropic]\nprotocols = { openai-chat = { base_url = \"http://proxy.local\" } }",
     )
     .unwrap();
 
@@ -119,9 +117,9 @@ fn the_base_url_defaults_to_the_protocols_and_is_overridable(
     #[case] protocol: &str,
     #[case] default_url: &str,
 ) {
-    let defaulted = load(&format!("[providers.p]\nprotocol = \"{protocol}\"")).unwrap();
+    let defaulted = load(&format!("[providers.p.protocols.{protocol}]")).unwrap();
     let overridden = load(&format!(
-        "[providers.p]\nprotocol = \"{protocol}\"\nbase_url = \"https://other.example\""
+        "[providers.p.protocols.{protocol}]\nbase_url = \"https://other.example\""
     ))
     .unwrap();
 
@@ -139,12 +137,113 @@ fn the_base_url_defaults_to_the_protocols_and_is_overridable(
 #[case("model that is not in any catalog")]
 fn any_model_id_is_accepted_without_a_catalog_or_an_allowlist(#[case] model: &str) {
     let providers = load(&format!(
-        "[providers.p]\nprotocol = \"openai-chat\"\nmodel = \"{model}\"\nmodels = [\"{model}\"]"
+        "[providers.p]\nprotocols = {{ openai-chat = {{}} }}\nmodel = \"{model}\"\nmodels = [\"{model}\"]"
     ))
     .unwrap();
 
     assert_eq!(providers.get("p").unwrap().model(), Some(model));
     assert_eq!(providers.get("p").unwrap().models(), [model]);
+}
+
+/// A profile that speaks both protocols, each at its own URL.
+const BOTH: &str = r#"
+[providers.p]
+prefer = ["anthropic-messages", "openai-chat"]
+
+[providers.p.protocols.openai-chat]
+base_url = "https://gw.example/openai/v1"
+options = { max_tokens_field = "max_completion_tokens" }
+
+[providers.p.protocols.anthropic-messages]
+base_url = "https://gw.example/anthropic"
+options = { max_tokens = 2048 }
+"#;
+
+#[test]
+fn a_provider_can_speak_several_protocols_each_with_its_own_url_and_options() {
+    let providers = load(BOTH).unwrap();
+    let profile = providers.get("p").unwrap();
+
+    let openai = profile.endpoint(Protocol::OpenAiChat).unwrap();
+    let anthropic = profile.endpoint(Protocol::AnthropicMessages).unwrap();
+    assert_eq!(openai.base_url(), "https://gw.example/openai/v1");
+    assert_eq!(anthropic.base_url(), "https://gw.example/anthropic");
+    assert_eq!(
+        *openai.options(),
+        ProtocolOptions::OpenAiChat {
+            max_tokens_field: MaxTokensField::MaxCompletionTokens
+        }
+    );
+    assert_eq!(
+        *anthropic.options(),
+        ProtocolOptions::AnthropicMessages {
+            version: None,
+            max_tokens: Some(2048)
+        }
+    );
+}
+
+#[test]
+fn the_endpoints_come_in_the_order_of_prefer_and_the_first_is_the_one_requests_use() {
+    let providers = load(BOTH).unwrap();
+    let profile = providers.get("p").unwrap();
+
+    let order: Vec<_> = profile.endpoints().iter().map(|e| e.protocol()).collect();
+    assert_eq!(order, [Protocol::AnthropicMessages, Protocol::OpenAiChat]);
+    assert_eq!(profile.protocol(), Protocol::AnthropicMessages);
+    assert_eq!(profile.base_url(), "https://gw.example/anthropic");
+}
+
+#[test]
+fn swapping_prefer_swaps_the_preferred_endpoint_whatever_the_names_sort_like() {
+    let swapped = BOTH.replace(
+        "prefer = [\"anthropic-messages\", \"openai-chat\"]",
+        "prefer = [\"openai-chat\", \"anthropic-messages\"]",
+    );
+
+    let providers = load(&swapped).unwrap();
+
+    assert_eq!(providers.get("p").unwrap().protocol(), Protocol::OpenAiChat);
+}
+
+#[test]
+fn protocols_that_prefer_leaves_out_follow_in_a_fixed_order() {
+    let providers = load(
+        "[providers.p]\nprefer = [\"anthropic-messages\"]\n\
+         [providers.p.protocols.openai-chat]\n[providers.p.protocols.anthropic-messages]",
+    )
+    .unwrap();
+
+    let order: Vec<_> = providers
+        .get("p")
+        .unwrap()
+        .endpoints()
+        .iter()
+        .map(|e| e.protocol())
+        .collect();
+    assert_eq!(order, [Protocol::AnthropicMessages, Protocol::OpenAiChat]);
+}
+
+#[test]
+fn one_protocol_needs_no_preference_and_prefer_may_still_name_it() {
+    assert!(load("[providers.p.protocols.openai-chat]").is_ok());
+    assert!(
+        load("[providers.p]\nprefer = [\"openai-chat\"]\n[providers.p.protocols.openai-chat]")
+            .is_ok()
+    );
+}
+
+#[test]
+fn an_endpoint_the_profile_does_not_list_is_none() {
+    let providers = load("[providers.p.protocols.openai-chat]").unwrap();
+
+    assert!(
+        providers
+            .get("p")
+            .unwrap()
+            .endpoint(Protocol::AnthropicMessages)
+            .is_none()
+    );
 }
 
 #[test]
@@ -154,14 +253,11 @@ fn headers_and_options_belong_only_to_their_own_profile() {
 provider = "a"
 
 [providers.a]
-protocol = "openai-chat"
 headers = { "X-Team" = "infra" }
-[providers.a.options]
+[providers.a.protocols.openai-chat.options]
 max_tokens_field = "max_completion_tokens"
 
-[providers.b]
-protocol = "anthropic-messages"
-[providers.b.options]
+[providers.b.protocols.anthropic-messages.options]
 version = "2023-06-01"
 max_tokens = 4096
 "#,
@@ -189,9 +285,10 @@ max_tokens = 4096
 
 #[test]
 fn a_credential_is_a_named_environment_variable() {
-    let providers =
-        load("[providers.p]\nprotocol = \"openai-chat\"\ncredential = { env = \"GATEWAY_KEY\" }")
-            .unwrap();
+    let providers = load(
+        "[providers.p]\nprotocols = { openai-chat = {} }\ncredential = { env = \"GATEWAY_KEY\" }",
+    )
+    .unwrap();
 
     assert_eq!(
         providers.get("p").unwrap().credential(),
@@ -204,7 +301,7 @@ fn a_credential_is_a_named_environment_variable() {
 #[case::browser_sign_in("{ store = true, login = \"openrouter\" }", Some("openrouter"))]
 fn a_credential_can_live_in_the_store(#[case] credential: &str, #[case] login: Option<&str>) {
     let providers = load(&format!(
-        "[providers.p]\nprotocol = \"openai-chat\"\ncredential = {credential}"
+        "[providers.p]\nprotocols = {{ openai-chat = {{}} }}\ncredential = {credential}"
     ))
     .unwrap();
 
@@ -218,9 +315,10 @@ fn a_credential_can_live_in_the_store(#[case] credential: &str, #[case] login: O
 
 #[test]
 fn the_debug_output_names_the_kind_of_credential_and_nothing_else() {
-    let providers =
-        load("[providers.p]\nprotocol = \"openai-chat\"\ncredential = { env = \"GATEWAY_KEY\" }")
-            .unwrap();
+    let providers = load(
+        "[providers.p]\nprotocols = { openai-chat = {} }\ncredential = { env = \"GATEWAY_KEY\" }",
+    )
+    .unwrap();
 
     let debug = format!("{providers:?}");
 
@@ -230,7 +328,7 @@ fn the_debug_output_names_the_kind_of_credential_and_nothing_else() {
 
 #[test]
 fn a_single_profile_is_the_default_without_naming_it() {
-    let providers = load("[providers.only]\nprotocol = \"openai-chat\"").unwrap();
+    let providers = load("[providers.only]\nprotocols = { openai-chat = {} }").unwrap();
 
     assert_eq!(providers.default_name(), Some("only"));
 }
@@ -243,8 +341,7 @@ fn the_project_file_overrides_the_global_one_key_by_key() {
         r#"
 provider = "gw"
 [providers.gw]
-protocol = "openai-chat"
-base_url = "https://global.example/v1"
+protocols = { openai-chat = { base_url = "https://global.example/v1" } }
 model = "global-model"
 models = ["g1", "g2"]
 headers = { "X-Org" = "global", "X-Keep" = "yes" }
@@ -283,11 +380,11 @@ fn a_project_can_add_a_profile_and_choose_it_as_the_default() {
     let sandbox = Sandbox::new();
     sandbox.write(
         &sandbox.global(),
-        "provider = \"a\"\n[providers.a]\nprotocol = \"openai-chat\"",
+        "provider = \"a\"\n[providers.a]\nprotocols = { openai-chat = {} }",
     );
     sandbox.write(
         &sandbox.project(),
-        "provider = \"b\"\n[providers.b]\nprotocol = \"anthropic-messages\"",
+        "provider = \"b\"\n[providers.b]\nprotocols = { anthropic-messages = {} }",
     );
 
     let providers = sandbox.providers().unwrap();
@@ -299,131 +396,180 @@ fn a_project_can_add_a_profile_and_choose_it_as_the_default() {
 /// The diagnostic code an invalid configuration must produce.
 #[rstest]
 #[case::unknown_protocol(
-    "[providers.p]\nprotocol = \"grpc\"",
+    "[providers.p]\nprotocols = { grpc = {} }",
     "bee::provider::unknown_protocol"
 )]
-#[case::protocol_by_name_only(
-    "[providers.openai]\nbase_url = \"https://x.example\"",
+#[case::protocols_by_name_only(
+    "[providers.openai]\nmodel = \"gpt-4o\"",
     "bee::provider::missing_key"
 )]
-#[case::protocol_wrong_type("[providers.p]\nprotocol = 3", "bee::provider::wrong_type")]
+#[case::protocols_wrong_type("[providers.p]\nprotocols = 3", "bee::provider::wrong_type")]
+#[case::protocols_as_a_list_of_names(
+    "[providers.p]\nprotocols = [\"openai-chat\"]",
+    "bee::provider::wrong_type"
+)]
+#[case::no_protocol_listed("[providers.p]\nprotocols = {}", "bee::provider::invalid")]
+#[case::protocol_entry_not_a_table(
+    "[providers.p]\nprotocols = { openai-chat = \"https://x.example\" }",
+    "bee::provider::wrong_type"
+)]
+#[case::the_singular_protocol_key(
+    "[providers.p]\nprotocol = \"openai-chat\"",
+    "bee::provider::unknown_key"
+)]
+#[case::base_url_beside_protocols(
+    "[providers.p]\nprotocols = { openai-chat = {} }\nbase_url = \"https://x.example\"",
+    "bee::provider::unknown_key"
+)]
+#[case::options_beside_protocols(
+    "[providers.p]\nprotocols = { openai-chat = {} }\noptions = {}",
+    "bee::provider::unknown_key"
+)]
+#[case::several_protocols_without_a_preference(
+    "[providers.p]\nprotocols = { openai-chat = {}, anthropic-messages = {} }",
+    "bee::provider::no_preference"
+)]
+#[case::prefer_names_an_unknown_protocol(
+    "[providers.p]\nprotocols = { openai-chat = {} }\nprefer = [\"grpc\"]",
+    "bee::provider::unknown_protocol"
+)]
+#[case::prefer_names_a_protocol_the_profile_lacks(
+    "[providers.p]\nprotocols = { openai-chat = {} }\nprefer = [\"anthropic-messages\"]",
+    "bee::provider::invalid"
+)]
+#[case::prefer_repeats_a_protocol(
+    "[providers.p]\nprotocols = { openai-chat = {} }\nprefer = [\"openai-chat\", \"openai-chat\"]",
+    "bee::provider::invalid"
+)]
+#[case::prefer_not_an_array(
+    "[providers.p]\nprotocols = { openai-chat = {} }\nprefer = \"openai-chat\"",
+    "bee::provider::wrong_type"
+)]
+#[case::an_endpoint_with_an_unknown_key(
+    "[providers.p]\nprotocols = { openai-chat = { version = \"1\" } }",
+    "bee::provider::unknown_key"
+)]
+#[case::an_option_of_another_protocols_endpoint(
+    "[providers.p]\nprotocols = { openai-chat = { options = { max_tokens = 5 } } }",
+    "bee::provider::unknown_key"
+)]
 #[case::providers_not_a_table("providers = \"x\"", "bee::provider::wrong_type")]
 #[case::profile_not_a_table("[providers]\np = \"x\"", "bee::provider::wrong_type")]
 #[case::misspelled_key(
-    "[providers.p]\nprotocol = \"openai-chat\"\nbase_ulr = \"https://x.example\"",
+    "[providers.p]\nprotocols = { openai-chat = {} }\nbase_ulr = \"https://x.example\"",
     "bee::provider::unknown_key"
 )]
 #[case::bad_scheme(
-    "[providers.p]\nprotocol = \"openai-chat\"\nbase_url = \"ftp://x.example\"",
+    "[providers.p]\nprotocols = { openai-chat = { base_url = \"ftp://x.example\" } }",
     "bee::provider::invalid"
 )]
 #[case::url_without_host(
-    "[providers.p]\nprotocol = \"openai-chat\"\nbase_url = \"https://\"",
+    "[providers.p]\nprotocols = { openai-chat = { base_url = \"https://\" } }",
     "bee::provider::invalid"
 )]
 #[case::url_with_userinfo(
-    "[providers.p]\nprotocol = \"openai-chat\"\nbase_url = \"https://user:pw@x.example\"",
+    "[providers.p]\nprotocols = { openai-chat = { base_url = \"https://user:pw@x.example\" } }",
     "bee::provider::invalid"
 )]
 #[case::url_with_query(
-    "[providers.p]\nprotocol = \"openai-chat\"\nbase_url = \"https://x.example/?k=v\"",
+    "[providers.p]\nprotocols = { openai-chat = { base_url = \"https://x.example/?k=v\" } }",
     "bee::provider::invalid"
 )]
 #[case::empty_model(
-    "[providers.p]\nprotocol = \"openai-chat\"\nmodel = \"\"",
+    "[providers.p]\nprotocols = { openai-chat = {} }\nmodel = \"\"",
     "bee::provider::invalid"
 )]
 #[case::model_wrong_type(
-    "[providers.p]\nprotocol = \"openai-chat\"\nmodel = 4",
+    "[providers.p]\nprotocols = { openai-chat = {} }\nmodel = 4",
     "bee::provider::wrong_type"
 )]
 #[case::models_not_an_array(
-    "[providers.p]\nprotocol = \"openai-chat\"\nmodels = \"a\"",
+    "[providers.p]\nprotocols = { openai-chat = {} }\nmodels = \"a\"",
     "bee::provider::wrong_type"
 )]
 #[case::blank_model_in_list(
-    "[providers.p]\nprotocol = \"openai-chat\"\nmodels = [\"ok\", \" \"]",
+    "[providers.p]\nprotocols = { openai-chat = {} }\nmodels = [\"ok\", \" \"]",
     "bee::provider::invalid"
 )]
 #[case::header_name_with_space(
-    "[providers.p]\nprotocol = \"openai-chat\"\nheaders = { \"Bad Name\" = \"v\" }",
+    "[providers.p]\nprotocols = { openai-chat = {} }\nheaders = { \"Bad Name\" = \"v\" }",
     "bee::provider::invalid"
 )]
 #[case::header_value_with_newline(
-    "[providers.p]\nprotocol = \"openai-chat\"\nheaders = { \"X-A\" = \"v\\r\\nX-B: w\" }",
+    "[providers.p]\nprotocols = { openai-chat = {} }\nheaders = { \"X-A\" = \"v\\r\\nX-B: w\" }",
     "bee::provider::invalid"
 )]
 #[case::header_value_not_a_string(
-    "[providers.p]\nprotocol = \"openai-chat\"\nheaders = { \"X-A\" = 1 }",
+    "[providers.p]\nprotocols = { openai-chat = {} }\nheaders = { \"X-A\" = 1 }",
     "bee::provider::wrong_type"
 )]
 #[case::headers_differing_by_case(
-    "[providers.p]\nprotocol = \"openai-chat\"\nheaders = { \"X-A\" = \"1\", \"x-a\" = \"2\" }",
+    "[providers.p]\nprotocols = { openai-chat = {} }\nheaders = { \"X-A\" = \"1\", \"x-a\" = \"2\" }",
     "bee::provider::invalid"
 )]
 #[case::credential_without_a_source(
-    "[providers.p]\nprotocol = \"openai-chat\"\ncredential = {}",
+    "[providers.p]\nprotocols = { openai-chat = {} }\ncredential = {}",
     "bee::provider::invalid"
 )]
 #[case::credential_with_an_unknown_source(
-    "[providers.p]\nprotocol = \"openai-chat\"\ncredential = { file = \"/x\" }",
+    "[providers.p]\nprotocols = { openai-chat = {} }\ncredential = { file = \"/x\" }",
     "bee::provider::unknown_key"
 )]
 #[case::credential_that_is_a_literal_key(
-    "[providers.p]\nprotocol = \"openai-chat\"\ncredential = { env = \"sk-abc-123\" }",
+    "[providers.p]\nprotocols = { openai-chat = {} }\ncredential = { env = \"sk-abc-123\" }",
     "bee::provider::invalid"
 )]
 #[case::credential_with_two_sources(
-    "[providers.p]\nprotocol = \"openai-chat\"\ncredential = { env = \"K\", store = true }",
+    "[providers.p]\nprotocols = { openai-chat = {} }\ncredential = { env = \"K\", store = true }",
     "bee::provider::invalid"
 )]
 #[case::credential_store_disabled(
-    "[providers.p]\nprotocol = \"openai-chat\"\ncredential = { store = false }",
+    "[providers.p]\nprotocols = { openai-chat = {} }\ncredential = { store = false }",
     "bee::provider::invalid"
 )]
 #[case::credential_store_of_the_wrong_type(
-    "[providers.p]\nprotocol = \"openai-chat\"\ncredential = { store = \"yes\" }",
+    "[providers.p]\nprotocols = { openai-chat = {} }\ncredential = { store = \"yes\" }",
     "bee::provider::wrong_type"
 )]
 #[case::login_without_the_store(
-    "[providers.p]\nprotocol = \"openai-chat\"\ncredential = { env = \"K\", login = \"openrouter\" }",
+    "[providers.p]\nprotocols = { openai-chat = {} }\ncredential = { env = \"K\", login = \"openrouter\" }",
     "bee::provider::invalid"
 )]
 #[case::login_alone(
-    "[providers.p]\nprotocol = \"openai-chat\"\ncredential = { login = \"openrouter\" }",
+    "[providers.p]\nprotocols = { openai-chat = {} }\ncredential = { login = \"openrouter\" }",
     "bee::provider::invalid"
 )]
 #[case::login_that_is_unknown(
-    "[providers.p]\nprotocol = \"openai-chat\"\ncredential = { store = true, login = \"cloudflare\" }",
+    "[providers.p]\nprotocols = { openai-chat = {} }\ncredential = { store = true, login = \"cloudflare\" }",
     "bee::provider::unknown_login"
 )]
 #[case::option_of_the_other_protocol(
-    "[providers.p]\nprotocol = \"openai-chat\"\n[providers.p.options]\nmax_tokens = 5",
+    "[providers.p]\nprotocols = { openai-chat = {} }\n[providers.p.options]\nmax_tokens = 5",
     "bee::provider::unknown_key"
 )]
 #[case::bad_option_value(
-    "[providers.p]\nprotocol = \"openai-chat\"\n[providers.p.options]\nmax_tokens_field = \"x\"",
+    "[providers.p.protocols.openai-chat.options]\nmax_tokens_field = \"x\"",
     "bee::provider::invalid"
 )]
 #[case::option_wrong_type(
-    "[providers.p]\nprotocol = \"anthropic-messages\"\n[providers.p.options]\nmax_tokens = \"5\"",
+    "[providers.p.protocols.anthropic-messages.options]\nmax_tokens = \"5\"",
     "bee::provider::wrong_type"
 )]
 #[case::option_out_of_range(
-    "[providers.p]\nprotocol = \"anthropic-messages\"\n[providers.p.options]\nmax_tokens = 0",
+    "[providers.p.protocols.anthropic-messages.options]\nmax_tokens = 0",
     "bee::provider::invalid"
 )]
 #[case::default_that_is_not_defined(
-    "provider = \"ghost\"\n[providers.p]\nprotocol = \"openai-chat\"",
+    "provider = \"ghost\"\n[providers.p]\nprotocols = { openai-chat = {} }",
     "bee::provider::unknown_default"
 )]
 #[case::default_without_any_profile("provider = \"ghost\"", "bee::provider::unknown_default")]
 #[case::default_wrong_type(
-    "provider = 1\n[providers.p]\nprotocol = \"openai-chat\"",
+    "provider = 1\n[providers.p]\nprotocols = { openai-chat = {} }",
     "bee::provider::wrong_type"
 )]
 #[case::several_profiles_and_no_default(
-    "[providers.a]\nprotocol = \"openai-chat\"\n[providers.b]\nprotocol = \"openai-chat\"",
+    "[providers.a]\nprotocols = { openai-chat = {} }\n[providers.b]\nprotocols = { openai-chat = {} }",
     "bee::provider::no_default"
 )]
 fn an_invalid_configuration_is_refused_with_its_own_code(#[case] text: &str, #[case] code: &str) {
@@ -438,34 +584,38 @@ fn an_invalid_value_names_its_key_and_file_so_it_can_be_found() {
     let sandbox = Sandbox::new();
     sandbox.write(
         &sandbox.project(),
-        "[providers.work]\nprotocol = \"openai-chat\"\nbase_url = \"nope\"",
+        "[providers.work]\nprotocols = { openai-chat = { base_url = \"nope\" } }",
     );
 
     let text = rendered(sandbox.providers().unwrap_err());
 
-    assert!(text.contains("providers.work.base_url"), "{text}");
+    assert!(
+        text.contains("providers.work.protocols.openai-chat.base_url"),
+        "{text}"
+    );
     assert!(text.contains("bee.toml"), "{text}");
 }
 
 #[test]
 fn an_unknown_protocol_lists_the_supported_ones() {
-    let text = rendered(load("[providers.p]\nprotocol = \"grpc\"").unwrap_err());
+    let text = rendered(load("[providers.p]\nprotocols = { grpc = {} }").unwrap_err());
 
     assert!(text.contains("openai-chat"), "{text}");
     assert!(text.contains("anthropic-messages"), "{text}");
 }
 
 #[rstest]
-#[case::protocol(format!("[providers.p]\nprotocol = \"{SECRET}\""))]
-#[case::base_url(format!("[providers.p]\nprotocol = \"openai-chat\"\nbase_url = \"https://u:{SECRET}@x.example\""))]
-#[case::credential(format!("[providers.p]\nprotocol = \"openai-chat\"\ncredential = {{ env = \"{SECRET}\" }}"))]
-#[case::login(format!("[providers.p]\nprotocol = \"openai-chat\"\ncredential = {{ store = true, login = \"{SECRET}\" }}"))]
-#[case::store(format!("[providers.p]\nprotocol = \"openai-chat\"\ncredential = {{ store = \"{SECRET}\" }}"))]
-#[case::header(format!("[providers.p]\nprotocol = \"openai-chat\"\nheaders = {{ \"Bad Name\" = \"{SECRET}\" }}"))]
-#[case::header_value(format!("[providers.p]\nprotocol = \"openai-chat\"\nheaders = {{ \"X-A\" = \"{SECRET}\\n\" }}"))]
-#[case::wrong_type_key(format!("[providers.p]\nprotocol = \"openai-chat\"\nmodel = [\"{SECRET}\"]"))]
-#[case::unknown_key_value(format!("[providers.p]\nprotocol = \"openai-chat\"\napi_key = \"{SECRET}\""))]
-#[case::default(format!("provider = \"{SECRET}\"\n[providers.p]\nprotocol = \"openai-chat\""))]
+#[case::protocol_name(format!("[providers.p]\nprotocols = {{ \"{SECRET}\" = {{}} }}"))]
+#[case::prefer(format!("[providers.p]\nprotocols = {{ openai-chat = {{}} }}\nprefer = [\"{SECRET}\"]"))]
+#[case::base_url(format!("[providers.p]\nprotocols = {{ openai-chat = {{ base_url = \"https://u:{SECRET}@x.example\" }} }}"))]
+#[case::credential(format!("[providers.p]\nprotocols = {{ openai-chat = {{}} }}\ncredential = {{ env = \"{SECRET}\" }}"))]
+#[case::login(format!("[providers.p]\nprotocols = {{ openai-chat = {{}} }}\ncredential = {{ store = true, login = \"{SECRET}\" }}"))]
+#[case::store(format!("[providers.p]\nprotocols = {{ openai-chat = {{}} }}\ncredential = {{ store = \"{SECRET}\" }}"))]
+#[case::header(format!("[providers.p]\nprotocols = {{ openai-chat = {{}} }}\nheaders = {{ \"Bad Name\" = \"{SECRET}\" }}"))]
+#[case::header_value(format!("[providers.p]\nprotocols = {{ openai-chat = {{}} }}\nheaders = {{ \"X-A\" = \"{SECRET}\\n\" }}"))]
+#[case::wrong_type_key(format!("[providers.p]\nprotocols = {{ openai-chat = {{}} }}\nmodel = [\"{SECRET}\"]"))]
+#[case::unknown_key_value(format!("[providers.p]\nprotocols = {{ openai-chat = {{}} }}\napi_key = \"{SECRET}\""))]
+#[case::default(format!("provider = \"{SECRET}\"\n[providers.p]\nprotocols = {{ openai-chat = {{}} }}"))]
 fn no_diagnostic_repeats_a_value_from_the_file(#[case] text: String) {
     let error = load(&text).unwrap_err();
 
@@ -478,7 +628,7 @@ fn no_diagnostic_repeats_a_value_from_the_file(#[case] text: String) {
 #[test]
 fn the_debug_output_of_providers_hides_header_values() {
     let providers = load(&format!(
-        "[providers.p]\nprotocol = \"openai-chat\"\nheaders = {{ \"Authorization\" = \"Bearer {SECRET}\" }}"
+        "[providers.p]\nprotocols = {{ openai-chat = {{}} }}\nheaders = {{ \"Authorization\" = \"Bearer {SECRET}\" }}"
     ))
     .unwrap();
 

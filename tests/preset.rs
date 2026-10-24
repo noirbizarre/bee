@@ -177,7 +177,7 @@ fn a_profile_overrides_the_scalars_of_its_preset_and_keeps_the_rest() {
 [providers.p]
 preset = "openrouter"
 model = "acme/m1"
-base_url = "https://gw.example/v1/"
+protocols = { openai-chat = { base_url = "https://gw.example/v1/" } }
 "#,
     )
     .unwrap();
@@ -197,9 +197,8 @@ fn headers_and_options_merge_key_by_key_over_the_preset() {
     let providers = global(
         r#"
 [presets.gw]
-protocol = "openai-chat"
+protocols = { openai-chat = { options = { max_tokens_field = "max_completion_tokens" } } }
 headers = { "X-Team" = "infra", "X-Region" = "eu" }
-options = { max_tokens_field = "max_completion_tokens" }
 
 [providers.p]
 preset = "gw"
@@ -269,8 +268,7 @@ fn a_user_preset_extends_the_catalogue_and_any_layer_may_define_it() {
     let providers = project(
         r#"
 [presets.corp]
-protocol = "anthropic-messages"
-base_url = "https://llm.corp.example"
+protocols = { anthropic-messages = { base_url = "https://llm.corp.example" } }
 credential = { env = "CORP_KEY" }
 
 [providers.p]
@@ -288,7 +286,7 @@ preset = "corp"
 fn a_user_preset_overrides_a_shipped_one_by_name_key_by_key() {
     let providers = global(
         r#"
-[presets.ollama]
+[presets.ollama.protocols.openai-chat]
 base_url = "http://gpu-box:11434/v1"
 
 [providers.p]
@@ -307,11 +305,65 @@ preset = "ollama"
 }
 
 #[test]
+fn a_profile_can_add_a_protocol_to_a_preset_but_must_then_say_which_to_prefer() {
+    let without = project(
+        "[providers.p]\npreset = \"openrouter\"\n\
+         [providers.p.protocols.anthropic-messages]\nbase_url = \"https://openrouter.ai/api\"",
+    )
+    .unwrap_err();
+    let with = project(
+        "[providers.p]\npreset = \"openrouter\"\nprefer = [\"openai-chat\"]\n\
+         [providers.p.protocols.anthropic-messages]\nbase_url = \"https://openrouter.ai/api\"",
+    )
+    .unwrap();
+
+    assert!(rendered(without).contains("bee::provider::no_preference"));
+    let profile = with.get("p").unwrap();
+    assert_eq!(profile.endpoints().len(), 2);
+    assert_eq!(profile.protocol(), Protocol::OpenAiChat);
+    assert_eq!(
+        profile.endpoint(Protocol::OpenAiChat).unwrap().base_url(),
+        "https://openrouter.ai/api/v1",
+        "the preset's own protocol is kept"
+    );
+}
+
+#[test]
+fn a_user_preset_can_speak_several_protocols_and_a_profile_overrides_one_url() {
+    let providers = global(
+        r#"
+[presets.cf]
+prefer = ["anthropic-messages", "openai-chat"]
+credential = { env = "CF_TOKEN" }
+
+[presets.cf.protocols.openai-chat]
+base_url = "https://gw.example/openai/v1"
+
+[presets.cf.protocols.anthropic-messages]
+base_url = "https://gw.example/anthropic"
+
+[providers.p]
+preset = "cf"
+protocols = { openai-chat = { base_url = "https://mine.example/v1" } }
+"#,
+    )
+    .unwrap();
+    let profile = providers.get("p").unwrap();
+
+    assert_eq!(profile.protocol(), Protocol::AnthropicMessages);
+    assert_eq!(profile.base_url(), "https://gw.example/anthropic");
+    assert_eq!(
+        profile.endpoint(Protocol::OpenAiChat).unwrap().base_url(),
+        "https://mine.example/v1"
+    );
+}
+
+#[test]
 fn an_error_in_what_a_preset_supplies_names_the_file_that_defined_the_preset() {
     let sandbox = Sandbox::new();
     sandbox.write(
         &sandbox.global(),
-        "[presets.bad]\nprotocol = \"openai-chat\"\nbase_url = \"ftp://x.example\"\n",
+        "[presets.bad]\nprotocols = { openai-chat = { base_url = \"ftp://x.example\" } }\n",
     );
     sandbox.write(
         &project_config_path(&sandbox.project_dir()),
@@ -321,7 +373,10 @@ fn an_error_in_what_a_preset_supplies_names_the_file_that_defined_the_preset() {
     let text = rendered(sandbox.providers().unwrap_err());
 
     assert!(text.contains("bee::provider::invalid"), "{text}");
-    assert!(text.contains("providers.p.base_url"), "{text}");
+    assert!(
+        text.contains("providers.p.protocols.openai-chat.base_url"),
+        "{text}"
+    );
     assert!(
         text.contains(".config/bee/config.toml"),
         "the preset's file should be named, not `<unknown>`: {text}"
@@ -353,7 +408,7 @@ fn a_catalogue_section_of_the_wrong_type_is_refused_by_name(#[case] text: &str) 
 
 fn acme_providers() -> Providers {
     global(&format!(
-        "{ACME_FLOW}\n[providers.acme]\nprotocol = \"openai-chat\"\n\
+        "{ACME_FLOW}\n[providers.acme]\nprotocols = {{ openai-chat = {{}} }}\n\
          credential = {{ store = true, login = \"acme\" }}\n"
     ))
     .unwrap()
@@ -406,7 +461,7 @@ fn a_flow_defined_in_configuration_drives_the_whole_sign_in_with_its_own_names()
 #[test]
 fn a_flow_that_cannot_show_a_code_refuses_the_paste_code_sign_in() {
     let providers = global(&format!(
-        "{}\n[providers.acme]\nprotocol = \"openai-chat\"\n\
+        "{}\n[providers.acme]\nprotocols = {{ openai-chat = {{}} }}\n\
          credential = {{ store = true, login = \"acme\" }}\n",
         ACME_FLOW.replace("headless = true", "headless = false")
     ))
@@ -442,7 +497,7 @@ fn a_flow_can_be_defined_in_the_global_file_or_the_one_bee_config_names() {
     sandbox.write(&sandbox.selected(), ACME_FLOW);
     sandbox.write(
         &project_config_path(&sandbox.project_dir()),
-        "[providers.acme]\nprotocol = \"openai-chat\"\ncredential = { store = true, login = \"acme\" }\n",
+        "[providers.acme]\nprotocols = { openai-chat = {} }\ncredential = { store = true, login = \"acme\" }\n",
     );
 
     let providers = sandbox.providers().unwrap();
@@ -468,7 +523,7 @@ fn the_project_file_may_not_define_a_login_flow(#[case] flow: String) {
 #[test]
 fn the_project_file_may_still_use_and_define_presets() {
     let providers = project(
-        "[presets.mine]\nprotocol = \"openai-chat\"\ncredential = { store = true, login = \"openrouter\" }\n\
+        "[presets.mine]\nprotocols = { openai-chat = {} }\ncredential = { store = true, login = \"openrouter\" }\n\
          [providers.p]\npreset = \"mine\"\n",
     )
     .unwrap();
@@ -501,7 +556,7 @@ fn a_malformed_flow_stops_bee_at_launch_with_the_key_at_fault(
     let flow = ACME_FLOW.replace(from, to);
 
     let error = global(&format!(
-        "{flow}\n[providers.acme]\nprotocol = \"openai-chat\"\n\
+        "{flow}\n[providers.acme]\nprotocols = {{ openai-chat = {{}} }}\n\
          credential = {{ store = true, login = \"acme\" }}\n"
     ))
     .unwrap_err();
@@ -526,7 +581,7 @@ fn a_flow_that_no_profile_uses_is_not_validated() {
 #[test]
 fn a_credential_naming_an_unknown_flow_lists_the_known_ones_without_echoing_it() {
     let error = project(&format!(
-        "[providers.p]\nprotocol = \"openai-chat\"\ncredential = {{ store = true, login = \"{SECRET}\" }}\n"
+        "[providers.p]\nprotocols = {{ openai-chat = {{}} }}\ncredential = {{ store = true, login = \"{SECRET}\" }}\n"
     ))
     .unwrap_err();
 
@@ -544,7 +599,7 @@ fn a_credential_naming_an_unknown_flow_lists_the_known_ones_without_echoing_it()
 #[case::extra_value(ACME_FLOW.replace("bee tests", &format!("{SECRET}\\n")))]
 fn no_flow_diagnostic_repeats_a_value_from_the_file(#[case] flow: String) {
     let error = global(&format!(
-        "{flow}\n[providers.acme]\nprotocol = \"openai-chat\"\n\
+        "{flow}\n[providers.acme]\nprotocols = {{ openai-chat = {{}} }}\n\
          credential = {{ store = true, login = \"acme\" }}\n"
     ))
     .unwrap_err();

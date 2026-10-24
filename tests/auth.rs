@@ -35,21 +35,19 @@ const STORED: &str = r#"
 provider = "or"
 
 [providers.or]
-protocol = "openai-chat"
-base_url = "https://openrouter.ai/api/v1"
+protocols = { openai-chat = { base_url = "https://openrouter.ai/api/v1" } }
 credential = { store = true, login = "openrouter" }
 
 [providers.token]
-protocol = "anthropic-messages"
+protocols = { anthropic-messages = {} }
 credential = { store = true }
 
 [providers.env]
-protocol = "openai-chat"
+protocols = { openai-chat = {} }
 credential = { env = "BEE_TEST_KEY" }
 
 [providers.local]
-protocol = "openai-chat"
-base_url = "http://localhost:11434/v1"
+protocols = { openai-chat = { base_url = "http://localhost:11434/v1" } }
 "#;
 
 struct Sandbox {

@@ -36,20 +36,25 @@ verifier = "code_verifier"
 challenge_method = "code_challenge_method"
 response_key = "key"
 
+# Each preset lists the protocols its provider speaks, each under `protocols`
+# with its own `base_url` and `options`. One protocol needs no `prefer`.
 [presets.openrouter]
-protocol = "openai-chat"
-base_url = "https://openrouter.ai/api/v1"
 credential = { store = true, login = "openrouter" }
 
+[presets.openrouter.protocols.openai-chat]
+base_url = "https://openrouter.ai/api/v1"
+
 [presets.openai]
-protocol = "openai-chat"
 credential = { env = "OPENAI_API_KEY" }
 
+# The protocol's own default base URL, which is OpenAI's.
+[presets.openai.protocols.openai-chat]
+
 [presets.anthropic]
-protocol = "anthropic-messages"
 credential = { env = "ANTHROPIC_API_KEY" }
 
+[presets.anthropic.protocols.anthropic-messages]
+
 # A local server needs no credential, which is what no `credential` means.
-[presets.ollama]
-protocol = "openai-chat"
+[presets.ollama.protocols.openai-chat]
 base_url = "http://localhost:11434/v1"

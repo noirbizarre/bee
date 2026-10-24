@@ -305,7 +305,7 @@ mod tests {
             std::fs::create_dir_all(project_config_path(&project).parent().unwrap()).unwrap();
             std::fs::write(
                 project_config_path(&project),
-                "[providers.or]\nprotocol = \"openai-chat\"\n\
+                "[providers.or]\nprotocols = { openai-chat = {} }\n\
                  credential = { store = true, login = \"openrouter\" }\n",
             )
             .unwrap();

@@ -674,8 +674,8 @@ mod tests {
     }
 
     const TWO: &str = "provider = \"a\"\n\
-        [providers.a]\nprotocol = \"openai-chat\"\nmodel = \"m1\"\nmodels = [\"m2\"]\n\
-        [providers.b]\nprotocol = \"openai-chat\"\nmodel = \"n1\"\n";
+        [providers.a]\nprotocols = { openai-chat = {} }\nmodel = \"m1\"\nmodels = [\"m2\"]\n\
+        [providers.b]\nprotocols = { openai-chat = {} }\nmodel = \"n1\"\n";
 
     #[test]
     fn without_providers_a_session_has_no_settings_and_nothing_to_select() {
