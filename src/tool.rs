@@ -15,10 +15,13 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 mod discovery;
+pub mod edit;
 mod fs;
 pub mod glob;
 pub mod list;
+mod mutation;
 pub mod read;
+pub mod write;
 
 /// Maximum serialized bytes per tool result, including its JSON envelope.
 pub const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
