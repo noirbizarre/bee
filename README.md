@@ -31,8 +31,9 @@ prompts. Bee advertises the baseline session lifecycle (`session/new`, `list`, `
 
 **Chat Completions, Responses and Anthropic Messages inference are implemented.** Prompts stream responses from the
 selected endpoint. Turns can be cancelled or closed, and another prompt is refused until the session is idle. Context is
-retained in memory; ACP update replay is unsupported. Prompts accept text and resource links (references only, never
-fetched). The SDK-free loop supports injected function executors; production ACP tool execution remains deferred.
+retained in memory, with oldest-whole-turn truncation when explicit model context windows are configured; provider
+context overflow fails explicitly. ACP update replay is unsupported. Prompts accept text and resource links (references
+only, never fetched). The SDK-free loop supports injected function executors; production ACP executes native tools.
 All three protocols use native wire adapters, with provider identity, model, endpoint and authentication kept separate.
 
 The "Scope" and "Non-goals" sections describe the intended design, not current behaviour.

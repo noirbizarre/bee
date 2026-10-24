@@ -22,6 +22,147 @@ fn answer(protocol: &str, text: &str) -> Value {
     }
 }
 
+#[rstest::rstest]
+#[case::failed(0)]
+#[case::refused(1)]
+#[case::cancelled(2)]
+#[tokio::test]
+async fn unsuccessful_truncation_preserves_prior_context_across_close_and_resume(#[case] kind: u8) {
+    let mut rejected = Response::json(if kind == 1 {
+        json!({"choices":[{"index":0,"message":{"role":"assistant","refusal":"declined"},"finish_reason":"stop"}]})
+    } else {
+        json!({"error":{"code":"context_length_exceeded"}})
+    });
+    if kind == 0 {
+        rejected.status = 400;
+    }
+    if kind == 2 {
+        rejected.delay = Duration::from_secs(1);
+    }
+    let server = Server::start(vec![
+        Response::json(chat_text("retained-answer")),
+        rejected,
+        Response::json(chat_text("recovered")),
+    ]);
+    let first = "old".repeat(1000);
+    let model = bee::llm::Model::new(
+        support::profile("openai-chat", &server.url, "max_output_tokens=20"),
+        "private-model".into(),
+        None,
+    )
+    .unwrap();
+    let window = model
+        .context(&[bee::llm::Message::User(first.clone())], &[])
+        .unwrap()
+        .estimated_input
+        + 420;
+    let profiles = providers(
+        "openai-chat",
+        &server.url,
+        &format!("max_output_tokens=20\ncontext_window={window}"),
+    );
+    let runtime = bee::acp::Runtime::new(
+        bee::agent::Limits::default(),
+        bee::tool::Registry::default(),
+    );
+    let (tx, mut updates) = tokio::sync::mpsc::unbounded_channel();
+    let client = Client.v2().on_receive_notification(
+        async move |update: v2::UpdateSessionNotification, _| {
+            tx.send(update).map_err(Error::into_internal_error)
+        },
+        agent_client_protocol::on_receive_notification!(),
+    );
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        client.connect_with(
+            bee::acp::agent_with_runtime(profiles, runtime),
+            async move |connection| {
+                connection
+                    .send_request(v2::InitializeRequest::new(
+                        ProtocolVersion::V2,
+                        v2::Implementation::new("test", "0"),
+                    ))
+                    .block_task()
+                    .await?;
+                let cwd = std::env::temp_dir();
+                let session = connection
+                    .send_request(v2::NewSessionRequest::new(cwd.clone()))
+                    .block_task()
+                    .await?
+                    .session_id;
+                for (index, prompt) in [first, "discarded".repeat(400), "tiny".into()]
+                    .into_iter()
+                    .enumerate()
+                {
+                    if index == 2 {
+                        connection
+                            .send_request(v2::CloseSessionRequest::new(session.clone()))
+                            .block_task()
+                            .await?;
+                        connection
+                            .send_request(v2::ResumeSessionRequest::new(
+                                session.clone(),
+                                cwd.clone(),
+                            ))
+                            .block_task()
+                            .await?;
+                        // Resume's idle snapshot is not a completed prompt.
+                        assert!(matches!(
+                            updates.recv().await.unwrap().update,
+                            v2::SessionUpdate::StateUpdate(v2::StateUpdate::Idle(_))
+                        ));
+                    }
+                    connection
+                        .send_request(v2::PromptRequest::new(session.clone(), vec![prompt.into()]))
+                        .block_task()
+                        .await?;
+                    let request = server.request_async().await;
+                    if index == 1 {
+                        assert!(!request.body.to_string().contains("retained-answer"));
+                        if kind == 2 {
+                            connection.send_notification(v2::CancelSessionNotification::new(
+                                session.clone(),
+                            ))?;
+                        }
+                    }
+                    if index == 2 {
+                        assert!(request.body.to_string().contains("retained-answer"));
+                        assert!(!request.body.to_string().contains("discarded"));
+                    }
+                    let mut reports = 0;
+                    loop {
+                        match updates.recv().await.unwrap().update {
+                            v2::SessionUpdate::UsageUpdate(_) => reports += 1,
+                            v2::SessionUpdate::Notice(_) => {
+                                panic!("failed pruning must not be reported as committed")
+                            }
+                            v2::SessionUpdate::StateUpdate(v2::StateUpdate::Idle(idle)) => {
+                                assert_eq!(reports, usize::from(index != 1));
+                                if index == 1 {
+                                    assert!(match kind {
+                                        0 => matches!(
+                                            idle.stop_reason,
+                                            Some(v2::StopReason::Error(_))
+                                        ),
+                                        1 => idle.stop_reason == Some(v2::StopReason::Refusal),
+                                        _ => idle.stop_reason == Some(v2::StopReason::Cancelled),
+                                    });
+                                }
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Ok(())
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+}
+
 fn native_call(protocol: &str, id: &str, name: &str, arguments: Value) -> Value {
     match protocol {
         "openai-chat" => {
@@ -471,6 +612,8 @@ fn mixed_profiles(url: &str, preferred: &str) -> bee::provider::Providers {
 model = "vendor/responses.v2"
 prefer = ["{preferred}"]
 max_output_tokens = 123
+context_window = 100000
+model_context_windows = {{ "vendor/messages.v2" = 20000 }}
 headers = {{ x-team = "shared" }}
 model_protocols = {{ "vendor/chat.v2" = "openai-chat", "vendor/responses.v2" = "openai-responses", "vendor/messages.v2" = "anthropic-messages" }}
 [providers.test.protocols.openai-chat]
@@ -640,12 +783,21 @@ async fn session_model_changes_resolve_protocols_again_and_drop_native_continuat
                         ))
                         .block_task()
                         .await?;
+                    let mut reported_window = None;
                     loop {
-                        if let v2::SessionUpdate::StateUpdate(v2::StateUpdate::Idle(idle)) =
-                            updates.recv().await.unwrap().update
-                        {
-                            assert_eq!(idle.stop_reason, Some(v2::StopReason::EndTurn));
-                            break;
+                        match updates.recv().await.unwrap().update {
+                            v2::SessionUpdate::UsageUpdate(usage) => {
+                                reported_window = Some(usage.size)
+                            }
+                            v2::SessionUpdate::StateUpdate(v2::StateUpdate::Idle(idle)) => {
+                                assert_eq!(idle.stop_reason, Some(v2::StopReason::EndTurn));
+                                assert_eq!(
+                                    reported_window,
+                                    Some(if index == 1 { 20000 } else { 100000 })
+                                );
+                                break;
+                            }
+                            _ => {}
                         }
                     }
                 }

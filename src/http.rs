@@ -39,6 +39,7 @@ impl InferenceHttp {
         headers: reqwest::header::HeaderMap,
         body: Value,
         timeout: Duration,
+        protocol: crate::provider::Protocol,
         event: &mut EventSink<'_>,
     ) -> Result<(), Error> {
         let response = self
@@ -54,7 +55,26 @@ impl InferenceHttp {
             200..=299 => {}
             401 | 403 => return Err(Error::Authentication),
             429 => return Err(Error::RateLimit),
-            status => return Err(Error::Http(status)),
+            status => {
+                // Error bodies can contain credentials or prompts; inspect a bounded
+                // prefix privately and retain the status when classification is unknown.
+                let mut stream = response.bytes_stream();
+                let mut bytes = Vec::new();
+                while let Some(chunk) = stream.next().await {
+                    let chunk = chunk.map_err(transport_error)?;
+                    if bytes.len().saturating_add(chunk.len()) > 64 * 1024 {
+                        return Err(Error::Http(status));
+                    }
+                    bytes.extend_from_slice(&chunk);
+                }
+                if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
+                    let error = crate::llm::provider_error(protocol, &value["error"]);
+                    if error != Error::Provider {
+                        return Err(error);
+                    }
+                }
+                return Err(Error::Http(status));
+            }
         }
         let streaming = response
             .headers()

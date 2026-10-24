@@ -62,6 +62,12 @@ pub enum Error {
     #[error("the model turn exceeded its execution or response-size limit; shorten the request")]
     #[diagnostic(code(bee::llm::limit))]
     Limit,
+    /// Input and reserved output cannot fit the model's context window.
+    #[error(
+        "the model context window was exceeded; shorten the prompt, start a new session, or correct context_window and max_output_tokens"
+    )]
+    #[diagnostic(code(bee::llm::context_limit))]
+    ContextLimit,
     /// The executor has no matching tool.
     #[error("the model requested an unavailable tool; configure a matching tool executor")]
     #[diagnostic(code(bee::llm::tool))]
@@ -200,6 +206,7 @@ impl Model {
         tools: &[Tool],
         text: &mut (dyn FnMut(&str) + Send),
     ) -> Result<Step, Error> {
+        self.context(messages, tools)?.check()?;
         match self.endpoint().protocol() {
             Protocol::OpenAiChat => chat::run(self, messages, tools, text).await,
             Protocol::OpenAiResponses => responses::run(self, messages, tools, text).await,
@@ -209,6 +216,23 @@ impl Model {
 }
 
 impl Model {
+    /// Estimate the exact selected protocol representation without exposing content.
+    pub fn context(
+        &self,
+        messages: &[Message],
+        tools: &[Tool],
+    ) -> Result<crate::context::Report, Error> {
+        let body = match self.endpoint().protocol() {
+            Protocol::OpenAiChat => chat::request(self, messages, tools)?,
+            Protocol::OpenAiResponses => responses::request(self, messages, tools)?,
+            Protocol::AnthropicMessages => anthropic::request(self, messages, tools)?,
+        };
+        Ok(crate::context::estimate(
+            &body,
+            self.profile.context_window(&self.model),
+        ))
+    }
+
     fn endpoint(&self) -> &crate::provider::Endpoint {
         self.profile.endpoint_for_model(&self.model)
     }
@@ -255,6 +279,28 @@ impl Model {
         }
         Ok(headers)
     }
+}
+
+/// Inspect only recognized classifications; upstream text never escapes this seam.
+pub(crate) fn provider_error(protocol: Protocol, error: &Value) -> Error {
+    if error["code"] == "context_length_exceeded" || error["type"] == "context_length_exceeded" {
+        return Error::ContextLimit;
+    }
+    if protocol == Protocol::AnthropicMessages {
+        match error["type"].as_str() {
+            Some("authentication_error" | "permission_error") => return Error::Authentication,
+            Some("rate_limit_error") => return Error::RateLimit,
+            Some("invalid_request_error")
+                if error["message"]
+                    .as_str()
+                    .is_some_and(|message| message.starts_with("prompt is too long")) =>
+            {
+                return Error::ContextLimit;
+            }
+            _ => {}
+        }
+    }
+    Error::Provider
 }
 
 pub(crate) fn string(value: &Value) -> Result<&str, Error> {

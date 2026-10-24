@@ -24,7 +24,8 @@ together. The provider's credential, custom headers and common limits are shared
   `options.version` or the default `2023-06-01`. Its `max_tokens` comes from `options.max_tokens` if present, else the
   common `max_output_tokens`. Native text/tool-use blocks and grouped user tool-result blocks retain their order and
   error flags. Thinking, multimodal blocks, server tools and pause-turn continuation are explicitly unsupported.
-- Text, streamed function calls, optional usage, and ordinary JSON answers are supported. Chat supports one choice,
+- Text, streamed function calls, optional usage, and ordinary JSON answers are supported. Chat requests streamed usage
+  with `stream_options.include_usage`; compatible servers may omit the counters. Chat supports one choice,
   modern function tools, and `max_tokens` or `max_completion_tokens`. Legacy functions, audio and other meaningful
   unsupported output fail explicitly. Compatible servers need only implement this practical subset.
 - Custom headers cannot override generated authentication, content type, accept, host, framing or protocol headers.
@@ -54,7 +55,8 @@ These turn budgets are separate from per-request timeouts, token limits and resp
 
 Successful conversation context is retained within the ACP connection, including close/resume. Cancelled, failed and
 refused turns may already have visible text but are excluded from future context. Changing provider/model preserves
-portable text and drops protocol-specific continuation. This does not implement ACP update replay or disk persistence.
+portable text and drops protocol-specific continuation. Explicit context windows bound retained history as described
+below. This does not implement ACP update replay or disk persistence.
 
 The SDK-free `agent::run` accepts tool definitions and an injected `Executor`, with correlated call/result history.
 The [native tool contract](tools.md) provides typed schema validation, registration, bounded results, and
@@ -65,6 +67,83 @@ They resolve relative paths against the session cwd, while configuration is load
 Cancelling or closing a session drops pending inference and tool futures and signals native-tool cancellation tokens.
 Executors must cooperate with cancellation, and external side effects cannot be rolled back.
 Library callers can use `agent::run_with_limits` for explicit policy or `acp::Runtime` for a custom catalog and policy.
+
+## Conversation context and token budgets
+
+Each accepted ACP prompt becomes one user message: text blocks and resource-link descriptions are joined in order
+with newlines. Links are represented as `[Resource link, contents not fetched: URI]`; Bee does not fetch their contents.
+Unsupported block types are rejected before the turn starts. Successful history includes assistant text, complete
+function calls, their correlated results and any protocol-native continuation. Output-limited answers are retained;
+failed, cancelled, refused and context-exhausted turns are not.
+
+Context capacity is explicit configuration, never inferred from a model name or a catalog:
+
+```toml
+[providers.work]
+context_window = 32768
+model_context_windows = { "small-model" = 8192 }
+```
+
+Both settings accept positive 32-bit integers, including in presets. An exact, case-sensitive model entry overrides
+the profile fallback. Quote model IDs containing TOML punctuation. The map merges per model across configuration
+layers and presets; an empty map does not clear inherited entries. Without an applicable limit, capacity is unknown:
+Bee estimates occupancy but does not truncate or invent a context window. A profile fallback applies to every unmapped
+model selected in that profile, so configure it appropriately for those models.
+
+Before **every model request**, including requests following tool execution, Bee requires:
+
+```text
+estimated input tokens + reserved output tokens <= configured context window
+```
+
+Input is estimated from the UTF-8 byte lengths of compact JSON for the selected protocol's conversation and tool
+definitions: sum those lengths, divide by three rounding up, then add 256 tokens for framing. This includes tool
+schemas, descriptions, call IDs, arguments and results. Native items are counted instead of their portable replacement,
+not in addition to it. The estimate is approximate, especially for multilingual text, JSON and encrypted reasoning;
+it is not a tokenizer guarantee. Output reservation uses the actual request limit, including Anthropic's
+`options.max_tokens` override. Bee does not silently lower output limits to make a request fit.
+
+When necessary, Bee drops oldest **complete ACP turns** until the request fits. Each dropped user message takes all
+its assistant steps, tool calls/results and native continuation with it. Recent retained turns remain unchanged.
+The active prompt and its entire in-progress tool loop are protected: individual messages, results and opaque native
+items are never shortened or split. If the protected turn plus tool definitions and output reservation cannot fit,
+the turn fails with `bee::llm::context_limit` before another HTTP request. A tool may already have performed side
+effects before its result makes the next request too large; context management cannot roll those effects back.
+
+Truncation changes the working copy only. Successful non-refused completion commits that reduced history; failure,
+cancellation or refusal leaves previously committed history intact. This bounds model history when configured,
+without keeping a separate full transcript. It does not summarize removed interaction or rewrite client-visible
+message history. Close/resume retains the remaining context within the connection.
+
+### Usage and overflow reporting
+
+After a successful commit with a configured capacity, ACP receives `usage_update` before terminal idle. `used` is
+the estimate for retained context including tool definitions and the final answer, excluding future output reservation;
+`size` is the configured window. `_meta["bee.dev/context"]` labels `estimated = true`, the method
+`utf8-json-bytes/3+256`, and `reservedOutput`. A final answer can change the estimate beyond the preflight budget;
+the next request is checked again. If turns were dropped, an informational notice reports their count. These are
+live context reports, not replayed messages, billing totals or generated summaries. Unsuccessful attempts emit no
+committed-context report or truncation notice.
+
+Library callers can inspect `Model::context` and `agent::Outcome::context` even when capacity is unknown.
+`Model::step` checks a configured budget without modifying its input; the agent loop owns eviction. Library inputs
+use user-message boundaries to identify turns; without any user boundary the entire input is protected. Malformed
+historical call/result batches cannot be silently discarded to fit a budget.
+
+`Outcome::usage` sums known provider input/output counters with saturating arithmetic. Missing counters are distinct
+from zero; `context.steps`, `context.input_steps` and `context.output_steps` indicate whether each total covers every
+completed request. These repeated-request totals are separate from current context occupancy. Failed/cancelled attempts
+do not return an outcome, and no billing ledger or monetary cost is inferred from estimates.
+
+Provider context overflow is explicit even without configured capacity. Bee recognizes structured
+`context_length_exceeded` errors, Anthropic `invalid_request_error` messages beginning with `prompt is too long`, and
+Anthropic's `model_context_window_exceeded` stop reason. HTTP, stream and terminal error paths retain the same safe
+classification without echoing upstream text. Generic HTTP 400/413 or unrelated invalid requests are not assumed to
+be context overflow. A normal output-token stop stays `max_tokens`; a context-exhausted turn fails even if partial
+text was already streamed. Shorten the prompt, start a new session, or correct the configured window/output limit;
+Bee does not automatically retry a rejected request.
+
+See [ADR-014](adr/014-conversation-context-and-token-limits.md) for the design decision.
 
 ## Chat Completions manual smoke test
 

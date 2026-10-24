@@ -11,6 +11,26 @@ pub(super) async fn run(
     tools: &[Tool],
     text: &mut (dyn FnMut(&str) + Send),
 ) -> Result<Step, Error> {
+    let body = request(model, messages, tools)?;
+    let ProtocolOptions::AnthropicMessages { version, .. } = model.endpoint().options() else {
+        return Err(Error::Malformed);
+    };
+    let mut parser = Parser::default();
+    model
+        .http
+        .post(
+            &format!("{}/v1/messages", model.endpoint().base_url()),
+            model.headers(Some(version.as_deref().unwrap_or("2023-06-01")))?,
+            body,
+            model.profile.timeout(),
+            model.endpoint().protocol(),
+            &mut |event, data| parser.event(event, data, text),
+        )
+        .await?;
+    parser.result.ok_or(Error::Malformed)
+}
+
+pub(super) fn request(model: &Model, messages: &[Message], tools: &[Tool]) -> Result<Value, Error> {
     let mut input: Vec<Value> = Vec::new();
     for message in messages {
         let (role, blocks) = match message {
@@ -59,29 +79,14 @@ pub(super) async fn run(
             input.push(json!({"role":role,"content":blocks}));
         }
     }
-    let ProtocolOptions::AnthropicMessages {
-        version,
-        max_tokens,
-    } = model.endpoint().options()
-    else {
+    let ProtocolOptions::AnthropicMessages { max_tokens, .. } = model.endpoint().options() else {
         return Err(Error::Malformed);
     };
     let mut body = json!({"model":model.model,"messages":input,"stream":true,"max_tokens":max_tokens.unwrap_or(model.profile.max_output_tokens())});
     if !tools.is_empty() {
         body["tools"] = tools.iter().map(|tool| json!({"name":tool.name,"description":tool.description,"input_schema":tool.parameters})).collect();
     }
-    let mut parser = Parser::default();
-    model
-        .http
-        .post(
-            &format!("{}/v1/messages", model.endpoint().base_url()),
-            model.headers(Some(version.as_deref().unwrap_or("2023-06-01")))?,
-            body,
-            model.profile.timeout(),
-            &mut |event, data| parser.event(event, data, text),
-        )
-        .await?;
-    parser.result.ok_or(Error::Malformed)
+    Ok(body)
 }
 
 struct Block {
@@ -272,6 +277,7 @@ fn reason(value: &Value) -> Result<Stop, Error> {
         "end_turn" | "stop_sequence" => Ok(Stop::End),
         "tool_use" => Ok(Stop::Tools),
         "max_tokens" => Ok(Stop::MaxTokens),
+        "model_context_window_exceeded" => Err(Error::ContextLimit),
         "refusal" => Ok(Stop::Refusal),
         _ => Err(Error::Unsupported("Anthropic stop reason")),
     }
@@ -321,9 +327,5 @@ fn complete(blocks: Vec<Value>, stop: Stop, usage: Usage) -> Result<Step, Error>
 }
 
 fn provider_error(value: &Value) -> Error {
-    match value["error"]["type"].as_str() {
-        Some("authentication_error" | "permission_error") => Error::Authentication,
-        Some("rate_limit_error") => Error::RateLimit,
-        _ => Error::Provider,
-    }
+    super::provider_error(Protocol::AnthropicMessages, &value["error"])
 }

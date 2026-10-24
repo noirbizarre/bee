@@ -474,19 +474,7 @@ where
                     };
                     let mut input = registry.inference(&id);
                     if let Some(input) = &mut input {
-                        let content = request
-                            .prompt
-                            .iter()
-                            .filter_map(|block| match block {
-                                v2::ContentBlock::Text(text) => Some(text.text.clone()),
-                                v2::ContentBlock::ResourceLink(link) => Some(format!(
-                                    "[Resource link, contents not fetched: {}]",
-                                    link.uri
-                                )),
-                                _ => None,
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n");
+                        let content = prompt_text(&request.prompt);
                         input.messages.push(crate::llm::Message::User(content));
                     }
                     drop(registry);
@@ -670,8 +658,37 @@ where
     let mut sessions = lock(&sessions);
     if let Some(outcome) = lock(&completed).take()
         && outcome.stop != crate::llm::Stop::Refusal
+        && sessions.is_current(&id, token)
     {
         sessions.commit(&id, token, outcome.messages);
+        // Report only committed context, under the same lock as cancellation/idle.
+        if let Some(window) = outcome.context.window {
+            let meta = serde_json::json!({"bee.dev/context": {"estimated":true,"method":"utf8-json-bytes/3+256","reservedOutput":outcome.context.reserved_output}});
+            let _ = send_update(
+                &connection,
+                &session_id,
+                v2::SessionUpdate::UsageUpdate(
+                    v2::UsageUpdate::new(outcome.context.estimated_input, u64::from(window))
+                        .meta(meta.as_object().cloned().unwrap_or_default()),
+                ),
+            );
+        }
+        if outcome.context.removed_turns > 0 {
+            let _ = send_update(
+                &connection,
+                &session_id,
+                v2::SessionUpdate::Notice(
+                    v2::Notice::new(
+                        v2::NoticeSeverity::Info,
+                        "Older conversation removed from model context",
+                    )
+                    .description(format!(
+                        "Removed {} oldest complete turn(s) to fit the configured context window.",
+                        outcome.context.removed_turns
+                    )),
+                ),
+            );
+        }
     }
     if sessions.finish_turn(&id, token) {
         // A failed send means the peer is gone; there is nobody to tell.
@@ -707,6 +724,22 @@ fn unsupported_content(prompt: &[v2::ContentBlock]) -> Option<String> {
              capability; send `text` or `resource_link` blocks instead"
         ))
     })
+}
+
+/// Only called after capability validation; links are descriptions, never fetched content.
+fn prompt_text(prompt: &[v2::ContentBlock]) -> String {
+    prompt
+        .iter()
+        .filter_map(|block| match block {
+            v2::ContentBlock::Text(text) => Some(text.text.clone()),
+            v2::ContentBlock::ResourceLink(link) => Some(format!(
+                "[Resource link, contents not fetched: {}]",
+                link.uri
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Lock the registry.
