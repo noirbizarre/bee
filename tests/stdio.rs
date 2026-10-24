@@ -209,6 +209,112 @@ fn configured_turn_limits_reach_real_stdio_inference() {
 }
 
 #[test]
+fn context_truncation_reports_committed_history_and_failures_leave_it_intact_over_stdio() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("note.txt"), "paired-result").unwrap();
+    let mut overflow = support::Response::json(
+        json!({"error":{"code":"context_length_exceeded","message":"upstream-secret"}}),
+    );
+    overflow.status = 400;
+    let server = support::Server::start(vec![
+        support::Response::json(support::chat_text("first-answer")),
+        support::Response::json(support::chat_text("tiny-answer")),
+        support::Response::json(
+            json!({"choices":[{"index":0,"message":{"tool_calls":[{"id":"paired-call","type":"function","function":{"name":"read","arguments":"{\"path\":\"note.txt\"}"}}]},"finish_reason":"tool_calls"}]}),
+        ),
+        support::Response::json(support::chat_text("tool-answer")),
+        overflow,
+        support::Response::json(support::chat_text("after-answer")),
+    ]);
+    let first = format!(
+        "{}\n[Resource link, contents not fetched: file:///reference]\nlast block",
+        "old".repeat(1000)
+    );
+    let model = bee::llm::Model::new(
+        support::profile("openai-chat", &server.url, "max_output_tokens=20"),
+        "test".into(),
+        None,
+    )
+    .unwrap();
+    let registry = bee::tool::builtins().unwrap();
+    let executor = bee::agent::NativeExecutor::new(&registry, support::native_context());
+    let report = model
+        .context(
+            &[bee::llm::Message::User(first.clone())],
+            &executor.definitions(),
+        )
+        .unwrap();
+    let window = report.estimated_input + report.reserved_output + 400;
+    let mut agent = Agent::configured(&format!(
+        "[providers.test]\nmodel='test'\nmax_output_tokens=20\ncontext_window={window}\n[providers.test.protocols.openai-chat]\nbase_url='{}'",
+        server.url
+    ));
+    agent.initialize(1);
+    agent
+        .send(&json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":root.path()}}));
+    let session = agent.recv()["result"]["sessionId"].clone();
+    let prompts = [
+        json!([{"type":"text","text":"old".repeat(1000)},{"type":"resource_link","uri":"file:///reference","name":"reference"},{"type":"text","text":"last block"}]),
+        json!([{"type":"text","text":"oversized".repeat(10000)}]),
+        json!([{"type":"text","text":"tiny"}]),
+        json!([{"type":"text","text":"second".repeat(500)}]),
+        json!([{"type":"text","text":"rejected-prompt"}]),
+        json!([{"type":"text","text":"after"}]),
+    ];
+    for (index, prompt) in prompts.into_iter().enumerate() {
+        agent.send(&json!({"jsonrpc":"2.0","id":index+3,"method":"session/prompt","params":{"sessionId":session,"prompt":prompt}}));
+        let mut reports = 0;
+        let mut notices = 0;
+        loop {
+            let message = agent.recv();
+            assert!(!message.to_string().contains("upstream-secret"));
+            let update = &message["params"]["update"];
+            if update["sessionUpdate"] == "usage_update" {
+                reports += 1;
+                assert_eq!(update["size"], window);
+                assert_eq!(update["_meta"]["bee.dev/context"]["estimated"], true);
+            }
+            if update["sessionUpdate"] == "notice" {
+                notices += 1;
+                assert!(
+                    update
+                        .to_string()
+                        .contains("Removed 1 oldest complete turn")
+                );
+            }
+            if update["sessionUpdate"] == "state_update" && update["state"] == "idle" {
+                let failed = index == 1 || index == 4;
+                assert_eq!(
+                    update["stopReason"],
+                    if failed { "error" } else { "end_turn" }
+                );
+                assert_eq!(reports, usize::from(!failed));
+                assert_eq!(notices, usize::from(index == 3));
+                break;
+            }
+        }
+    }
+    assert_eq!(server.request().body["messages"][0]["content"], first);
+    let recovered = server.request().body.to_string();
+    assert!(recovered.contains("first-answer"));
+    assert!(!recovered.contains("oversized"));
+    let trimmed = server.request().body.to_string();
+    assert!(!trimmed.contains("first-answer"));
+    assert!(trimmed.contains("tiny-answer"));
+    let paired = server.request().body.to_string();
+    assert!(paired.contains("paired-call"));
+    assert!(paired.contains("paired-result"));
+    server.request();
+    let after = server.request().body.to_string();
+    assert!(after.contains("tool-answer"));
+    assert!(after.contains("paired-call"));
+    assert!(!after.contains("rejected-prompt"));
+    server.assert_no_more_requests();
+    let (status, stderr) = agent.finish();
+    assert!(status.success(), "{stderr}");
+}
+
+#[test]
 fn an_initialize_over_stdio_is_answered_with_the_bee_identity() {
     let mut agent = Agent::spawn();
 

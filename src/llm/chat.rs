@@ -13,6 +13,23 @@ pub(super) async fn run(
     tools: &[Tool],
     text: &mut (dyn FnMut(&str) + Send),
 ) -> Result<Step, Error> {
+    let body = request(model, messages, tools)?;
+    let mut parser = Parser::default();
+    model
+        .http
+        .post(
+            &format!("{}/chat/completions", model.endpoint().base_url()),
+            model.headers(None)?,
+            body,
+            model.profile.timeout(),
+            model.endpoint().protocol(),
+            &mut |event, data| parser.event(event, data, text),
+        )
+        .await?;
+    parser.finish()
+}
+
+pub(super) fn request(model: &Model, messages: &[Message], tools: &[Tool]) -> Result<Value, Error> {
     let messages: Vec<_> = messages.iter().map(|message| match message {
         Message::User(text) => json!({"role":"user", "content":text}),
         Message::Assistant { text, calls, .. } => {
@@ -24,7 +41,7 @@ pub(super) async fn run(
         }
         Message::Tool { id, output, .. } => json!({"role":"tool", "tool_call_id":id,"content":output}),
     }).collect();
-    let mut body = json!({"model":model.model,"messages":messages,"stream":true});
+    let mut body = json!({"model":model.model,"messages":messages,"stream":true,"stream_options":{"include_usage":true}});
     let field = match model.endpoint().options() {
         ProtocolOptions::OpenAiChat {
             max_tokens_field: MaxTokensField::MaxCompletionTokens,
@@ -35,18 +52,7 @@ pub(super) async fn run(
     if !tools.is_empty() {
         body["tools"] = tools.iter().map(|tool| json!({"type":"function","function":{"name":tool.name,"description":tool.description,"parameters":tool.parameters}})).collect();
     }
-    let mut parser = Parser::default();
-    model
-        .http
-        .post(
-            &format!("{}/chat/completions", model.endpoint().base_url()),
-            model.headers(None)?,
-            body,
-            model.profile.timeout(),
-            &mut |event, data| parser.event(event, data, text),
-        )
-        .await?;
-    parser.finish()
+    Ok(body)
 }
 
 #[derive(Default)]
@@ -85,7 +91,10 @@ impl Parser {
         }
         let value: Value = serde_json::from_str(data).map_err(|_| Error::Malformed)?;
         if value.get("error").is_some() {
-            return Err(Error::Provider);
+            return Err(super::provider_error(
+                crate::provider::Protocol::OpenAiChat,
+                &value["error"],
+            ));
         }
         if let Some(usage) = value.get("usage").filter(|value| !value.is_null()) {
             self.usage = Usage {

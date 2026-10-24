@@ -15,7 +15,8 @@ framework or a provider abstraction ahead of a concrete need.
 
 Bee serves ACPv2 over stdio and implements the baseline session lifecycle
 (new, list, resume, close, prompt, cancel) with streaming Chat Completions, Responses
-and Anthropic Messages inference. Successful context is retained in memory; failed/cancelled/refused
+and Anthropic Messages inference. Successful context is retained in memory, with explicit model-aware
+context windows, approximate token accounting and transactional oldest-whole-turn truncation; failed/cancelled/refused
 turns are excluded, and ACP replay remains unsupported. The SDK-free bounded
 loop supports configurable turn limits and injected tool executors; production ACP
 registers the native bash, read, glob, list, write and edit tools with session-relative execution contexts.
@@ -58,6 +59,7 @@ src/
 ├── llm.rs      SDK-free inference types, errors and protocol dispatch
 ├── llm/        native wire adapters
 ├── agent.rs    bounded model/tool loop with an injected executor
+├── context.rs  SDK-free context estimates, explicit budgets and whole-turn eviction
 ├── tool.rs     typed native tools, validation, execution context and registry
 ├── cli.rs      argument types only
 ├── commands.rs what `bee auth` does and prints (binary only)
