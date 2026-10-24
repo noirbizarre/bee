@@ -238,15 +238,24 @@ async fn invalid_tool_arguments_never_reach_an_executor() {
 }
 
 #[tokio::test]
-async fn a_preferred_unimplemented_protocol_does_not_fall_back_to_chat() {
+async fn a_failure_on_the_preferred_protocol_does_not_fall_back_to_chat() {
+    let mut response = Response::json(json!({"type":"error"}));
+    response.status = 401;
+    let server = Server::start(vec![response]);
     let profiles = support::providers(
         "anthropic-messages",
-        "http://127.0.0.1:1",
-        "prefer=['anthropic-messages','openai-chat']\n[providers.test.protocols.openai-chat]",
+        &server.url,
+        "prefer=['anthropic-messages','openai-chat']\n[providers.test.protocols.openai-chat]\nbase_url='http://127.0.0.1:1'",
     );
     let model = Model::new(profiles.get("test").unwrap().clone(), "opaque".into(), None).unwrap();
-    assert!(matches!(
-        model.step(&[], &[], &mut |_| {}).await,
-        Err(Error::Unsupported(_))
-    ));
+    assert_eq!(
+        model.step(&[], &[], &mut |_| {}).await.unwrap_err(),
+        Error::Authentication
+    );
+    assert!(
+        server
+            .request()
+            .head
+            .starts_with("POST /prefix/v1/messages ")
+    );
 }

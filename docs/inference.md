@@ -1,6 +1,6 @@
 # Inference and smoke tests
 
-Bee implements text and function-calling Chat Completions and Responses. Anthropic remains configuration-only.
+Bee implements text and function-calling Chat Completions, Responses and Anthropic Messages.
 A profile's preferred protocol is used exactly; failures never trigger protocol fallback. Any opaque
 model ID is accepted without a catalog lookup, but the endpoint must support that model and the selected protocol.
 
@@ -13,6 +13,10 @@ model ID is accepted without a catalog lookup, but the endpoint must support tha
   (`store = false`) with native output items and encrypted reasoning state. Function outputs correlate by call ID,
   not output-item ID. Built-in server tools and non-text message content are unsupported. Streams require item completion
   followed by a completed/incomplete response; usage and final objects never duplicate streamed text.
+- Anthropic appends `/v1/messages`, presents credentials with `x-api-key`, and sends `anthropic-version` from
+  `options.version` or the default `2023-06-01`. Its `max_tokens` comes from `options.max_tokens` if present, else the
+  common `max_output_tokens`. Native text/tool-use blocks and grouped user tool-result blocks retain their order and
+  error flags. Thinking, multimodal blocks, server tools and pause-turn continuation are explicitly unsupported.
 - Text, streamed function calls, optional usage, and ordinary JSON answers are supported. Chat supports one choice,
   modern function tools, and `max_tokens` or `max_completion_tokens`. Legacy functions, audio and other meaningful
   unsupported output fail explicitly. Compatible servers need only implement this practical subset.
@@ -87,3 +91,19 @@ base_url = "https://YOUR_COMPATIBLE_HOST/v1"
 
 Supply the key only in the launch environment. Verify both endpoints independently, including a multi-turn follow-up.
 Some compatible endpoints do not support stateless encrypted reasoning; those fail explicitly rather than losing state.
+
+## Anthropic Messages manual smoke test
+
+Supply your own `ANTHROPIC_API_KEY` in the ACP client's launch environment and choose a Messages-compatible model:
+
+```toml
+[providers.smoke]
+preset = "anthropic"
+model = "YOUR_ANTHROPIC_MODEL_ID"
+max_output_tokens = 4096
+```
+
+Repeat the short answer, follow-up and cancellation checks against the official endpoint. The preset uses
+`https://api.anthropic.com`; Bee appends `/v1/messages` and applies the required protocol headers. Do not enable thinking
+or server tools for this subset. A Messages-compatible gateway may override this protocol's base URL without changing
+its provider name or authentication source. Validate such gateways separately against their own documented contract.

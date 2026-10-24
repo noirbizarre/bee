@@ -6,15 +6,35 @@ use std::time::Duration;
 
 use agent_client_protocol::schema::{ProtocolVersion, v2};
 use agent_client_protocol::{Client, Error};
+use serde_json::{Value, json};
 use support::{Response, Server, chat_text, providers};
 
+fn answer(protocol: &str, text: &str) -> Value {
+    match protocol {
+        "openai-chat" => chat_text(text),
+        "openai-responses" => {
+            json!({"status":"completed","output":[{"id":"m1","type":"message","role":"assistant","content":[{"type":"output_text","text":text}]}]})
+        }
+        "anthropic-messages" => {
+            json!({"type":"message","role":"assistant","content":[{"type":"text","text":text}],"stop_reason":"end_turn"})
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[rstest::rstest]
+#[case("openai-chat")]
+#[case("openai-responses")]
+#[case("anthropic-messages")]
 #[tokio::test]
-async fn successful_turns_reach_the_model_and_supply_context_to_the_next_prompt() {
+async fn successful_turns_reach_the_model_and_supply_context_to_the_next_prompt(
+    #[case] protocol: &str,
+) {
     let server = Server::start(vec![
-        Response::json(chat_text("first answer")),
-        Response::json(chat_text("second answer")),
+        Response::json(answer(protocol, "first answer")),
+        Response::json(answer(protocol, "second answer")),
     ]);
-    let profiles = providers("openai-chat", &server.url, "");
+    let profiles = providers(protocol, &server.url, "");
     let (tx, mut updates) = tokio::sync::mpsc::unbounded_channel();
     let client = Client.v2().on_receive_notification(
         async move |update: v2::UpdateSessionNotification, _connection| {
@@ -61,24 +81,42 @@ async fn successful_turns_reach_the_model_and_supply_context_to_the_next_prompt(
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(
-        server.request().body["messages"].as_array().unwrap().len(),
-        1
-    );
+    let key = if protocol == "openai-responses" {
+        "input"
+    } else {
+        "messages"
+    };
+    assert_eq!(server.request().body[key].as_array().unwrap().len(), 1);
     let request = server.request();
-    assert_eq!(request.body["messages"][1]["content"], "first answer");
-    assert_eq!(request.body["messages"][2]["content"], "second question");
+    let previous = &request.body[key][1]["content"];
+    let question = &request.body[key][2]["content"];
+    if protocol == "openai-chat" {
+        assert_eq!(previous, "first answer");
+    } else {
+        assert_eq!(previous[0]["text"], "first answer");
+    }
+    if protocol == "anthropic-messages" {
+        assert_eq!(question[0]["text"], "second question");
+    } else {
+        assert_eq!(question, "second question");
+    }
 }
 
+#[rstest::rstest]
+#[case("openai-chat")]
+#[case("openai-responses")]
+#[case("anthropic-messages")]
 #[tokio::test]
-async fn cancelling_a_pending_http_request_leaves_no_context_or_late_output() {
-    let mut pending = Response::json(chat_text("cancelled answer"));
+async fn cancelling_a_pending_http_request_leaves_no_context_or_late_output(
+    #[case] protocol: &str,
+) {
+    let mut pending = Response::json(answer(protocol, "cancelled answer"));
     pending.delay = Duration::from_millis(100);
     let server = Server::start(vec![
         pending,
-        Response::json(chat_text("replacement answer")),
+        Response::json(answer(protocol, "replacement answer")),
     ]);
-    let profiles = providers("openai-chat", &server.url, "");
+    let profiles = providers(protocol, &server.url, "");
     let (tx, mut updates) = tokio::sync::mpsc::unbounded_channel();
     let client = Client.v2().on_receive_notification(
         async move |update: v2::UpdateSessionNotification, _connection| {
@@ -146,9 +184,19 @@ async fn cancelling_a_pending_http_request_leaves_no_context_or_late_output() {
                 }
                 assert_eq!(idle_count, 1);
                 let request = server.request_async().await;
+                let key = if protocol == "openai-responses" {
+                    "input"
+                } else {
+                    "messages"
+                };
+                let content = if protocol == "anthropic-messages" {
+                    json!([{"type":"text","text":"keep this"}])
+                } else {
+                    json!("keep this")
+                };
                 assert_eq!(
-                    request.body["messages"],
-                    serde_json::json!([{"role":"user","content":"keep this"}])
+                    request.body[key],
+                    json!([{"role":"user","content":content}])
                 );
                 Ok(())
             },

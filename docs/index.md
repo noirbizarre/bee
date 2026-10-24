@@ -13,13 +13,13 @@ Bee is at the **bootstrap stage**: the repository, tooling, CI and release autom
 serves ACPv2 over stdio, so a client can start it, complete the `initialize` handshake, create sessions and submit
 prompts. Bee advertises the baseline session lifecycle (`session/new`, `list`, `resume`, `close`, `prompt`, `cancel`).
 
-**Chat Completions and Responses inference are implemented.** The selected profile/model receives prompts and streams
-answers over ACP. Cancellation and close interrupt pending inference. Successful model context is retained in memory, including
+**Chat Completions, Responses and Anthropic Messages inference are implemented.** Selected profiles receive prompts and
+stream answers over ACP. Cancellation and close interrupt pending inference. Successful context is retained in memory,
 across close/resume; ACP update replay is unsupported. Cancelled, failed and refused turns do not enter model context.
 Prompts accept text and resource links, represented as references without fetching their contents.
 
 The SDK-free loop supports injected function executors. Production ACP tool execution remains deferred and no tools
-are advertised. The Anthropic inference backend is not implemented yet.
+are advertised. All three native backends support function calls through the injected executor interface.
 
 ## Configuration
 
@@ -89,8 +89,8 @@ credential. The provider is the client's choice, else `provider`, else the only 
 choice, else the profile's `model`, else the first of its `models`. Choosing another provider resets the model, and
 settings cannot change while a turn is running. See [ADR-007](adr/007-provider-profiles-and-model-selection.md).
 
-Requests use the preferred protocol exactly; Bee never silently falls back to another protocol. `openai-chat` and
-`openai-responses` can run inference, including presets preferring Responses. Anthropic remains configuration-only.
+Requests use the preferred protocol exactly; Bee never silently falls back to another protocol. `openai-chat`,
+`openai-responses` and `anthropic-messages` can run inference, including presets preferring Responses or Messages.
 See [Inference and smoke tests](inference.md) for the supported subset and verification instructions.
 
 ## Authentication

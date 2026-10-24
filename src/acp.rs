@@ -252,8 +252,9 @@ where
                     // Bee never returns a `nextCursor`, so a cursor can only be
                     // made up; silently ignoring it would hide a client bug.
                     if request.cursor.is_some() {
-                        return responder
-                            .respond_with_error(invalid_params("`cursor` is not supported: `session/list` returns a single page"));
+                        return responder.respond_with_error(invalid_params(
+                            "`cursor` is not supported: `session/list` returns a single page",
+                        ));
                     }
                     let listed = lock(&sessions).list(request.cwd.as_ref().map(AsRef::as_ref));
                     responder.respond(v2::ListSessionsResponse::new(
@@ -272,12 +273,12 @@ where
                 async move |request: v2::ResumeSessionRequest,
                             responder: Responder<v2::ResumeSessionResponse>,
                             connection: V2ConnectionTo<Client>| {
-                    // Nothing is retained, so there is nothing to replay. The
+                    // Model context is retained, but not ACP update events. The
                     // protocol requires rejecting a cursor rather than resuming
                     // without the replay the client asked for.
                     if request.replay_from.is_some() {
                         return responder.respond_with_error(invalid_params(
-                            "`replayFrom` is not supported: Bee does not retain conversation history",
+                            "`replayFrom` is not supported: Bee does not retain ACP update history",
                         ));
                     }
                     let id = request.session_id.to_string();
@@ -397,11 +398,19 @@ where
                     };
                     let mut input = registry.inference(&id);
                     if let Some((_, _, history)) = &mut input {
-                        let content = request.prompt.iter().filter_map(|block| match block {
-                            v2::ContentBlock::Text(text) => Some(text.text.clone()),
-                            v2::ContentBlock::ResourceLink(link) => Some(format!("[Resource link, contents not fetched: {}]", link.uri)),
-                            _ => None,
-                        }).collect::<Vec<_>>().join("\n");
+                        let content = request
+                            .prompt
+                            .iter()
+                            .filter_map(|block| match block {
+                                v2::ContentBlock::Text(text) => Some(text.text.clone()),
+                                v2::ContentBlock::ResourceLink(link) => Some(format!(
+                                    "[Resource link, contents not fetched: {}]",
+                                    link.uri
+                                )),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
                         history.push(crate::llm::Message::User(content));
                     }
                     drop(registry);

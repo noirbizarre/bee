@@ -1,5 +1,6 @@
 //! SDK-free inference types and protocol dispatch.
 
+pub mod anthropic;
 pub mod chat;
 pub mod responses;
 
@@ -198,9 +199,7 @@ impl Model {
         match self.profile.protocol() {
             Protocol::OpenAiChat => chat::run(self, messages, tools, text).await,
             Protocol::OpenAiResponses => responses::run(self, messages, tools, text).await,
-            _ => Err(Error::Unsupported(
-                "the preferred protocol backend is not implemented",
-            )),
+            Protocol::AnthropicMessages => anthropic::run(self, messages, tools, text).await,
         }
     }
 }

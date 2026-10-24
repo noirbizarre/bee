@@ -14,11 +14,11 @@ ACPv2 client-agent contract. Do not propose a TUI, a web frontend, a plugin
 framework or a provider abstraction ahead of a concrete need.
 
 Bee serves ACPv2 over stdio and implements the baseline session lifecycle
-(new, list, resume, close, prompt, cancel) with streaming Chat Completions and Responses
-inference. Successful context is retained in memory; failed/cancelled/refused
+(new, list, resume, close, prompt, cancel) with streaming Chat Completions, Responses
+and Anthropic Messages inference. Successful context is retained in memory; failed/cancelled/refused
 turns are excluded, and ACP replay remains unsupported. The SDK-free bounded
 loop supports injected tool executors; production ACP tool execution is deferred.
-The Anthropic inference backend remains to be implemented.
+Each native backend preserves its own continuation and tool-result semantics.
 
 ## Non-negotiable invariants
 

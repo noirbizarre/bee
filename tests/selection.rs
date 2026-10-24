@@ -3,7 +3,7 @@
 //! The provider and model a session uses are session settings the client may
 //! change; the profile's endpoint, headers and credential are configuration it
 //! may not (ADR-007). No LLM is called yet, so these pin the options and their
-//! precedence, which outlive the placeholder turn.
+//! precedence, independent of model I/O.
 
 use std::fs;
 use std::future;

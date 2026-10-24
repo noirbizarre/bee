@@ -26,6 +26,8 @@ impl InferenceHttp {
         reqwest::Client::builder()
             // Even a same-origin redirect can change where a prompt is stored.
             .redirect(reqwest::redirect::Policy::none())
+            // Even protocol-level retries must not duplicate billable/tool work.
+            .retry(reqwest::retry::never())
             .build()
             .map(Self)
             .map_err(|_| Error::Transport)

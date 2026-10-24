@@ -439,7 +439,7 @@ async fn resuming_with_a_replay_cursor_is_rejected_rather_than_replayed_empty() 
             .send_request(request)
             .block_task()
             .await
-            .expect_err("Bee retains no history to replay");
+            .expect_err("Bee does not retain ACP updates to replay");
 
         assert_eq!(error.code, ErrorCode::InvalidParams);
         Ok(())
