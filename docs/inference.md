@@ -61,7 +61,7 @@ below. This does not implement ACP update replay or disk persistence.
 The SDK-free `agent::run` accepts tool definitions and an injected `Executor`, with correlated call/result history.
 The [native tool contract](tools.md) provides typed schema validation, registration, bounded results, and
 `agent::NativeExecutor` for this seam.
-Normal ACP sessions advertise and execute the shipped `bash`, `read`, `glob`, `list`, `write`, and `edit` tools
+Normal ACP sessions advertise and execute the shipped `bash`, `read`, `glob`, `grep`, `list`, `write`, and `edit` tools
 through this
 same interface.
 The ACP boundary requests client permission before Bash execution and adds `ask_user`

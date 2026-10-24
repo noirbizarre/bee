@@ -124,6 +124,16 @@ Bee's own deterministic workflows cover native/MCP execution and production ACP
 permission and elicitation callers. A passing TCK run
 would still not be an official certification or complete protocol coverage.
 
+## Native content search
+
+The shipped `grep` tool implements [#30](https://github.com/noirbizarre/bee/issues/30)
+with embedded ripgrep matcher crates, ignore-aware directory traversal, line-numbered
+results and explicit truncation. `tests/grep.rs` covers filtering, regex errors, binary
+files, bounds, symlinks and cancellation. `tests/inference.rs` covers all three provider
+protocols and scoped guidance; `tests/e2e.rs` searches through the real stdio binary
+with an empty executable search path and verifies retained correlated results.
+See the [search contract and dependency licenses](tools.md#built-in-content-search).
+
 ## Unsupported and deferred behavior
 
 - **ACP update replay:** model context survives close/resume in memory, but ACP event
@@ -131,17 +141,13 @@ would still not be an official certification or complete protocol coverage.
 - **MCP interaction:** client-hosted MCP denials are ordinary tool errors; they are not
   ACP permission outcomes. MCP `input_required` and task continuations are rejected.
   Only client-hosted ACP MCP attachments are advertised, not direct stdio/HTTP MCP servers.
-- **Native content search:** the shipped catalog is `bash`, `read`, `glob`, `list`,
-  `write`, `edit`. Embedded native content search awaits
-  [#30](https://github.com/noirbizarre/bee/issues/30). Filename globbing and Bash do not
-  satisfy that acceptance item.
 - **Other optional surfaces:** image/audio/embedded prompt context, session deletion,
   forks and additional directories are not advertised. Resource links are references
   only and are never fetched.
 
 Issue [#46](https://github.com/noirbizarre/bee/issues/46) adds production permission and
 elicitation coverage for [#13](https://github.com/noirbizarre/bee/issues/13), as mapped
-above. Native search and replay remain outstanding; this is not full ACPv2 conformance.
+above. Replay remains outstanding; this is not full ACPv2 conformance.
 
 ## Client evidence
 

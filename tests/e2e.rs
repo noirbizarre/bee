@@ -15,6 +15,10 @@ use support::{Response, Server};
 const TIMEOUT: Duration = Duration::from_secs(20);
 
 fn subprocess(root: &tempfile::TempDir, url: &str) -> AcpAgent {
+    subprocess_with_path(root, url, None)
+}
+
+fn subprocess_with_path(root: &tempfile::TempDir, url: &str, path: Option<&str>) -> AcpAgent {
     let config = root.path().join("bee.toml");
     std::fs::write(
         &config,
@@ -23,10 +27,20 @@ fn subprocess(root: &tempfile::TempDir, url: &str) -> AcpAgent {
         )),
     )
     .unwrap();
-    AcpAgent::new(
+    let shell = support::bash_executable();
+    // Resolve the launcher before removing the child's executable search path.
+    let shell = if path.is_some() && !shell.is_absolute() {
+        std::env::split_paths(&std::env::var_os("PATH").unwrap())
+            .map(|directory| directory.join(&shell))
+            .find(|candidate| candidate.is_file())
+            .expect("Bash is installed on the test host")
+    } else {
+        shell
+    };
+    let mut launch =
         // The SDK has no cwd setting. A positional-argument launcher keeps both
         // project configuration and HOME isolated without process-global chdir.
-        AcpAgentConfig::new(support::bash_executable())
+        AcpAgentConfig::new(shell)
             .args([
                 "--noprofile",
                 "--norc",
@@ -38,9 +52,12 @@ fn subprocess(root: &tempfile::TempDir, url: &str) -> AcpAgent {
             ])
             .env("HOME", root.path().to_str().unwrap())
             .env("XDG_CONFIG_HOME", root.path().join("xdg").to_str().unwrap())
-            .env("BEE_CONFIG", config.to_str().unwrap()),
-    )
-    .with_debug(|line, direction| {
+            .env("BEE_CONFIG", config.to_str().unwrap());
+    if let Some(path) = path {
+        // Restrict only the child; parallel tests retain their normal environment.
+        launch = launch.env("PATH", path);
+    }
+    AcpAgent::new(launch).with_debug(|line, direction| {
         if matches!(direction, LineDirection::Stdout) {
             let message: Value = serde_json::from_str(line).expect("stdout is JSON-RPC only");
             assert_eq!(message["jsonrpc"], "2.0");
@@ -50,6 +67,57 @@ fn subprocess(root: &tempfile::TempDir, url: &str) -> AcpAgent {
 
 fn call(id: &str, name: &str, arguments: Value) -> Value {
     json!({"choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":id,"type":"function","function":{"name":name,"arguments":arguments.to_string()}}]},"finish_reason":"tool_calls"}]})
+}
+
+#[tokio::test]
+async fn the_binary_searches_without_rg_on_path_and_retains_correlated_results() {
+    let isolated = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(workspace.path().join("note.txt"), "embedded needle\n").unwrap();
+    let http = Server::start(vec![
+        Response::json(call(
+            "search",
+            "grep",
+            json!({"pattern":"needle","include":["*.txt"]}),
+        )),
+        Response::json(support::chat_text("found")),
+        Response::json(support::chat_text("remembered")),
+    ]);
+    let (tx, mut updates) = tokio::sync::mpsc::unbounded_channel();
+    let client = Client.v2().on_receive_notification(
+        async move |update: v2::UpdateSessionNotification, _| {
+            tx.send(update).map_err(Error::into_internal_error)
+        },
+        agent_client_protocol::on_receive_notification!(),
+    );
+    tokio::time::timeout(
+        TIMEOUT,
+        client.connect_with(
+            subprocess_with_path(&isolated, &http.url, Some("")),
+            async |connection| {
+                initialize(&connection).await?;
+                let session = connection
+                    .send_request(v2::NewSessionRequest::new(workspace.path()))
+                    .block_task()
+                    .await?
+                    .session_id;
+                turn(&connection, &mut updates, &session, "found").await?;
+                turn(&connection, &mut updates, &session, "remembered").await?;
+                Ok(())
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    http.request();
+    let searched = result(&http.request(), "search");
+    assert_eq!(
+        searched,
+        json!({"data":{"matches":[{"path":"note.txt","line_number":1,"line":"embedded needle"}],"truncated":false,"skipped_binary_files":0}})
+    );
+    assert_eq!(result(&http.request(), "search"), searched);
+    http.assert_no_more_requests();
 }
 
 fn result(request: &support::Request, id: &str) -> Value {

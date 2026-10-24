@@ -410,6 +410,68 @@ async fn scoped_guidance_and_skill_activation_reach_the_model_before_batched_mut
     );
 }
 
+#[rstest::rstest]
+#[case("openai-chat")]
+#[case("openai-responses")]
+#[case("anthropic-messages")]
+#[tokio::test]
+async fn search_defers_for_root_guidance_without_activating_matched_skills(#[case] protocol: &str) {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join("sub")).unwrap();
+    std::fs::create_dir_all(root.path().join(".agents/skills/demo")).unwrap();
+    std::fs::write(root.path().join("AGENTS.md"), "ROOT-GUIDANCE").unwrap();
+    std::fs::write(root.path().join("sub/AGENTS.md"), "SEARCH-ROOT-GUIDANCE").unwrap();
+    std::fs::write(root.path().join("sub/file"), "needle").unwrap();
+    std::fs::write(
+        root.path().join(".agents/skills/demo/SKILL.md"),
+        "---\nname: demo\ndescription: Demo skill\n---\nACTIVATED-BODY\n",
+    )
+    .unwrap();
+    let search = json!({"pattern":"needle","path":"sub"});
+    let server = Server::start(vec![
+        Response::json(native_call(protocol, "deferred", "grep", search.clone())),
+        Response::json(native_call(protocol, "searched", "grep", search)),
+        Response::json(native_call(
+            protocol,
+            "skill",
+            "grep",
+            json!({"pattern":"ACTIVATED-BODY","path":".agents/skills/demo"}),
+        )),
+        Response::json(answer(protocol, "done")),
+    ]);
+    let runtime = bee::acp::Runtime::builtins(bee::agent::Limits::default())
+        .unwrap()
+        .with_instructions(bee::instructions::Sources::new(None));
+    assert_eq!(
+        native_turns(
+            providers(protocol, &server.url, ""),
+            runtime,
+            vec![(root.path().into(), vec![true])]
+        )
+        .await,
+        ["done"]
+    );
+    let first = server.request();
+    assert!(!instruction_text(protocol, &first.body).contains("SEARCH-ROOT-GUIDANCE"));
+    let second = server.request();
+    assert!(instruction_text(protocol, &second.body).contains("SEARCH-ROOT-GUIDANCE"));
+    assert_eq!(
+        native_result(protocol, &second.body, "deferred")["error"]["code"],
+        "guidance_required"
+    );
+    let third = server.request();
+    assert_eq!(
+        native_result(protocol, &third.body, "searched")["data"]["matches"][0]["path"],
+        "file"
+    );
+    let fourth = server.request();
+    assert_eq!(
+        native_result(protocol, &fourth.body, "skill")["data"]["matches"][0]["line"],
+        "ACTIVATED-BODY"
+    );
+    assert!(!instruction_text(protocol, &fourth.body).contains("ACTIVATED-BODY"));
+}
+
 /// Drive ordinary ACP prompts, retaining each session's history between prompts.
 async fn native_turns(
     profiles: bee::provider::Providers,
@@ -834,6 +896,12 @@ async fn acp_executes_shipped_tools_in_the_session_directory_and_retains_results
             "bash",
             json!({"command":"printf '%s' \"$(<created.txt)\"; printf bash-stderr >&2; exit 7"}),
         )),
+        Response::json(native_call(
+            protocol,
+            "h",
+            "grep",
+            json!({"pattern":"^after-edit$","include":["*.txt"]}),
+        )),
         Response::json(answer(protocol, "done")),
         Response::json(answer(protocol, "remembered")),
     ]);
@@ -860,7 +928,10 @@ async fn acp_executes_shipped_tools_in_the_session_directory_and_retains_results
             }
         })
         .collect();
-    assert_eq!(names, ["bash", "edit", "glob", "list", "read", "write"]);
+    assert_eq!(
+        names,
+        ["bash", "edit", "glob", "grep", "list", "read", "write"]
+    );
     for id in ["a", "b"] {
         let body = server.request().body.to_string();
         assert!(body.contains("note.txt"));
@@ -884,7 +955,13 @@ async fn acp_executes_shipped_tools_in_the_session_directory_and_retains_results
     assert_eq!(bash_result["data"]["stdout"], "after-edit");
     assert_eq!(bash_result["data"]["stderr"], "bash-stderr");
     assert_eq!(bash_result["data"]["exit_code"], 7);
+    let grep_result = native_result(protocol, &server.request().body, "h");
+    assert_eq!(
+        grep_result["data"]["matches"],
+        json!([{"path":"created.txt","line_number":1,"line":"after-edit"}])
+    );
     let next = server.request();
+    assert_eq!(native_result(protocol, &next.body, "h"), grep_result);
     assert!(next.body.to_string().contains("session-specific-content"));
     assert!(next.body.to_string().contains("after-edit"));
     assert!(next.body.to_string().contains("question 1"));
