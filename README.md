@@ -35,6 +35,8 @@ retained in memory, with oldest-whole-turn truncation when explicit model contex
 context overflow fails explicitly. ACP update replay is unsupported. Prompts accept text and resource links (references
 only, never fetched). The SDK-free loop supports injected function executors; production ACP executes native
 `bash`, `read`, `glob`, `list`, `write`, and `edit` tools in each session's working directory.
+It also discovers and invokes client-hosted MCP tools through ACPv2's `session.mcp.acp` transport, alongside native
+tools. The client owns MCP configuration and permission policy; denials are returned to the model as tool errors.
 All three protocols use native wire adapters, with provider identity, model, endpoint and authentication kept separate.
 
 The "Scope" and "Non-goals" sections describe the intended design, not current behaviour.
@@ -74,8 +76,8 @@ leaves everything about presentation and orchestration to the client. The planne
 - configuration and credential handling
 - error handling and observability
 
-Protocol integration, cancellable inference, configuration and credential handling are implemented. Production tool
-execution and richer observability remain future work.
+Protocol integration, cancellable inference, native and client-hosted MCP tool execution, configuration and credential
+handling are implemented. Richer observability remains future work.
 
 ## Non-goals
 

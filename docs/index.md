@@ -20,7 +20,9 @@ Prompts accept text and resource links, represented as references without fetchi
 
 The bounded SDK-free loop supports injected function executors. Normal ACP sessions advertise and execute the native
 `bash`, `read`, `glob`, `list`, `write`, and `edit` tools across all three backends, using each session's working directory.
-See [native tools](tools.md) for their contract and execution context.
+Client-hosted MCP tools are discovered and invoked through ACPv2's `session.mcp.acp` transport alongside the native
+catalog. The client supplies server attachments and enforces permissions. See [tools](tools.md) for the contracts,
+execution context and supported MCP subset.
 
 ## Configuration
 

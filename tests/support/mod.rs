@@ -85,11 +85,21 @@ pub struct Server {
 
 impl Server {
     pub fn start(responses: Vec<Response>) -> Self {
+        let count = responses.len();
+        let mut responses = responses.into_iter();
+        Self::respond(count, move |_| responses.next().unwrap())
+    }
+
+    /// Let a fake model choose a tool from the catalog it actually receives.
+    pub fn respond(
+        count: usize,
+        mut respond: impl FnMut(&Request) -> Response + Send + 'static,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/prefix", listener.local_addr().unwrap());
         let (tx, requests) = mpsc::channel();
         std::thread::spawn(move || {
-            for response in responses {
+            for _ in 0..count {
                 let (mut socket, _) = listener.accept().unwrap();
                 socket
                     .set_read_timeout(Some(Duration::from_secs(10)))
@@ -111,11 +121,12 @@ impl Server {
                     .unwrap();
                 let mut body = vec![0; len];
                 socket.read_exact(&mut body).unwrap();
-                tx.send(Request {
+                let request = Request {
                     head,
                     body: serde_json::from_slice(&body).unwrap(),
-                })
-                .unwrap();
+                };
+                let response = respond(&request);
+                tx.send(request).unwrap();
                 std::thread::sleep(response.delay);
                 let head = format!(
                     "HTTP/1.1 {} Fixture\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",

@@ -1,10 +1,57 @@
-# Native tools
+# Tools
 
 Bee's SDK-free `tool` module defines typed native operations, their advertised
 schemas, and their execution context. `agent::NativeExecutor` connects a registry
 to the bounded inference loop. Normal ACP sessions advertise and execute the
 shipped `bash`, `read`, `glob`, `list`, `write`, and `edit` tools. Their execution base is the session cwd,
 not the launch directory used to load configuration.
+
+## Client-hosted MCP tools
+
+Bee advertises `session.mcp.acp`. The client hosts or proxies MCP servers and declares their opaque server IDs in
+`session/new` or `session/resume`. Bee rejects HTTP, stdio and unknown server transports; it does not launch MCP
+processes or maintain MCP configuration. A successful resume replaces the session's attachments, including clearing
+them when the list is empty. Closing removes attachments; retained conversation context does not grant access to old
+servers. Failed resume requests leave attachments unchanged.
+
+At the start of each prompt, Bee snapshots its session attachments and discovers the current catalog with `tools/list`,
+including pagination. Discovery runs outside ACP dispatch so cancellation remains responsive. Discovery failure fails
+that turn before contacting the model, rather than silently offering a partial catalog. A later prompt can retry.
+Only the session's declared servers are considered, even if another session attached other servers on the connection.
+
+MCP tools appear alongside native tools under portable names: `mcp_` followed by 56 hexadecimal characters from a
+SHA-256 of the JSON-encoded server-ID/tool-name pair. Names are stable under discovery reordering; changed server IDs
+produce changed aliases. Descriptions include the original server and tool names. An explicit routing table maps each
+alias to its original server ID and tool name, so identical tool names on different servers do not shadow each other.
+Any alias collision, including with a native tool, fails discovery.
+
+Object input schemas are compiled offline using JSON Schema Draft 2020-12. Local references are supported; unresolved
+external references and malformed schemas fail discovery. Arguments are validated before invocation and forwarded as
+JSON without stringifying their fields. Calls use `mcp/message` with `tools/call`, fresh logical request IDs, and the
+required MCP `2026-07-28` version and empty client capabilities in inner `params._meta`. There is no MCP `initialize`.
+
+Completed results retain the entire JSON envelope: `{"result": ...}` or `{"error": ...}`, plus carrier metadata if
+present. Content blocks, structured content (including null or scalar values), result metadata and inner error
+code/message/data/extensions are preserved. This JSON becomes the provider's native correlated tool-result string;
+Anthropic additionally receives `is_error`. Non-text MCP content is preserved as JSON, not rendered as model-native
+images or resources.
+
+**Permissions belong to the client/server.** Bee does not request approval before each call or interpret annotations
+as authorization. Inner MCP errors, permission denials, tools that disappear after discovery and `isError: true`
+results become ordinary tool errors for model recovery. Outer ACP failures, malformed results and timeouts become
+sanitized local error envelopes. Interactive `input_required`, tasks and unknown result types are explicit unsupported
+outcomes; Bee does not replay their state or fulfill input requests.
+
+The initial bounds are 32 servers per session (IDs and names up to 1024 bytes), 64 discovery pages per server,
+256 MCP tools, 1 MiB of aggregate serialized discovery results, depth 32 for discovery JSON, tool names up to 1024
+bytes, and cursors up to 4096 bytes. Discovery has a total 30-second deadline; each call has a 120-second deadline.
+These checks apply after SDK decoding; they are not transport allocation limits or a schema-compilation sandbox.
+Results exceeding the 1 MiB tool-output budget are replaced by a complete error envelope, never truncated JSON.
+Calls also share the normal turn step/call budgets and context accounting with native tools.
+
+Cancellation or close drops pending discovery/call futures and triggers SDK request cancellation. Remote cancellation
+is cooperative and cannot undo side effects. Bee never automatically retries an MCP call. Cancelled and failed turns
+are excluded from future model context under the normal turn contract.
 
 ## Implement and register a tool
 

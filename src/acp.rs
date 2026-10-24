@@ -1,7 +1,7 @@
 //! The ACPv2 boundary: the only module that imports the ACP Rust SDK.
 //!
-//! Keeping the SDK behind one file means an upgrade, which is likely while v2
-//! is a draft, touches one file instead of the whole crate.
+//! Keeping the SDK behind this boundary and its private submodules confines
+//! draft-protocol upgrades instead of spreading them through the core.
 //!
 //! Two layers, so the agent never learns which transport carries it (ADR-003):
 //! [`agent`] is the transport-free core, [`serve`] runs it over any transport
@@ -20,6 +20,8 @@ use futures::future::{AbortHandle, AbortRegistration, Abortable, FutureExt};
 use crate::provider::Providers;
 use crate::session::{SessionError, Sessions, Settings};
 use crate::{Error, Result};
+
+mod mcp;
 
 /// Immutable execution policy and complete native catalog for one connection.
 pub struct Runtime {
@@ -77,6 +79,8 @@ pub struct Reply {
     token: u64,
     input: Option<crate::session::InferenceInput>,
     completed: Arc<Mutex<Option<crate::agent::Outcome>>>,
+    mcp: Arc<Mutex<mcp::Bindings>>,
+    servers: Vec<mcp::Server>,
 }
 
 impl Reply {
@@ -129,12 +133,25 @@ async fn inference(reply: Reply, runtime: Arc<Runtime>) -> std::result::Result<(
     let _guard = cancellation.clone().drop_guard();
     let context = crate::tool::Context::new(cwd, cancellation, crate::tool::MAX_OUTPUT_BYTES)
         .map_err(|error| TurnFailure::new(error.to_string()))?;
-    let executor = crate::agent::NativeExecutor::new(&runtime.tools, context);
-    let tools = executor.definitions();
+    let native = crate::agent::NativeExecutor::new(&runtime.tools, context);
+    let catalog = mcp::Catalog::discover(
+        &reply.connection,
+        &reply.mcp,
+        &reply.servers,
+        native.definitions(),
+    )
+    .await
+    .map_err(TurnFailure::new)?;
+    let executor = mcp::Composite {
+        native,
+        catalog,
+        connection: &reply.connection,
+        bindings: &reply.mcp,
+    };
     let outcome = crate::agent::run_with_limits(
         &model,
         messages,
-        &tools,
+        executor.definitions(),
         Some(&executor),
         &mut |text| reply.text(text),
         runtime.limits,
@@ -274,6 +291,7 @@ where
 {
     let body = Arc::new(body);
     let sessions = Arc::new(Mutex::new(Sessions::with_providers(providers)));
+    let mcp = Arc::new(Mutex::new(mcp::Bindings::default()));
 
     // `Agent.v2()`, not `Agent.builder()`: the latter is the stable v1 surface.
     Agent
@@ -283,9 +301,7 @@ where
             async |request: v2::InitializeRequest,
                    responder: Responder<v2::InitializeResponse>,
                    _connection: V2ConnectionTo<Client>| {
-                // Only the baseline session lifecycle. `prompt`, `mcp`, `delete`
-                // and `additionalDirectories` stay unset: advertising one is a
-                // promise a client acts on, and none of them is implemented.
+                // Advertise only transports we actually route, not HTTP or subprocess MCP.
                 responder.respond(
                     v2::InitializeResponse::new(
                         // Hand back the version the SDK gives us rather than
@@ -295,7 +311,10 @@ where
                         v2::Implementation::new("bee", env!("CARGO_PKG_VERSION")),
                     )
                     .capabilities(
-                        v2::AgentCapabilities::new().session(v2::SessionCapabilities::new()),
+                        v2::AgentCapabilities::new()
+                            .session(v2::SessionCapabilities::new().mcp(
+                                v2::McpCapabilities::new().acp(v2::McpAcpCapabilities::new()),
+                            )),
                     ),
                 )
             },
@@ -305,14 +324,18 @@ where
         .on_receive_request(
             {
                 let sessions = Arc::clone(&sessions);
+                let mcp = Arc::clone(&mcp);
                 async move |request: v2::NewSessionRequest,
                             responder: Responder<v2::NewSessionResponse>,
                             _connection: V2ConnectionTo<Client>| {
-                    // `mcp_servers` is accepted and ignored: Bee advertises no
-                    // MCP capability, and wiring them up is a later issue.
+                    let servers = match mcp::declarations(request.mcp_servers) {
+                        Ok(servers) => servers,
+                        Err(reason) => return responder.respond_with_error(invalid_params(reason)),
+                    };
                     // One guard, so the options describe the session just made.
                     let mut sessions = lock(&sessions);
                     let id = sessions.create(request.cwd.into_inner());
+                    lock(&mcp).sessions.insert(id.clone(), servers);
                     let options = config_options(sessions.settings(&id).ok().flatten());
                     responder.respond(v2::NewSessionResponse::new(id).config_options(options))
                 }
@@ -346,6 +369,7 @@ where
         .on_receive_request(
             {
                 let sessions = Arc::clone(&sessions);
+                let mcp = Arc::clone(&mcp);
                 async move |request: v2::ResumeSessionRequest,
                             responder: Responder<v2::ResumeSessionResponse>,
                             connection: V2ConnectionTo<Client>| {
@@ -358,12 +382,18 @@ where
                         ));
                     }
                     let id = request.session_id.to_string();
+                    let servers = match mcp::declarations(request.mcp_servers) {
+                        Ok(servers) => servers,
+                        Err(reason) => return responder.respond_with_error(invalid_params(reason)),
+                    };
                     let cwd: &Path = request.cwd.as_ref();
                     let options = {
                         let mut sessions = lock(&sessions);
                         if let Err(error) = sessions.resume(&id, cwd) {
                             return responder.respond_with_error(session_error(error));
                         }
+                        // Always replace, including an empty list: old routes are not authorization.
+                        lock(&mcp).sessions.insert(id.clone(), servers);
                         // The session keeps what the client chose before it
                         // was closed, so the options report that, not the defaults.
                         config_options(sessions.settings(&id).ok().flatten())
@@ -417,6 +447,7 @@ where
         .on_receive_request(
             {
                 let sessions = Arc::clone(&sessions);
+                let mcp = Arc::clone(&mcp);
                 async move |request: v2::CloseSessionRequest,
                             responder: Responder<v2::CloseSessionResponse>,
                             connection: V2ConnectionTo<Client>| {
@@ -426,6 +457,7 @@ where
                     let mut sessions = lock(&sessions);
                     match sessions.close(&request.session_id.to_string()) {
                         Ok(cancelled) => {
+                            lock(&mcp).sessions.remove(&request.session_id.to_string());
                             if cancelled {
                                 // Closing cancels running work, and the protocol
                                 // wants its `cancelled` idle *before* the close
@@ -449,6 +481,7 @@ where
         .on_receive_request(
             {
                 let sessions = Arc::clone(&sessions);
+                let mcp = Arc::clone(&mcp);
                 async move |request: v2::PromptRequest,
                             responder: Responder<v2::PromptResponse>,
                             connection: V2ConnectionTo<Client>| {
@@ -473,6 +506,8 @@ where
                         Err(error) => return responder.respond_with_error(session_error(error)),
                     };
                     let mut input = registry.inference(&id);
+                    // Session lock precedes MCP lock everywhere; snapshot before accepting changes.
+                    let servers = lock(&mcp).sessions.get(&id).cloned().unwrap_or_default();
                     if let Some(input) = &mut input {
                         let content = prompt_text(&request.prompt);
                         input.messages.push(crate::llm::Message::User(content));
@@ -523,6 +558,8 @@ where
                         token: turn.token,
                         input,
                         completed: Arc::new(Mutex::new(None)),
+                        mcp: Arc::clone(&mcp),
+                        servers,
                     };
                     // A turn runs off the dispatch loop: handlers block it, and
                     // a `session/cancel` queued behind a running prompt would
