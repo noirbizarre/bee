@@ -7,7 +7,8 @@
 //! ADR-007.
 //!
 //! Profiles are read from the merged [`Config`] (ADR-006) under `provider`
-//! (the default profile) and `providers.<name>`. Nothing is sent anywhere yet:
+//! (the default profile) and `providers.<name>`, optionally laid over a preset
+//! (ADR-009). Nothing is sent anywhere yet:
 //! this module only describes endpoints. A credential is a *reference* to where
 //! the secret lives; resolving it is `auth` (ADR-008).
 //!
@@ -18,14 +19,29 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::Arc;
 
 use toml::{Table, Value};
 
 use crate::config::Config;
 use crate::error::{Error, Result};
+use crate::preset::{Catalog, LoginSpec, SpecError, deep_merge};
 
 /// The keys a profile table accepts.
 const PROFILE_KEYS: &[&str] = &[
+    "preset",
+    "protocol",
+    "base_url",
+    "model",
+    "models",
+    "credential",
+    "headers",
+    "options",
+];
+
+/// The keys a preset table accepts: a profile's, but a preset cannot be built
+/// on another, so chains and cycles cannot exist.
+const PRESET_KEYS: &[&str] = &[
     "protocol",
     "base_url",
     "model",
@@ -99,9 +115,10 @@ pub enum CredentialSource {
     Env(String),
     /// Bee's credential store, written by `bee auth login`.
     Store {
-        /// The browser sign-in `bee auth login` may run, if the provider has
-        /// one. Without it, only a pasted token can be stored.
-        login: Option<LoginFlow>,
+        /// The name of the browser sign-in `bee auth login` may run, a
+        /// `login_flows` entry (ADR-009). Without it, only a pasted token can
+        /// be stored.
+        login: Option<String>,
     },
 }
 
@@ -113,35 +130,6 @@ impl CredentialSource {
             Self::Env(_) => "env",
             Self::Store { .. } => "store",
         }
-    }
-}
-
-/// A provider's own browser sign-in.
-///
-/// One variant per provider that has such a flow, because the flows differ in
-/// what they return and how it is refreshed: there is no universal OAuth
-/// client to configure (ADR-008).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum LoginFlow {
-    /// OpenRouter's PKCE authorization, which returns an API key.
-    OpenRouter,
-}
-
-impl LoginFlow {
-    /// Every flow, in the order diagnostics list them.
-    pub const ALL: [Self; 1] = [Self::OpenRouter];
-
-    /// The name used in configuration.
-    #[must_use]
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::OpenRouter => "openrouter",
-        }
-    }
-
-    fn from_name(name: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|flow| flow.name() == name)
     }
 }
 
@@ -207,6 +195,9 @@ pub struct Profile {
     model: Option<String>,
     models: Vec<String>,
     credential: Option<CredentialSource>,
+    // The sign-in `credential.login` names, resolved when the profile was read
+    // so a dangling or malformed flow stops Bee at launch.
+    login: Option<Arc<LoginSpec>>,
     headers: Vec<(String, String)>,
     options: ProtocolOptions,
 }
@@ -298,6 +289,12 @@ impl Profile {
         self.credential.as_ref()
     }
 
+    /// The browser sign-in this profile can run, if its `credential` names one.
+    #[must_use]
+    pub fn login_spec(&self) -> Option<&LoginSpec> {
+        self.login.as_deref()
+    }
+
     /// The custom headers, sorted by name. Only this profile's requests carry
     /// them.
     #[must_use]
@@ -332,7 +329,14 @@ impl Providers {
     /// type, an unknown key, an unknown protocol, a missing `protocol`, an
     /// unusable value, or a default `provider` that is unknown or missing.
     pub fn from_config(config: &Config) -> Result<Self> {
-        let reader = Reader { config };
+        // Built before any profile is read, so a profile can name a preset or
+        // a login flow the user defined (ADR-009).
+        let catalog = Catalog::from_config(config)?;
+        let reader = Reader {
+            config,
+            catalog: &catalog,
+            fallback: "<unknown>".to_owned(),
+        };
 
         let default = match config.get("provider") {
             None => None,
@@ -429,6 +433,9 @@ pub fn check_model_id(model: &str) -> std::result::Result<(), &'static str> {
 /// Reads one configuration, naming the file of whatever goes wrong.
 struct Reader<'a> {
     config: &'a Config,
+    catalog: &'a Catalog,
+    // Where a value no file set came from: the preset that supplied it.
+    fallback: String,
 }
 
 impl Reader<'_> {
@@ -436,7 +443,15 @@ impl Reader<'_> {
     fn path(&self, key: &str) -> String {
         self.config
             .origin(key)
-            .map_or_else(|| "<unknown>".to_owned(), |path| path.display().to_string())
+            .map_or_else(|| self.fallback.clone(), |path| path.display().to_string())
+    }
+
+    /// Where the preset `name` is defined.
+    fn preset_origin(&self, name: &str) -> String {
+        match self.config.origin(&format!("presets.{name}")) {
+            Some(path) => path.display().to_string(),
+            None => format!("<built-in preset {name}>"),
+        }
     }
 
     fn wrong_type(&self, key: &str, expected: &'static str, found: &Value) -> Error {
@@ -497,9 +512,39 @@ impl Reader<'_> {
                 "a profile name must be non-empty and free of control characters",
             ));
         }
-        let table = self.table(&key, value)?;
-        self.only_keys(&key, table, PROFILE_KEYS)?;
+        let own = self.table(&key, value)?;
+        self.only_keys(&key, own, PROFILE_KEYS)?;
 
+        let Some(preset) = own.get("preset") else {
+            return self.profile_from(name, &key, own);
+        };
+        let preset_key = format!("{key}.preset");
+        let preset_name = self.string(&preset_key, preset)?;
+        // Not echoed when unknown: the likeliest mistake is a pasted key.
+        let Some(preset_table) = self.catalog.preset(preset_name) else {
+            return Err(Error::ProviderUnknownPreset {
+                path: self.path(&preset_key),
+                key: preset_key,
+                available: self.catalog.preset_names().join(", "),
+            });
+        };
+
+        // Diagnostics about what the preset supplies name the preset, so the
+        // user is not told "<unknown>" about a file they never wrote.
+        let inner = Reader {
+            config: self.config,
+            catalog: self.catalog,
+            fallback: self.preset_origin(preset_name),
+        };
+        inner.only_keys(&format!("presets.{preset_name}"), preset_table, PRESET_KEYS)?;
+        let combined = overlay(preset_table, own);
+        inner.profile_from(name, &key, &combined)
+    }
+
+    /// Read a profile from its final table: the preset, if any, already laid
+    /// under the profile's own keys.
+    fn profile_from(&self, name: &str, key: &str, table: &Table) -> Result<Profile> {
+        let key = key.to_owned();
         let protocol_key = format!("{key}.protocol");
         let protocol = match table.get("protocol") {
             None => {
@@ -557,10 +602,13 @@ impl Reader<'_> {
             }
         };
 
-        let credential = table
-            .get("credential")
-            .map(|value| self.credential(&format!("{key}.credential"), value))
-            .transpose()?;
+        let (credential, login) = match table.get("credential") {
+            None => (None, None),
+            Some(value) => {
+                let (credential, login) = self.credential(&format!("{key}.credential"), value)?;
+                (Some(credential), login)
+            }
+        };
 
         let headers = match table.get("headers") {
             None => Vec::new(),
@@ -579,17 +627,23 @@ impl Reader<'_> {
             model,
             models,
             credential,
+            login,
             headers,
             options,
         })
     }
 
-    fn credential(&self, key: &str, value: &Value) -> Result<CredentialSource> {
+    fn credential(
+        &self,
+        key: &str,
+        value: &Value,
+    ) -> Result<(CredentialSource, Option<Arc<LoginSpec>>)> {
         let table = self.table(key, value)?;
         self.only_keys(key, table, &["env", "store", "login"])?;
+        let login_key = format!("{key}.login");
         let login = table
             .get("login")
-            .map(|value| self.login_flow(&format!("{key}.login"), value))
+            .map(|value| self.string(&login_key, value))
             .transpose()?;
         match (table.get("env"), table.get("store")) {
             (None, None) => {
@@ -604,7 +658,7 @@ impl Reader<'_> {
                 // with the store.
                 if login.is_some() {
                     return Err(self.invalid(
-                        &format!("{key}.login"),
+                        &login_key,
                         "`login` signs in to the credential store, so it needs `store = true`, not `env`",
                     ));
                 }
@@ -624,7 +678,7 @@ impl Reader<'_> {
                          underscores), not the credential itself",
                     ));
                 }
-                Ok(CredentialSource::Env(name.to_owned()))
+                Ok((CredentialSource::Env(name.to_owned()), None))
             }
             (None, Some(store)) => {
                 let store_key = format!("{key}.store");
@@ -640,18 +694,42 @@ impl Reader<'_> {
                         "`store` can only be `true`; leave `credential` out to go without one",
                     ));
                 }
-                Ok(CredentialSource::Store { login })
+                let spec = login
+                    .map(|name| self.login_spec(&login_key, name).map(Arc::new))
+                    .transpose()?;
+                Ok((
+                    CredentialSource::Store {
+                        login: login.map(str::to_owned),
+                    },
+                    spec,
+                ))
             }
         }
     }
 
-    fn login_flow(&self, key: &str, value: &Value) -> Result<LoginFlow> {
+    /// The login flow `name`, which `key` names.
+    fn login_spec(&self, key: &str, name: &str) -> Result<LoginSpec> {
         // Not echoed when unknown: the likeliest mistake is a pasted token.
-        LoginFlow::from_name(self.string(key, value)?).ok_or_else(|| {
-            self.invalid(
-                key,
-                "`login` names a browser sign-in Bee does not implement (supported: openrouter)",
-            )
+        let Some(spec) = self.catalog.login_spec(name) else {
+            return Err(Error::ProviderUnknownLogin {
+                path: self.path(key),
+                key: key.to_owned(),
+                available: self.catalog.login_names().join(", "),
+            });
+        };
+        spec.map_err(|error| match error {
+            SpecError::Invalid { key: rel, reason } => {
+                let key = format!("login_flows.{name}.{rel}");
+                self.invalid(&key, reason)
+            }
+            SpecError::Unknown { key: rel, allowed } => {
+                let key = format!("login_flows.{name}.{rel}");
+                Error::ProviderUnknownKey {
+                    path: self.path(&key),
+                    key,
+                    allowed,
+                }
+            }
         })
     }
 
@@ -746,6 +824,30 @@ impl Reader<'_> {
     }
 }
 
+/// Lay a profile's own keys over its preset's.
+///
+/// Scalars and arrays (`model`, `models`) replace; `headers` and `options` merge
+/// key by key, so a profile adds one header without restating the preset's.
+/// `credential` is replaced **whole**: merging would let `{ env = ".." }` end up
+/// beside the preset's `{ store = true }`, which is two sources, and the
+/// profile's choice of one must win outright.
+fn overlay(preset: &Table, own: &Table) -> Table {
+    let mut combined = preset.clone();
+    for (key, value) in own {
+        match (key.as_str(), combined.get_mut(key), value) {
+            ("preset", _, _) => {}
+            ("credential", _, _) => {
+                combined.insert(key.clone(), value.clone());
+            }
+            (_, Some(Value::Table(base)), Value::Table(over)) => deep_merge(base, over),
+            _ => {
+                combined.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    combined
+}
+
 /// Whether `name` is an HTTP token, the only thing a header name can be.
 fn is_header_name(name: &str) -> bool {
     !name.is_empty()
@@ -760,7 +862,7 @@ fn is_header_name(name: &str) -> bool {
 /// a confusing connection error: no URL crate is needed for that, and none is
 /// in the tree. The reasons are fixed text, so a URL that holds a secret is
 /// never repeated.
-fn normalize_base_url(url: &str) -> std::result::Result<String, &'static str> {
+pub(crate) fn normalize_base_url(url: &str) -> std::result::Result<String, &'static str> {
     if url.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return Err("a base URL must not contain whitespace or control characters");
     }

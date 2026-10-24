@@ -17,6 +17,7 @@ pub mod config;
 pub mod error;
 pub mod http;
 pub mod login;
+pub mod preset;
 pub mod provider;
 pub mod session;
 

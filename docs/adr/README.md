@@ -31,3 +31,4 @@ by editing the old one. The history is the value.
   among
 - [ADR-008](008-provider-authentication.md) — Authenticate providers through credential sources, with one browser
   sign-in per provider that has one
+- [ADR-009](009-provider-presets-and-login-flows.md) — Describe provider presets and browser sign-ins as data

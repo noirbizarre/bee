@@ -20,7 +20,8 @@ use bee::auth::{
 };
 use bee::config::{Config, Environment, project_config_path};
 use bee::http::{Http, HttpResponse, Unreachable};
-use bee::login::{self, CallbackListener, Code, OpenRouter, Pkce};
+use bee::login::{self, CallbackListener, Code, Pkce};
+use bee::preset::{Catalog, LoginSpec};
 use bee::provider::{Profile, Protocol, Providers};
 use pretty_assertions::assert_eq;
 use rstest::rstest;
@@ -80,6 +81,14 @@ impl Sandbox {
         fs::write(project_config_path(&project), text).unwrap();
         Providers::from_config(&Config::load(&self.env(), &project).unwrap()).unwrap()
     }
+}
+
+/// The shipped OpenRouter sign-in, which is data (ADR-009).
+fn openrouter() -> LoginSpec {
+    Catalog::builtin()
+        .login_spec("openrouter")
+        .unwrap()
+        .unwrap()
 }
 
 fn rendered(error: Error) -> String {
@@ -175,7 +184,7 @@ fn a_generated_verifier_is_long_url_safe_and_never_repeats() {
 fn the_authorization_url_carries_the_challenge_state_and_an_encoded_callback() {
     let pkce = Pkce::from_verifier("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk");
 
-    let url = OpenRouter::new().authorization_url(
+    let url = openrouter().authorization_url(
         &pkce,
         Some("st4te"),
         Some("http://localhost:4242/callback"),
@@ -202,7 +211,7 @@ fn the_authorization_url_carries_the_challenge_state_and_an_encoded_callback() {
 fn the_headless_authorization_url_has_a_challenge_but_no_callback() {
     let pkce = Pkce::generate().unwrap();
 
-    let url = OpenRouter::new().authorization_url(&pkce, None, None);
+    let url = openrouter().authorization_url(&pkce, None, None);
 
     assert!(!url.contains("callback_url"), "{url}");
     assert!(url.contains("code_challenge_method=S256"), "{url}");
@@ -328,7 +337,7 @@ fn a_code_is_exchanged_for_a_key_proving_possession_of_the_verifier() {
     let http = FakeHttp::answering(200, &format!(r#"{{"key":"{SECRET}"}}"#));
     let pkce = Pkce::from_verifier("verifier-123");
 
-    let key = OpenRouter::new()
+    let key = openrouter()
         .exchange(&http, &Code::new("code-456").unwrap(), &pkce)
         .unwrap();
 
@@ -349,7 +358,7 @@ fn a_code_is_exchanged_for_a_key_proving_possession_of_the_verifier() {
 #[case::bad_method(400, "bee::auth::exchange_failed", "challenge method")]
 #[case::expired_or_wrong(403, "bee::auth::exchange_failed", "expired")]
 #[case::wrong_verb(405, "bee::auth::exchange_failed", "HTTPS POST")]
-#[case::server_error(500, "bee::auth::exchange_failed", "HTTP 500")]
+#[case::server_error(500, "bee::auth::exchange_failed", "not the one expected")]
 fn a_refused_exchange_is_explained_without_the_response_body(
     #[case] status: u16,
     #[case] code: &str,
@@ -358,20 +367,22 @@ fn a_refused_exchange_is_explained_without_the_response_body(
     // The body is where a provider might echo the code or the key.
     let http = FakeHttp::answering(status, &format!(r#"{{"error":"{SECRET}"}}"#));
 
-    let error = OpenRouter::new()
+    let error = openrouter()
         .exchange(&http, &Code::new("c").unwrap(), &Pkce::generate().unwrap())
         .unwrap_err();
 
+    // The message, unwrapped: the rendered report breaks lines mid-phrase.
+    let message = error.to_string();
+    assert!(message.contains(mentions), "{message}");
+    assert!(message.contains(&format!("HTTP {status}")), "{message}");
     let text = rendered(error);
     assert!(text.contains(code), "{text}");
-    assert!(text.contains(mentions), "{text}");
-    assert!(text.contains(&format!("HTTP {status}")), "{text}");
     assert!(!text.contains(SECRET), "{text}");
 }
 
 #[test]
 fn an_unreachable_provider_is_reported_as_a_network_problem() {
-    let error = OpenRouter::new()
+    let error = openrouter()
         .exchange(
             &FakeHttp::unreachable(),
             &Code::new("c").unwrap(),
@@ -386,11 +397,11 @@ fn an_unreachable_provider_is_reported_as_a_network_problem() {
 fn a_success_without_a_key_is_not_taken_for_one() {
     let http = FakeHttp::answering(200, r#"{"key":""}"#);
 
-    let error = OpenRouter::new()
+    let error = openrouter()
         .exchange(&http, &Code::new("c").unwrap(), &Pkce::generate().unwrap())
         .unwrap_err();
 
-    assert!(error.to_string().contains("did not contain a key"));
+    assert!(error.to_string().contains("did not contain a credential"));
 }
 
 /// A one-shot HTTP server on loopback: answers `status` and `body`, and returns
@@ -493,7 +504,7 @@ fn the_browser_flow_returns_the_key_after_the_callback() {
     let mut browser = None;
 
     let key = login::sign_in(
-        &OpenRouter::new(),
+        &openrouter(),
         &http,
         Duration::from_secs(5),
         &mut |presented| {
@@ -533,7 +544,7 @@ fn a_failed_browser_flow_never_reaches_the_exchange() {
     let http = FakeHttp::answering(200, r#"{"key":"unused"}"#);
 
     let error = login::sign_in(
-        &OpenRouter::new(),
+        &openrouter(),
         &http,
         Duration::from_millis(100),
         &mut |_| {},
@@ -553,7 +564,7 @@ fn the_headless_flow_exchanges_the_code_the_user_pastes() {
     let mut url = String::new();
 
     let key = login::sign_in_headless(
-        &OpenRouter::new(),
+        &openrouter(),
         &http,
         &mut |presented| presented.clone_into(&mut url),
         &mut || Ok("  pasted-code \n".to_owned()),
@@ -570,7 +581,7 @@ fn the_headless_flow_exchanges_the_code_the_user_pastes() {
 fn pasting_nothing_in_the_headless_flow_is_refused() {
     let http = FakeHttp::unreachable();
 
-    let error = login::sign_in_headless(&OpenRouter::new(), &http, &mut |_| {}, &mut || {
+    let error = login::sign_in_headless(&openrouter(), &http, &mut |_| {}, &mut || {
         Ok("\n".to_owned())
     })
     .unwrap_err();
@@ -754,14 +765,14 @@ fn status_reports_where_each_credential_stands_without_revealing_any() {
         of("token").status,
         Status::Store {
             state: StoreState::LoggedIn,
-            browser_login: false
+            login: None
         }
     );
     assert_eq!(
         of("or").status,
         Status::Store {
             state: StoreState::NotLoggedIn,
-            browser_login: true
+            login: Some("openrouter".to_owned())
         }
     );
     assert!(of("or").default);

@@ -83,6 +83,61 @@ An empty variable counts as unset. A credential that is named but missing or exp
 command fixes it; Bee never quietly sends a request without it. Credentials are resolved when a request needs them, not
 at launch.
 
+### Presets
+
+Bee ships ready-made profiles, so a well-known provider is one line. A profile names a preset and overlays its own keys:
+
+```toml
+[providers.work]
+preset = "openrouter"              # protocol, base_url and credential come from the preset
+model = "anthropic/claude-sonnet-4"
+```
+
+Shipped presets: `openrouter` (a stored credential with browser sign-in), `openai` (`OPENAI_API_KEY`), `anthropic`
+(`ANTHROPIC_API_KEY`) and `ollama` (a local server, no credential). Scalars and arrays in the profile replace the
+preset's, `headers` and `options` merge key by key, and `credential` is replaced whole. The catalogue deliberately has
+no model lists: name your own `model`.
+
+Define your own preset, or override a shipped one by name, in a `presets` table of any configuration file:
+
+```toml
+[presets.corp]
+protocol = "anthropic-messages"
+base_url = "https://llm.corp.example"
+credential = { env = "CORP_KEY" }
+
+[presets.ollama]                   # overrides one key of the shipped preset
+base_url = "http://gpu-box:11434/v1"
+```
+
+A browser sign-in is data too. `login = "<name>"` refers to a `login_flows` entry, and you can add one for another
+provider whose flow is an authorization code with PKCE that returns an API key (`kind = "pkce-key"`):
+
+```toml
+[login_flows.acme]
+kind = "pkce-key"
+authorize_url = "https://id.acme.example/authorize"
+exchange_url = "https://id.acme.example/v2/token"
+headless = true                    # the provider can show the code, so `--paste-code` works
+
+[login_flows.acme.authorize]       # the provider's query parameter names
+callback = "redirect"
+challenge = "chal"
+challenge_method = "meth"
+state = "st"
+
+[login_flows.acme.exchange]        # its JSON field names, and where the credential comes back
+code = "authorization_code"
+verifier = "proof"
+challenge_method = "meth"
+response_key = "api_key"
+```
+
+Login flows may only be defined in the global file or the file `BEE_CONFIG` names, never in the project's
+`.config/bee.toml`: a flow chooses where the authorization code and key are sent, and a project file can come from a
+repository you only cloned. Other kinds of sign-in (refresh tokens, device codes) are not data and are not supported.
+See [ADR-009](adr/009-provider-presets-and-login-flows.md).
+
 ### Commands
 
 ```bash
@@ -127,9 +182,7 @@ OpenRouter example:
 
 ```toml
 [providers.openrouter]
-protocol = "openai-chat"
-base_url = "https://openrouter.ai/api/v1"
-credential = { store = true, login = "openrouter" }
+preset = "openrouter"
 ```
 
 ```bash
@@ -159,7 +212,7 @@ orchestration belong to the client. The planned boundaries are:
   through the ACPv2 client-agent contract, where the protocol supports them.
 - WebAssembly-based extensions are a possible future direction, not an initial requirement.
 - Bee does not assume ACPv2 provides a universal implementation of provider authentication. Each browser sign-in is a
-  provider-specific adapter, not a generic OAuth client.
+  described in data and limited to one mechanism, not a generic OAuth client.
 
 ## Installation
 

@@ -579,8 +579,8 @@ pub enum Status {
     Store {
         /// What the store holds for the profile.
         state: StoreState,
-        /// Whether `bee auth login` can run a browser sign-in for it.
-        browser_login: bool,
+        /// The browser sign-in `bee auth login` can run for it, if any.
+        login: Option<String>,
     },
 }
 
@@ -635,7 +635,7 @@ pub fn status(
                     Some(credential) if credential.is_expired(now) => StoreState::Expired,
                     Some(_) => StoreState::LoggedIn,
                 },
-                browser_login: login.is_some(),
+                login: login.clone(),
             },
         };
         statuses.push(ProfileStatus {

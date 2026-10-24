@@ -52,11 +52,14 @@ src/
 ├── config.rs   layered XDG configuration (ADR-006), free of the SDK
 ├── provider.rs provider profiles from the configuration (ADR-007), free of the SDK
 ├── auth.rs     credential sources, the 0600 store and secret handling (ADR-008), free of the SDK
-├── login.rs    OpenRouter's browser sign-in (PKCE), free of the SDK
+├── login.rs    the `pkce-key` browser sign-in, driven by a `LoginSpec`, free of the SDK
+├── preset.rs   presets and login flows as data (ADR-009), free of the SDK
 ├── http.rs     the one HTTP seam, so flows are tested against a fake
 ├── cli.rs      argument types only
 ├── commands.rs what `bee auth` does and prints (binary only)
 └── error.rs    the crate's error type
+data/
+└── presets.toml the shipped presets and login flows, embedded in the binary
 tests/
 ├── cli.rs      the binary's observable contract
 ├── stdio.rs    the stdio transport, through the real binary
@@ -67,6 +70,7 @@ tests/
 ├── provider.rs provider profiles, validation and secret handling, in-process
 ├── selection.rs provider and model selection over ACPv2, in-process
 ├── auth.rs     credentials, the store and the sign-in flows, in-process
+├── preset.rs   presets, login flows as data and the project-file trust rule, in-process
 └── mcp.rs      the MCP-over-ACP spike (ADR-002)
 ```
 

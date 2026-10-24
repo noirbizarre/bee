@@ -1,0 +1,55 @@
+# The profiles and browser sign-ins Bee ships (ADR-009).
+#
+# Data, not code: a user adds to this catalogue, or overrides an entry by name,
+# in the `presets` and `login_flows` tables of their own configuration. Only
+# what is generic to every provider lives in Bee's Rust.
+#
+# Deliberately absent:
+#
+# - model lists. They go stale the day they are written; a profile names its
+#   own `model`.
+# - Cloudflare. Its base URL carries an account id and there is no templating
+#   here; the documentation shows a profile to copy.
+
+# A `pkce-key` flow: an authorization-code flow with PKCE (RFC 7636, S256) whose
+# exchange returns a credential (an API key), not an access and refresh token.
+# The names are the provider's own query parameters and JSON fields.
+[login_flows.openrouter]
+kind = "pkce-key"
+authorize_url = "https://openrouter.ai/auth"
+exchange_url = "https://openrouter.ai/api/v1/auth/keys"
+# Without a callback OpenRouter shows the code on screen, so `--paste-code` works.
+headless = true
+help = "OpenRouter's authorization codes expire after 10 minutes and are single use."
+
+[login_flows.openrouter.authorize]
+callback = "callback_url"
+challenge = "code_challenge"
+challenge_method = "code_challenge_method"
+state = "state"
+# What OpenRouter shows the user as the label of the key it creates.
+extra = { key_label = "Bee" }
+
+[login_flows.openrouter.exchange]
+code = "code"
+verifier = "code_verifier"
+challenge_method = "code_challenge_method"
+response_key = "key"
+
+[presets.openrouter]
+protocol = "openai-chat"
+base_url = "https://openrouter.ai/api/v1"
+credential = { store = true, login = "openrouter" }
+
+[presets.openai]
+protocol = "openai-chat"
+credential = { env = "OPENAI_API_KEY" }
+
+[presets.anthropic]
+protocol = "anthropic-messages"
+credential = { env = "ANTHROPIC_API_KEY" }
+
+# A local server needs no credential, which is what no `credential` means.
+[presets.ollama]
+protocol = "openai-chat"
+base_url = "http://localhost:11434/v1"

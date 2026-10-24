@@ -215,6 +215,9 @@ pub struct Config {
     // the lower file, and so a user can ask where a value came from.
     origins: BTreeMap<String, PathBuf>,
     sources: Vec<PathBuf>,
+    // The project file's path, whether or not it exists, so a setting can be
+    // refused when that file is where it came from.
+    project: Option<PathBuf>,
 }
 
 // Written by hand: a derived `Debug` would print `table`, and the table holds
@@ -254,7 +257,10 @@ impl Config {
         }
         layers.push((project_config_path(project_dir), false));
 
-        let mut config = Self::default();
+        let mut config = Self {
+            project: Some(project_config_path(project_dir)),
+            ..Self::default()
+        };
         for (path, required) in layers {
             if let Some(table) = read_layer(&path, required)? {
                 config.sources.push(path.clone());
@@ -288,6 +294,22 @@ impl Config {
     #[must_use]
     pub fn origin(&self, dotted_key: &str) -> Option<&Path> {
         self.origins.get(dotted_key).map(PathBuf::as_path)
+    }
+
+    /// A key at or under `dotted_prefix` that the project file set, if any.
+    ///
+    /// For settings the project file may not make: it can come from a
+    /// repository the user only cloned. The key is returned, never a value.
+    #[must_use]
+    pub fn set_by_project(&self, dotted_prefix: &str) -> Option<String> {
+        let project = self.project.as_deref()?;
+        let nested = format!("{dotted_prefix}.");
+        self.origins
+            .iter()
+            .find(|(key, path)| {
+                path.as_path() == project && (*key == dotted_prefix || key.starts_with(&nested))
+            })
+            .map(|(key, _)| key.clone())
     }
 
     /// The files that were actually read, lowest precedence first.

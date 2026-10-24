@@ -8,9 +8,7 @@ use std::path::{Path, PathBuf};
 
 use bee::Error;
 use bee::config::{Config, Environment, project_config_path};
-use bee::provider::{
-    CredentialSource, LoginFlow, MaxTokensField, Protocol, ProtocolOptions, Providers,
-};
+use bee::provider::{CredentialSource, MaxTokensField, Protocol, ProtocolOptions, Providers};
 use pretty_assertions::assert_eq;
 use rstest::rstest;
 use tempfile::TempDir;
@@ -203,11 +201,8 @@ fn a_credential_is_a_named_environment_variable() {
 
 #[rstest]
 #[case::token_only("{ store = true }", None)]
-#[case::browser_sign_in(
-    "{ store = true, login = \"openrouter\" }",
-    Some(LoginFlow::OpenRouter)
-)]
-fn a_credential_can_live_in_the_store(#[case] credential: &str, #[case] login: Option<LoginFlow>) {
+#[case::browser_sign_in("{ store = true, login = \"openrouter\" }", Some("openrouter"))]
+fn a_credential_can_live_in_the_store(#[case] credential: &str, #[case] login: Option<&str>) {
     let providers = load(&format!(
         "[providers.p]\nprotocol = \"openai-chat\"\ncredential = {credential}"
     ))
@@ -215,7 +210,9 @@ fn a_credential_can_live_in_the_store(#[case] credential: &str, #[case] login: O
 
     assert_eq!(
         providers.get("p").unwrap().credential(),
-        Some(&CredentialSource::Store { login })
+        Some(&CredentialSource::Store {
+            login: login.map(str::to_owned)
+        })
     );
 }
 
@@ -398,7 +395,7 @@ fn a_project_can_add_a_profile_and_choose_it_as_the_default() {
 )]
 #[case::login_that_is_unknown(
     "[providers.p]\nprotocol = \"openai-chat\"\ncredential = { store = true, login = \"cloudflare\" }",
-    "bee::provider::invalid"
+    "bee::provider::unknown_login"
 )]
 #[case::option_of_the_other_protocol(
     "[providers.p]\nprotocol = \"openai-chat\"\n[providers.p.options]\nmax_tokens = 5",

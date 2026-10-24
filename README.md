@@ -53,7 +53,9 @@ See the [documentation](https://noirbizarre.github.io/bee/#configuration).
 
 A profile's `credential` names an environment variable (`{ env = "KEY" }`) or Bee's credential store
 (`{ store = true }`, optionally with `login = "openrouter"` for a browser sign-in). `bee auth login`, `logout` and
-`status` manage the store, which is a `0600` file under `$XDG_DATA_HOME/bee`. OpenRouter's sign-in returns an API key;
+`status` manage the store, which is a `0600` file under `$XDG_DATA_HOME/bee`. Providers are data: `preset = "openrouter"`
+(also `openai`, `anthropic`, `ollama`) fills in a profile, and your own `presets` and `login_flows` tables extend or
+override the shipped ones. OpenRouter's sign-in returns an API key;
 Cloudflare uses a scoped API token and not Wrangler's login; remote MCP server authorization is a separate audience and
 is not implemented. No LLM is called yet, so stored credentials are not used for requests. See the
 [documentation](https://noirbizarre.github.io/bee/#authentication).
@@ -83,7 +85,7 @@ scaffold ahead of need.
   through the ACPv2 client-agent contract, where the protocol supports them.
 - WebAssembly-based extensions are a possible future direction, not an initial requirement.
 - Bee does not assume ACPv2 provides a universal implementation of provider authentication. Each browser sign-in is a
-  provider-specific adapter, not a generic OAuth client.
+  described in data and limited to one mechanism, not a generic OAuth client.
 
 ## Installation
 

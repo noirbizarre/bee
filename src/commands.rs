@@ -12,8 +12,8 @@ use bee::auth::{self, CredentialStore, FileStore, Status, StoreState};
 use bee::config::{Config, Environment};
 use bee::error::{Error, Result};
 use bee::http::{Http, UreqHttp};
-use bee::login::{self, OpenRouter};
-use bee::provider::{CredentialSource, LoginFlow, Profile, Providers};
+use bee::login;
+use bee::provider::{Profile, Providers};
 
 use crate::cli::{AuthCommand, LoginArgs};
 
@@ -26,7 +26,6 @@ pub struct Context<'a> {
     pub providers: &'a Providers,
     pub store: &'a dyn CredentialStore,
     pub http: &'a dyn Http,
-    pub flow: &'a OpenRouter,
     /// How long to wait for the browser.
     pub timeout: Duration,
     /// Try to open a URL in a browser. Best effort.
@@ -49,7 +48,6 @@ pub fn run_auth(command: AuthCommand) -> Result<()> {
     let providers = Providers::from_config(&Config::load(&env, &project_dir)?)?;
     let store = FileStore::from_environment(&env)?;
     let http = UreqHttp::new(HTTP_TIMEOUT);
-    let flow = OpenRouter::new();
     let stdin = io::stdin();
     let interactive = stdin.is_terminal();
     let mut input = stdin.lock();
@@ -62,7 +60,6 @@ pub fn run_auth(command: AuthCommand) -> Result<()> {
             providers: &providers,
             store: &store,
             http: &http,
-            flow: &flow,
             timeout: login::DEFAULT_TIMEOUT,
             open: &open_browser,
             interactive,
@@ -127,10 +124,9 @@ fn login(args: &LoginArgs, context: &mut Context<'_>) -> Result<()> {
         return Ok(());
     }
 
-    let Some(CredentialSource::Store {
-        login: Some(LoginFlow::OpenRouter),
-    }) = profile.credential()
-    else {
+    // The flow is data (ADR-009): whatever `credential.login` names, not a
+    // provider this code knows.
+    let Some(flow) = profile.login_spec() else {
         return Err(Error::AuthNoLoginFlow {
             profile: name.to_owned(),
         });
@@ -140,7 +136,7 @@ fn login(args: &LoginArgs, context: &mut Context<'_>) -> Result<()> {
         let err = &mut *context.err;
         let input = &mut *context.input;
         login::sign_in_headless(
-            context.flow,
+            flow,
             context.http,
             &mut |url| {
                 let _ = writeln!(
@@ -159,7 +155,7 @@ fn login(args: &LoginArgs, context: &mut Context<'_>) -> Result<()> {
         let err = &mut *context.err;
         let open = context.open;
         let browser = !args.no_browser;
-        login::sign_in(context.flow, context.http, context.timeout, &mut |url| {
+        login::sign_in(flow, context.http, context.timeout, &mut |url| {
             let _ = writeln!(
                 err,
                 "Sign in to `{name}` in your browser. If it does not open, visit:\n\n  {url}\n\n\
@@ -228,20 +224,16 @@ fn status(name: Option<&str>, context: &mut Context<'_>) -> Result<()> {
             } => {
                 format!("environment variable `{variable}` is NOT set")
             }
-            Status::Store {
-                state,
-                browser_login,
-            } => {
+            Status::Store { state, login } => {
                 let state = match state {
                     StoreState::LoggedIn => "stored credential present",
                     StoreState::NotLoggedIn => "no stored credential; run `bee auth login`",
                     StoreState::Expired => "stored credential expired; run `bee auth login`",
                     _ => "stored credential in an unknown state",
                 };
-                let how = if *browser_login {
-                    "browser sign-in"
-                } else {
-                    "token only"
+                let how = match login {
+                    Some(flow) => format!("browser sign-in: {flow}"),
+                    None => "token only".to_owned(),
                 };
                 format!("{state} ({how})")
             }
@@ -330,7 +322,6 @@ mod tests {
         fn login(&self, args: LoginArgs, open: &dyn Fn(&str), input: &str) -> (Result<()>, String) {
             let env = Environment::new(None, None, None);
             let store = self.store();
-            let flow = OpenRouter::new();
             let (mut out, mut err) = (Vec::new(), Vec::new());
             let mut input = input.as_bytes();
             let result = execute(
@@ -340,7 +331,6 @@ mod tests {
                     providers: &self.providers,
                     store: &store,
                     http: &KeyGiver,
-                    flow: &flow,
                     timeout: Duration::from_secs(5),
                     open,
                     interactive: false,
@@ -421,7 +411,6 @@ mod tests {
         // Nobody calls back, so the wait ends; the point is that `open` never ran.
         let env = Environment::new(None, None, None);
         let store = fixture.store();
-        let flow = OpenRouter::new();
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let mut input: &[u8] = b"";
         let result = execute(
@@ -431,7 +420,6 @@ mod tests {
                 providers: &fixture.providers,
                 store: &store,
                 http: &KeyGiver,
-                flow: &flow,
                 timeout: Duration::from_millis(100),
                 open: &open,
                 interactive: false,

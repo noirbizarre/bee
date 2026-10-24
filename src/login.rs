@@ -1,12 +1,13 @@
-//! OpenRouter's browser sign-in, free of the ACPv2 SDK.
+//! The `pkce-key` browser sign-in, free of the ACPv2 SDK.
 //!
-//! OpenRouter documents an authorization-code flow with PKCE (RFC 7636) whose
-//! result is not an OAuth access token but an *API key*, used as a bearer
-//! token for inference. This module is that flow and nothing more general:
-//! providers differ in what they return, how long it lives and whether it
-//! refreshes, and a universal OAuth client would have to erase those
-//! differences. Only the primitives ([`Pkce`], the callback listener, percent
-//! encoding) are shared; a second provider gets its own adapter (ADR-008).
+//! An authorization-code flow with PKCE (RFC 7636) whose exchange returns a
+//! credential directly: OpenRouter's returns an *API key*, used as a bearer
+//! token, not an access and refresh token pair. A provider's URLs and field
+//! names are data, a [`LoginSpec`] read from `data/presets.toml` or the user's
+//! `login_flows` (ADR-009). What is code is the mechanism, and it is
+//! deliberately only this one: a flow with refresh tokens or a device code is
+//! another kind, because a universal OAuth client would have to erase exactly
+//! what differs (ADR-008).
 //!
 //! Nothing here prints. The caller is handed the authorization URL and decides
 //! how to show it.
@@ -21,12 +22,13 @@ use std::time::{Duration, Instant};
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use serde_json::{Value, json};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::auth::Secret;
 use crate::error::{Error, Result};
 use crate::http::Http;
+use crate::preset::LoginSpec;
 
 /// How long to wait for the browser to call back by default.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
@@ -35,12 +37,6 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
 /// hundred bytes; anything bigger is not one, and reading it all would let any
 /// local process make Bee buffer without bound.
 const MAX_REQUEST: usize = 8 * 1024;
-
-/// A name for the key, which OpenRouter shows the user to confirm.
-const KEY_LABEL: &str = "Bee";
-
-/// The name diagnostics use for this provider.
-const PROVIDER: &str = "OpenRouter";
 
 /// `n` random bytes from the operating system, base64url encoded.
 fn random_token(bytes: usize) -> Result<String> {
@@ -114,49 +110,14 @@ impl Code {
     }
 }
 
-/// OpenRouter's endpoints.
-///
-/// Parameters, not constants, so tests point them at a fake. They are not
-/// configurable by the user: an endpoint that receives the authorization code
-/// and returns a key is exactly what a redirect would target.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OpenRouter {
-    auth_url: String,
-    exchange_url: String,
-}
-
-impl Default for OpenRouter {
-    fn default() -> Self {
-        Self {
-            auth_url: "https://openrouter.ai/auth".to_owned(),
-            exchange_url: "https://openrouter.ai/api/v1/auth/keys".to_owned(),
-        }
-    }
-}
-
-impl OpenRouter {
-    /// OpenRouter's real endpoints.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Other endpoints, for tests.
-    #[must_use]
-    pub fn with_endpoints(auth_url: impl Into<String>, exchange_url: impl Into<String>) -> Self {
-        Self {
-            auth_url: auth_url.into(),
-            exchange_url: exchange_url.into(),
-        }
-    }
-
+impl LoginSpec {
     /// The URL to send the user to.
     ///
     /// `callback_url` is where the browser returns with the code, `state` is
-    /// echoed back on it. Without a callback OpenRouter shows the code on
-    /// screen for the user to paste (the headless flow), which is why a
-    /// challenge is always sent: a displayed code is useless without the
-    /// verifier.
+    /// echoed back on it. Without a callback a provider that supports it shows
+    /// the code on screen for the user to paste (the headless flow), which is
+    /// why a challenge is always sent: a displayed code is useless without the
+    /// verifier. Parameter names are the flow's own.
     #[must_use]
     pub fn authorization_url(
         &self,
@@ -164,40 +125,60 @@ impl OpenRouter {
         state: Option<&str>,
         callback_url: Option<&str>,
     ) -> String {
-        let mut url = format!("{}?", self.auth_url);
+        let names = &self.authorize;
+        let mut url = format!("{}?", self.authorize_url);
         if let Some(callback) = callback_url {
-            url.push_str(&format!("callback_url={}&", percent_encode(callback)));
+            url.push_str(&format!("{}={}&", names.callback, percent_encode(callback)));
         }
+        // `S256` is not configurable: it is the method this code computes, and
+        // the plain method would put the verifier itself in the URL.
         url.push_str(&format!(
-            "code_challenge={}&code_challenge_method=S256&key_label={KEY_LABEL}",
-            percent_encode(pkce.challenge())
+            "{}={}&{}=S256",
+            names.challenge,
+            percent_encode(pkce.challenge()),
+            names.challenge_method,
         ));
+        for (key, value) in &names.extra {
+            url.push_str(&format!("&{key}={}", percent_encode(value)));
+        }
         if let Some(state) = state {
-            url.push_str(&format!("&state={}", percent_encode(state)));
+            url.push_str(&format!("&{}={}", names.state, percent_encode(state)));
         }
         url
     }
 
-    /// Exchange `code` for the API key it stands for.
+    /// Exchange `code` for the credential it stands for.
     ///
     /// # Errors
     ///
     /// [`Error::AuthExchangeFailed`], with advice per status. The response body
     /// is never part of it.
     pub fn exchange(&self, http: &dyn Http, code: &Code, pkce: &Pkce) -> Result<Secret> {
-        let body = json!({
-            "code": code.0.expose(),
-            "code_verifier": pkce.verifier().expose(),
-            "code_challenge_method": "S256",
-        })
+        let names = &self.exchange;
+        let body = Value::Object(
+            [
+                (names.code.clone(), Value::from(code.0.expose())),
+                (
+                    names.verifier.clone(),
+                    Value::from(pkce.verifier().expose()),
+                ),
+                (names.challenge_method.clone(), Value::from("S256")),
+            ]
+            .into_iter()
+            .collect(),
+        )
         .to_string();
-        let failed =
-            |status: String, reason: &'static str, help: &'static str| Error::AuthExchangeFailed {
-                provider: PROVIDER,
-                status,
-                reason,
-                help,
-            };
+        // The flow's own advice follows the generic one: it knows things this
+        // code cannot, such as how long a code lives.
+        let failed = |status: String, reason: &'static str, help: &str| Error::AuthExchangeFailed {
+            provider: self.name.clone(),
+            status,
+            reason,
+            help: match &self.help {
+                Some(extra) => format!("{help}. {extra}"),
+                None => help.to_owned(),
+            },
+        };
         let response = http.post_json(&self.exchange_url, &body).map_err(|_| {
             failed(
                 String::new(),
@@ -209,13 +190,13 @@ impl OpenRouter {
         match response.status {
             200 => serde_json::from_str::<Value>(&response.body)
                 .ok()
-                .and_then(|value| value.get("key")?.as_str().map(str::to_owned))
+                .and_then(|value| value.get(&names.response_key)?.as_str().map(str::to_owned))
                 .filter(|key| !key.is_empty())
                 .map(Secret::new)
                 .ok_or_else(|| {
                     failed(
                         status,
-                        "the response did not contain a key",
+                        "the response did not contain a credential",
                         "try `bee auth login` again; if it repeats, store a key with `--with-token`",
                     )
                 }),
@@ -224,10 +205,10 @@ impl OpenRouter {
                 "the code challenge method was not accepted",
                 "this is probably a Bee bug; report it, and store a key with `--with-token` meanwhile",
             )),
-            403 => Err(failed(
+            401 | 403 => Err(failed(
                 status,
-                "the code or its verifier is not valid, or the code has expired (codes last 10 minutes)",
-                "run `bee auth login` again and finish the sign-in promptly, signed in to OpenRouter in that browser",
+                "the code or its verifier is not valid, or the code has expired",
+                "run `bee auth login` again and finish the sign-in promptly, signed in with the provider in that browser",
             )),
             405 => Err(failed(
                 status,
@@ -246,8 +227,8 @@ impl OpenRouter {
 /// A listener on the loopback interface that waits for the browser to return.
 ///
 /// Bound to `127.0.0.1` on a port the OS picks, so nothing off this machine
-/// can reach it and no fixed port can be squatted. OpenRouter accepts any
-/// localhost port for exactly this use.
+/// can reach it and no fixed port can be squatted. Providers that support
+/// native apps accept any localhost port for exactly this use.
 #[derive(Debug)]
 pub struct CallbackListener {
     listener: TcpListener,
@@ -272,7 +253,7 @@ impl CallbackListener {
 
     /// The URL to register as the callback.
     ///
-    /// `localhost`, not the address: it is the name OpenRouter documents for
+    /// `localhost`, not the address: it is the name providers document for
     /// local callbacks.
     #[must_use]
     pub fn url(&self) -> String {
@@ -458,9 +439,9 @@ fn respond(stream: &mut TcpStream, status: &str, message: &str) {
 ///
 /// # Errors
 ///
-/// Whatever [`CallbackListener::wait`] and [`OpenRouter::exchange`] report.
+/// Whatever [`CallbackListener::wait`] and [`LoginSpec::exchange`] report.
 pub fn sign_in(
-    flow: &OpenRouter,
+    flow: &LoginSpec,
     http: &dyn Http,
     timeout: Duration,
     present: &mut dyn FnMut(&str),
@@ -473,21 +454,29 @@ pub fn sign_in(
     flow.exchange(http, &code, &pkce)
 }
 
-/// Run the flow for a machine the browser cannot call back: OpenRouter shows
+/// Run the flow for a machine the browser cannot call back: the provider shows
 /// the code and `read_code` collects what the user pastes.
 ///
 /// # Errors
 ///
+/// [`Error::AuthNoHeadlessFlow`] if the provider cannot show the code,
 /// [`Error::AuthCallbackIo`] if `read_code` fails, [`Error::AuthCallbackInvalid`]
-/// if it gives nothing, or what [`OpenRouter::exchange`] reports.
+/// if it gives nothing, or what [`LoginSpec::exchange`] reports.
 pub fn sign_in_headless(
-    flow: &OpenRouter,
+    flow: &LoginSpec,
     http: &dyn Http,
     present: &mut dyn FnMut(&str),
     read_code: &mut dyn FnMut() -> io::Result<String>,
 ) -> Result<Secret> {
+    // A provider that only redirects would send the code to a URL that does not
+    // exist, and the user would be left with nothing to paste.
+    if !flow.headless() {
+        return Err(Error::AuthNoHeadlessFlow {
+            flow: flow.name().to_owned(),
+        });
+    }
     let pkce = Pkce::generate()?;
-    // No `state`: OpenRouter does not return one without a redirect, and the
+    // No `state`: a provider does not return one without a redirect, and the
     // user pasting the code is the confirmation.
     present(&flow.authorization_url(&pkce, None, None));
     let code = Code::new(&read_code().map_err(|source| Error::AuthCallbackIo { source })?)?;

@@ -195,6 +195,60 @@ pub enum Error {
         reason: &'static str,
     },
 
+    /// A profile names a preset that does not exist.
+    // The name is not echoed: the likeliest typo is a pasted key.
+    #[error("provider setting `{key}` in `{path}` names a preset that does not exist")]
+    #[diagnostic(
+        code(bee::provider::unknown_preset),
+        help(
+            "use one of: {available}; or define it under `[presets.<name>]` in your configuration"
+        )
+    )]
+    ProviderUnknownPreset {
+        /// The dotted key.
+        key: String,
+        /// The file that set it.
+        path: String,
+        /// The defined presets, comma separated.
+        available: String,
+    },
+
+    /// A credential names a login flow that does not exist.
+    #[error("provider setting `{key}` in `{path}` names a login flow that does not exist")]
+    #[diagnostic(
+        code(bee::provider::unknown_login),
+        help(
+            "use one of: {available}; or define it under `[login_flows.<name>]` in your global \
+             configuration"
+        )
+    )]
+    ProviderUnknownLogin {
+        /// The dotted key.
+        key: String,
+        /// The file that set it.
+        path: String,
+        /// The defined login flows, comma separated.
+        available: String,
+    },
+
+    /// The project file defines a login flow.
+    // Names the key only: it is the URLs the file chose that are the problem.
+    #[error("the project configuration `{path}` may not define the login flow setting `{key}`")]
+    #[diagnostic(
+        code(bee::provider::untrusted_layer),
+        help(
+            "a login flow decides where the authorization code and key are sent, and a project \
+             file can come from a repository you only cloned; define it in your global \
+             configuration or in the file `BEE_CONFIG` names"
+        )
+    )]
+    ProviderUntrustedLayer {
+        /// The dotted key.
+        key: String,
+        /// The project file.
+        path: String,
+    },
+
     /// `provider` names a profile that is not defined.
     #[error("the default `provider` does not name a defined profile (defined: {available})")]
     #[diagnostic(
@@ -418,17 +472,30 @@ pub enum Error {
 
     /// The provider refused to exchange the code for a key.
     // A status and fixed text: the response body could echo the code or the key.
-    #[error("{provider} refused to exchange the authorization code{status}: {reason}")]
+    #[error("the `{provider}` sign-in could not exchange the authorization code{status}: {reason}")]
     #[diagnostic(code(bee::auth::exchange_failed), help("{help}"))]
     AuthExchangeFailed {
-        /// The provider's name.
-        provider: &'static str,
+        /// The login flow's name.
+        provider: String,
         /// ` (HTTP 403)`, or empty when there was no response.
         status: String,
         /// What it means.
         reason: &'static str,
         /// What to do.
-        help: &'static str,
+        help: String,
+    },
+
+    /// `--paste-code` was asked of a flow that only redirects.
+    #[error("the `{flow}` sign-in cannot show a code to paste")]
+    #[diagnostic(
+        code(bee::auth::no_headless_flow),
+        help(
+            "run `bee auth login` on a machine with a browser, or store a token with `--with-token`"
+        )
+    )]
+    AuthNoHeadlessFlow {
+        /// The login flow's name.
+        flow: String,
     },
 
     /// The profile has no browser sign-in configured.
