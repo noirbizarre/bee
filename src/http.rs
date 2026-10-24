@@ -472,12 +472,17 @@ mod tests {
             drop(operation);
         }
         let mut byte = [0];
-        assert_eq!(
-            tokio::time::timeout(Duration::from_secs(5), socket.read(&mut byte))
-                .await
-                .unwrap()
-                .unwrap(),
-            0
+        let closed = tokio::time::timeout(Duration::from_secs(5), socket.read(&mut byte))
+            .await
+            .unwrap();
+        // Abandoning unread HTTP data can close with FIN or reset depending on
+        // the OS and whether headers were consumed before the future was dropped.
+        assert!(
+            matches!(closed, Ok(0))
+                || closed.is_err_and(|error| matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+                ))
         );
     }
 
