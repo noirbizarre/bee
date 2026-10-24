@@ -469,6 +469,73 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn missing_configured_roots_warn_while_valid_roots_remain_available() {
+        let root = tempfile::tempdir().unwrap();
+        let present = root.path().join("present");
+        skill(&present, "available", "found");
+        let settings = Settings {
+            roots: vec![root.path().join("missing"), present],
+            origin: "settings.toml".into(),
+        };
+        let (skills, diagnostics) = discover(&root.path().join("project"), None, &settings).await;
+        assert_eq!(skills[0].name, "available");
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].root_index, Some(0));
+        assert_eq!(diagnostics[0].path, Path::new("settings.toml"));
+    }
+
+    #[tokio::test]
+    async fn a_disappearing_skill_has_an_actionable_activation_failure() {
+        let root = tempfile::tempdir().unwrap();
+        skill(&root.path().join(".agents/skills"), "demo", "found");
+        let (catalog, warnings) = discover(root.path(), None, &Settings::default()).await;
+        assert!(warnings.is_empty());
+        std::fs::remove_file(&catalog[0].path).unwrap();
+        let error = catalog[0].snapshot().unwrap_err();
+        assert_eq!(error.code, "bee::skills::read");
+        assert!(error.help.contains("restore"));
+    }
+
+    #[tokio::test]
+    async fn discovery_overflow_drops_the_catalog_instead_of_exposing_a_nondeterministic_subset() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join(".agents/skills");
+        std::fs::create_dir_all(&directory).unwrap();
+        for index in 0..4097 {
+            std::fs::write(directory.join(index.to_string()), "").unwrap();
+        }
+        let (catalog, warnings) = discover(root.path(), None, &Settings::default()).await;
+        assert!(catalog.is_empty());
+        assert!(
+            warnings
+                .iter()
+                .any(|diagnostic| diagnostic.reason.contains("4096"))
+        );
+    }
+
+    #[test]
+    fn an_empty_skills_table_preserves_defaults_and_excessive_extra_roots_are_rejected() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("settings.toml");
+        let environment = crate::config::Environment::new(None, None, Some(path.clone()));
+        write(&path, "[skills]\n");
+        let config = crate::config::Config::load(&environment, root.path()).unwrap();
+        assert!(
+            Settings::from_config(&config, root.path())
+                .unwrap()
+                .roots
+                .is_empty()
+        );
+        write(
+            &path,
+            &format!("[skills]\nextra_roots=[{}]\n", vec!["'root'"; 65].join(",")),
+        );
+        let config = crate::config::Config::load(&environment, root.path()).unwrap();
+        let error = Settings::from_config(&config, root.path()).err().unwrap();
+        assert!(error.to_string().contains("64 locations"));
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn linked_skill_roots_are_deduplicated_by_canonical_identity() {

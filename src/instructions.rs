@@ -453,4 +453,32 @@ mod tests {
                 .is_err()
         );
     }
+
+    #[tokio::test]
+    async fn aggregate_activated_guidance_cannot_silently_overflow_its_persistent_budget() {
+        let root = tempfile::tempdir().unwrap();
+        for name in ["first", "second", "third", "fourth"] {
+            write(
+                root.path(),
+                &format!(".agents/skills/{name}/SKILL.md"),
+                &format!(
+                    "---\nname: {name}\ndescription: bounded metadata\n---\n{}",
+                    "x".repeat(SOURCE_LIMIT - 100)
+                ),
+            );
+        }
+        let mut turn = Sources::default()
+            .start(root.path(), State::default())
+            .await
+            .unwrap();
+        let catalog = turn.catalog.clone();
+        for skill in &catalog[..3] {
+            turn.activate(skill, skill.snapshot().unwrap()).unwrap();
+        }
+        let error = turn
+            .activate(&catalog[3], catalog[3].snapshot().unwrap())
+            .unwrap_err();
+        assert_eq!(error.code, "bee::instructions::limit");
+        assert!(error.help.contains("reduce instructions"));
+    }
 }
