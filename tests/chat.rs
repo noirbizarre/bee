@@ -7,6 +7,74 @@ use serde_json::json;
 use support::{Echo, Response, Server, chat_text, event, profile, tool};
 
 #[tokio::test]
+async fn a_model_discovers_lists_and_reads_project_files() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("src")).unwrap();
+    std::fs::write(root.path().join("src/lib.rs"), "// project source").unwrap();
+    let call = |id: &str, name: &str, arguments: &str| {
+        Response::json(
+            json!({"choices":[{"index":0,"message":{"tool_calls":[{"id":id,"type":"function","function":{"name":name,"arguments":arguments}}]},"finish_reason":"tool_calls"}]}),
+        )
+    };
+    let server = Server::start(vec![
+        call("find", "glob", r#"{"pattern":"**/*.rs"}"#),
+        call("inspect", "list", r#"{"path":"src"}"#),
+        call("read", "read", r#"{"path":"src/lib.rs"}"#),
+        Response::json(chat_text("done")),
+    ]);
+    let model = Model::new(
+        profile("openai-chat", &server.url, ""),
+        "opaque".into(),
+        None,
+    )
+    .unwrap();
+    let mut registry = bee::tool::Registry::default();
+    registry.register(bee::tool::glob::Glob).unwrap();
+    registry.register(bee::tool::list::List).unwrap();
+    registry.register(bee::tool::read::Read).unwrap();
+    let context = bee::tool::Context::new(
+        root.path(),
+        tokio_util::sync::CancellationToken::new(),
+        4096,
+    )
+    .unwrap();
+    let executor = bee::agent::NativeExecutor::new(&registry, context);
+    let result = bee::agent::run(
+        &model,
+        vec![Message::User("inspect the project".into())],
+        &executor.definitions(),
+        Some(&executor),
+        &mut |_| {},
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.stop, Stop::End);
+    assert_eq!(server.request().body["tools"].as_array().unwrap().len(), 3);
+    for (index, id, field, expected) in [
+        (
+            2,
+            "find",
+            "entries",
+            json!([{"path":"src/lib.rs","kind":"file"}]),
+        ),
+        (
+            4,
+            "inspect",
+            "entries",
+            json!([{"path":"lib.rs","kind":"file"}]),
+        ),
+        (6, "read", "content", json!("1: // project source\n")),
+    ] {
+        let request = server.request();
+        let message = &request.body["messages"][index];
+        assert_eq!(message["tool_call_id"], id);
+        let output: serde_json::Value =
+            serde_json::from_str(message["content"].as_str().unwrap()).unwrap();
+        assert_eq!(output["data"][field], expected);
+    }
+}
+
+#[tokio::test]
 async fn a_model_reads_a_real_file_through_the_native_executor() {
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("hello.txt"), "hello from disk").unwrap();
