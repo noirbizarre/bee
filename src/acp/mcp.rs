@@ -10,7 +10,7 @@ use agent_client_protocol::{Client, V2ConnectionTo};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::agent::{Executor, NativeExecutor, ToolResult};
+use crate::agent::{Executor, ToolResult};
 use crate::llm::{Call, Tool};
 
 const MAX_SERVERS: usize = 32;
@@ -310,7 +310,7 @@ fn outcome(response: v2::MessageMcpResponse) -> ToolResult {
 }
 
 pub(super) struct Composite<'a> {
-    pub native: NativeExecutor<'a>,
+    pub native: super::interactions::Native<'a>,
     pub catalog: Catalog,
     pub connection: &'a V2ConnectionTo<Client>,
     pub bindings: &'a super::Mutex<Bindings>,

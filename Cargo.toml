@@ -153,6 +153,8 @@ serde_json = "1"
 nix = { version = "0.30", default-features = false, features = ["signal", "process"] }
 
 [dev-dependencies]
+# Human interaction deadlines are tested without waiting five real minutes.
+tokio = { version = "1", features = ["test-util"] }
 # Exercise the official client against a subprocess without adding process
 # launching support to Bee's production SDK dependency.
 agent-client-protocol = { version = "=3.5.0", features = ["process"] }

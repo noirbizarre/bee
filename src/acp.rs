@@ -23,6 +23,7 @@ use crate::provider::Providers;
 use crate::session::{SessionError, Sessions, Settings};
 use crate::{Error, Result};
 
+mod interactions;
 mod mcp;
 
 // Retain the busy barrier until aborted futures have actually been dropped and
@@ -34,6 +35,8 @@ pub struct Runtime {
     instructions: Option<crate::instructions::Sources>,
     limits: crate::agent::Limits,
     tools: crate::tool::Registry,
+    auth_environment: Option<crate::config::Environment>,
+    login_http: Arc<dyn crate::http::LoginHttp>,
 }
 
 impl Runtime {
@@ -43,7 +46,21 @@ impl Runtime {
             limits,
             tools,
             instructions: None,
+            auth_environment: None,
+            login_http: Arc::new(crate::http::AsyncLoginHttp),
         }
+    }
+
+    /// Supply credential sources and transport explicitly for an embedded runtime.
+    #[must_use]
+    pub fn with_auth(
+        mut self,
+        environment: crate::config::Environment,
+        http: Arc<dyn crate::http::LoginHttp>,
+    ) -> Self {
+        self.auth_environment = Some(environment);
+        self.login_http = http;
+        self
     }
 
     /// Enable instruction discovery with explicitly injected home and configuration.
@@ -98,6 +115,7 @@ pub struct Reply {
     completed: Arc<Mutex<Option<crate::agent::Outcome>>>,
     mcp: Arc<Mutex<mcp::Bindings>>,
     servers: Vec<mcp::Server>,
+    interactions: Arc<Mutex<interactions::State>>,
 }
 
 impl Reply {
@@ -145,7 +163,10 @@ async fn inference(reply: Reply, runtime: Arc<Runtime>) -> std::result::Result<(
     let crate::session::InferenceInput { profile, model, messages, cwd, instructions } = reply.input.clone().ok_or_else(|| TurnFailure::new(
         "configure a provider and model in Bee's configuration or select a model over ACP before prompting"
     ))?;
-    let env = crate::config::Environment::from_process();
+    let env = runtime
+        .auth_environment
+        .clone()
+        .unwrap_or_else(crate::config::Environment::from_process);
     let store = if matches!(
         profile.credential(),
         Some(crate::provider::CredentialSource::Store { .. })
@@ -157,8 +178,24 @@ async fn inference(reply: Reply, runtime: Arc<Runtime>) -> std::result::Result<(
         // resolve never touches the store for an environment/no-auth profile.
         crate::auth::FileStore::new("")
     };
-    let credential = crate::auth::resolve(&profile, &env, &store, crate::auth::unix_now())
-        .map_err(|_| TurnFailure::new("cannot resolve the model credential; check its environment variable or run `bee auth login`"))?;
+    let credential = match crate::auth::resolve(&profile, &env, &store, crate::auth::unix_now()) {
+        Ok(credential) => credential,
+        Err(crate::Error::AuthNotLoggedIn { .. } | crate::Error::AuthExpired { .. })
+            if profile.login_spec().is_some() && lock(&reply.interactions).url =>
+        {
+            reply
+                .login(&profile, &store, &env, runtime.login_http.as_ref())
+                .await?;
+            crate::auth::resolve(&profile, &env, &store, crate::auth::unix_now()).map_err(|_| {
+                TurnFailure::new("cannot resolve the stored credential; run `bee auth login`")
+            })?
+        }
+        Err(_) => {
+            return Err(TurnFailure::new(
+                "cannot resolve the model credential; check its environment variable or run `bee auth login`",
+            ));
+        }
+    };
     let credential = credential.map(|value| value.secret().clone());
     let model = crate::llm::Model::new(profile, model, credential)
         .map_err(|error| TurnFailure::new(error.to_string()))?;
@@ -190,7 +227,19 @@ async fn inference(reply: Reply, runtime: Arc<Runtime>) -> std::result::Result<(
     let _guard = cancellation.clone().drop_guard();
     let context = crate::tool::Context::new(cwd, cancellation, crate::tool::MAX_OUTPUT_BYTES)
         .map_err(|error| TurnFailure::new(error.to_string()))?;
-    let native = crate::agent::NativeExecutor::new(&runtime.tools, context);
+    if runtime
+        .tools
+        .definitions()
+        .any(|tool| tool.name == "ask_user")
+    {
+        return Err(TurnFailure::new(
+            "ask_user is reserved for ACP user input; rename the custom tool",
+        ));
+    }
+    let native = interactions::Native {
+        inner: crate::agent::NativeExecutor::new(&runtime.tools, context),
+        reply: &reply,
+    };
     let catalog = mcp::Catalog::discover(
         &reply.connection,
         &reply.mcp,
@@ -351,31 +400,49 @@ where
     let sessions = Arc::new(Mutex::new(Sessions::with_providers(providers)));
     let mcp = Arc::new(Mutex::new(mcp::Bindings::default()));
     let tasks: Tasks = Arc::default();
+    let interactions = Arc::new(Mutex::new(interactions::State::default()));
 
     // `Agent.v2()`, not `Agent.builder()`: the latter is the stable v1 surface.
     Agent
         .v2()
         .name("bee")
         .on_receive_request(
-            async |request: v2::InitializeRequest,
-                   responder: Responder<v2::InitializeResponse>,
-                   _connection: V2ConnectionTo<Client>| {
-                // Advertise only transports we actually route, not HTTP or subprocess MCP.
-                responder.respond(
-                    v2::InitializeResponse::new(
-                        // Hand back the version the SDK gives us rather than
-                        // choosing one: the v2 builder negotiates the version on
-                        // the wire, so a hard-coded value here would fight it.
-                        request.protocol_version,
-                        v2::Implementation::new("bee", env!("CARGO_PKG_VERSION")),
+            {
+                let interactions = Arc::clone(&interactions);
+                async move |request: v2::InitializeRequest,
+                            responder: Responder<v2::InitializeResponse>,
+                            _connection: V2ConnectionTo<Client>| {
+                    {
+                        let mut state = lock(&interactions);
+                        state.form = request
+                            .capabilities
+                            .elicitation
+                            .as_ref()
+                            .is_some_and(v2::ElicitationCapabilities::supports_form);
+                        state.url = request
+                            .capabilities
+                            .elicitation
+                            .as_ref()
+                            .is_some_and(v2::ElicitationCapabilities::supports_url);
+                    }
+                    // Advertise only transports we actually route, not HTTP or subprocess MCP.
+                    responder.respond(
+                        v2::InitializeResponse::new(
+                            // Hand back the version the SDK gives us rather than
+                            // choosing one: the v2 builder negotiates the version on
+                            // the wire, so a hard-coded value here would fight it.
+                            request.protocol_version,
+                            v2::Implementation::new("bee", env!("CARGO_PKG_VERSION")),
+                        )
+                        .capabilities(
+                            v2::AgentCapabilities::new().session(
+                                v2::SessionCapabilities::new().mcp(
+                                    v2::McpCapabilities::new().acp(v2::McpAcpCapabilities::new()),
+                                ),
+                            ),
+                        ),
                     )
-                    .capabilities(
-                        v2::AgentCapabilities::new()
-                            .session(v2::SessionCapabilities::new().mcp(
-                                v2::McpCapabilities::new().acp(v2::McpAcpCapabilities::new()),
-                            )),
-                    ),
-                )
+                }
             },
             // The SDK requires this macro to tie the handler to the request type.
             agent_client_protocol::on_receive_request!(),
@@ -430,6 +497,7 @@ where
                 let sessions = Arc::clone(&sessions);
                 let mcp = Arc::clone(&mcp);
                 let tasks = Arc::clone(&tasks);
+                let interactions = Arc::clone(&interactions);
                 async move |request: v2::ResumeSessionRequest,
                             responder: Responder<v2::ResumeSessionResponse>,
                             connection: V2ConnectionTo<Client>| {
@@ -457,9 +525,7 @@ where
                         // The session keeps what the client chose before it
                         // was closed, so the options report that, not the defaults.
                         let state = if lock(&tasks).contains_key(&id) {
-                            v2::SessionUpdate::StateUpdate(v2::StateUpdate::Running(
-                                v2::RunningStateUpdate::new(),
-                            ))
+                            interactions::phase(lock(&interactions).waiting.contains_key(&id))
                         } else {
                             idle(None)
                         };
@@ -553,6 +619,7 @@ where
                 let sessions = Arc::clone(&sessions);
                 let mcp = Arc::clone(&mcp);
                 let tasks = Arc::clone(&tasks);
+                let interactions = Arc::clone(&interactions);
                 async move |request: v2::PromptRequest,
                             responder: Responder<v2::PromptResponse>,
                             connection: V2ConnectionTo<Client>| {
@@ -643,6 +710,7 @@ where
                         completed: Arc::new(Mutex::new(None)),
                         mcp: Arc::clone(&mcp),
                         servers,
+                        interactions: Arc::clone(&interactions),
                     };
                     // A turn runs off the dispatch loop: handlers block it, and
                     // a `session/cancel` queued behind a running prompt would
@@ -753,6 +821,7 @@ where
     let session_id = reply.session_id.clone();
     let token = reply.token;
     let completed = Arc::clone(&reply.completed);
+    let interactions = Arc::clone(&reply.interactions);
 
     // `catch_unwind` so a panicking turn ends as a failed turn and not as a
     // dead task whose session stays busy forever. The `async` block also
@@ -773,6 +842,7 @@ where
     // request cancellation must happen before terminal idle. A concurrent cancel
     // can still win against natural completion, but cannot start a replacement.
     let mut sessions = lock(&sessions);
+    lock(&interactions).waiting.remove(&id);
     if let Some(outcome) = lock(&completed).take()
         && outcome.stop != crate::llm::Stop::Refusal
         && sessions.is_current(&id, token)

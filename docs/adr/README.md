@@ -39,3 +39,4 @@ by editing the old one. The history is the value.
 - [ADR-014](014-conversation-context-and-token-limits.md) — Budget explicit context windows and truncate whole turns
 - [ADR-015](015-client-hosted-mcp-execution.md) — Execute client-hosted MCP tools through the ACP boundary
 - [ADR-016](016-project-instructions-and-agent-skills.md) — Load scoped AGENTS.md instructions and standard Agent Skills
+- [ADR-017](017-acp-permission-and-elicitation.md) — Keep Bash authorization, user input and browser login turn-owned

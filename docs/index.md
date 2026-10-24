@@ -23,6 +23,9 @@ The bounded SDK-free loop supports injected function executors. Normal ACP sessi
 Client-hosted MCP tools are discovered and invoked through ACPv2's `session.mcp.acp` transport alongside the native
 catalog. The client supplies server attachments and enforces permissions. See [tools](tools.md) for the contracts,
 execution context and supported MCP subset.
+Native Bash calls request client permission. Form-capable clients also receive
+`ask_user`; URL-capable clients can perform provider browser login. See
+[ACP user interactions](tools.md#acp-user-interactions) for capability and outcome handling.
 
 See [ACPv2 compatibility](compatibility.md) for the version baseline, automated workflow
 coverage, official TCK results and outstanding protocol gaps.
@@ -231,6 +234,34 @@ Login flows may only be defined in the global file or the file `BEE_CONFIG` name
 `.config/bee.toml`: a flow chooses where the authorization code and key are sent, and a project file can come from a
 repository you only cloned. Other kinds of sign-in (refresh tokens, device codes) are not data and are not supported.
 See [ADR-009](adr/009-provider-presets-and-login-flows.md).
+
+### ACP browser sign-in
+
+During a prompt, a missing or expired stored credential starts browser sign-in when
+the profile names a login flow and the client advertises `capabilities.elicitation.url`.
+Bee sends session-scoped `elicitation/create` with a unique ID. Accepting the URL
+means the browser interaction may proceed, not that authentication succeeded.
+Bee waits for the loopback callback, validates state, exchanges the code over HTTPS,
+and persists the credential before sending `elicitation/complete` with that same ID.
+Credentials and callback/exchange secrets never enter model context.
+
+ACP browser sign-in requires Bee's private credential store, currently supported on
+Unix. On Windows, configure an environment credential instead; URL capability alone
+does not enable the store.
+
+The whole attempt has a five-minute deadline; credential exchange also has a
+30-second transport deadline. Decline, cancel, unknown actions and errors end the
+turn without inference. Session cancel/close drops pending requests, listener and
+exchange before terminal idle; late responses cannot store a credential. A credential
+already committed before cancellation remains stored. Final store commits are
+serialized within the process and preserve other providers; the existing store
+contract does not coordinate concurrent writers in separate processes.
+
+The browser must be able to reach the Bee host's loopback callback. URL capability
+does not imply that a remote client shares that host; use `bee auth login` on the
+agent host when it does not. Missing environment variables, invalid/insecure stores,
+missing login flows and unsupported URL mode remain configuration errors with CLI
+guidance. A provider's inference 401/403 does not automatically retry login or inference.
 
 ### Commands
 

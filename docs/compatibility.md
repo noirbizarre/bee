@@ -40,7 +40,7 @@ Paths below are relative to the repository root.
 | Session new/list/close/resume, cwd checks, invalid IDs and settings | `tests/session.rs`, `tests/selection.rs`, `tests/stdio.rs` |
 | Prompt acceptance, echoed message IDs, running/text/terminal ordering | `tests/session.rs`, `tests/e2e.rs` |
 | Streaming before the provider completes | Gated SSE response in `tests/e2e.rs`; provider adapter suites |
-| Active resume reports running, idle resume reports idle | `tests/cancel.rs`, `tests/session.rs` |
+| Active resume reports running/requires_action, idle resume reports idle | `tests/cancel.rs`, `tests/session.rs`, `tests/interactions.rs` |
 | Cancel and direct close during model inference, recovery, no failed history | `tests/stdio.rs`, `tests/inference.rs` |
 | Cancel/close during MCP discovery and invocation, isolation and late replies | `tests/mcp_integration.rs` |
 | Request cancellation precedes cancelled idle; idle precedes close response | `tests/mcp_integration.rs`, `tests/cancel.rs`, `tests/stdio.rs` |
@@ -49,6 +49,12 @@ Paths below are relative to the repository root.
 | Native-tool failures, limits and recovery through production ACP | `tests/e2e.rs`, `tests/inference.rs` |
 | Per-tool invalid inputs, failure preservation and output limits | `tests/read.rs`, `tests/discovery.rs`, `tests/write.rs`, `tests/edit.rs`, `tests/bash.rs`, `tests/tools.rs` |
 | Malformed requests, errors, protocol-only stdout, EOF shutdown | `tests/stdio.rs`, `tests/cli.rs`, `tests/cancel.rs` |
+| Bash permission allow/reject/cancel/unknown/error/timeout, no nonapproval side effects | `tests/interactions.rs`; malformed replies and direct-close wire ordering in `tests/stdio.rs` |
+| Independent form/URL negotiation, validated form responses, model-call correlation | `tests/interactions.rs`, across all three inference protocols |
+| Real provider browser callback/exchange/store workflow; URL acceptance distinct from completion | `tests/interactions.rs`, with an injected credential exchange transport |
+| Login transport HTTPS-only policy, redirect refusal, bounded/framed bodies, cancellation and deadlines | Unit tests in `src/http.rs` |
+| Whole browser-login deadline during URL create, callback wait and exchange; cleanup and retry | Virtual-time cases in `tests/interactions.rs` |
+| Pending permission/form/URL cancellation, direct close, late replies and session isolation | `tests/interactions.rs`; cleanup-before-idle assertions in client handlers |
 
 The native subprocess workflow discovers files with glob/list, reads a discovered
 file, writes content derived from that read, makes a targeted edit, reads it back,
@@ -66,7 +72,7 @@ model speed. Every exchange has a deadline and subprocesses are cleaned up on fa
 Run the main compatibility tests with:
 
 ```sh
-cargo test --test e2e --test stdio --test acp --test session --test cancel --test inference --test mcp_integration
+cargo test --test e2e --test stdio --test acp --test session --test cancel --test inference --test mcp_integration --test interactions
 mise run ci
 ```
 
@@ -114,19 +120,14 @@ exits nonzero and is separate from the passing Rust CI regression suite.
 Skipped tests include unadvertised authentication/content/session extensions and
 interaction/tool-update paths this fixture does not produce. In particular, the TCK
 run does not validate native mutations, MCP round trips, permissions, or elicitation.
-Bee's own deterministic workflows cover native and MCP execution. A passing TCK run
+Bee's own deterministic workflows cover native/MCP execution and production ACP
+permission and elicitation callers. A passing TCK run
 would still not be an official certification or complete protocol coverage.
 
 ## Unsupported and deferred behavior
 
 - **ACP update replay:** model context survives close/resume in memory, but ACP event
   replay is not retained. Any supplied `replayFrom` is rejected with invalid params.
-- **ACP permission and elicitation flows:** Bee does not initiate
-  `session/request_permission`, `elicitation/create` (form or URL), or
-  `elicitation/complete`. Advertising elicitation support as a client does not activate
-  these flows. Implementation, negotiated modes, outcome handling, correlation and
-  pending-interaction cancellation are tracked in
-  [#46](https://github.com/noirbizarre/bee/issues/46).
 - **MCP interaction:** client-hosted MCP denials are ordinary tool errors; they are not
   ACP permission outcomes. MCP `input_required` and task continuations are rejected.
   Only client-hosted ACP MCP attachments are advertised, not direct stdio/HTTP MCP servers.
@@ -138,8 +139,9 @@ would still not be an official certification or complete protocol coverage.
   forks and additional directories are not advertised. Resource links are references
   only and are never fetched.
 
-Issue #13's native-search and permission/elicitation acceptance items remain outstanding;
-current-subset coverage does not complete them.
+Issue [#46](https://github.com/noirbizarre/bee/issues/46) adds production permission and
+elicitation coverage for [#13](https://github.com/noirbizarre/bee/issues/13), as mapped
+above. Native search and replay remain outstanding; this is not full ACPv2 conformance.
 
 ## Client evidence
 

@@ -1,8 +1,8 @@
 //! The one HTTP seam, free of the ACPv2 SDK.
 //!
 //! A trait so the sign-in flow is tested against a fake and never the network,
-//! and so the client behind it can change without touching the flow. The real
-//! sign-in client is blocking; inference uses cancellable asynchronous I/O.
+//! and so the client behind it can change without touching the flow. CLI sign-in
+//! has a blocking seam; ACP sign-in and inference use cancellable asynchronous I/O.
 
 use std::fmt;
 use std::time::Duration;
@@ -208,6 +208,74 @@ impl fmt::Debug for HttpResponse {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Unreachable;
 
+/// Async sign-in transport, injectable without blocking an ACP dispatch loop.
+pub trait LoginHttp: Send + Sync {
+    /// Exchange a credential-bearing JSON body without retaining it in diagnostics.
+    fn post_json<'a>(
+        &'a self,
+        url: &'a str,
+        body: String,
+    ) -> futures::future::BoxFuture<'a, Result<HttpResponse, Unreachable>>;
+}
+
+/// HTTPS-only production sign-in transport.
+pub struct AsyncLoginHttp;
+
+impl LoginHttp for AsyncLoginHttp {
+    fn post_json<'a>(
+        &'a self,
+        url: &'a str,
+        body: String,
+    ) -> futures::future::BoxFuture<'a, Result<HttpResponse, Unreachable>> {
+        Box::pin(login_exchange(url, body))
+    }
+}
+
+/// Owned credential exchange; dropping the future abandons network work.
+pub(crate) async fn login_exchange(url: &str, body: String) -> Result<HttpResponse, Unreachable> {
+    post_login(&login_client(true)?, url, body).await
+}
+
+fn login_client(https_only: bool) -> Result<reqwest::Client, Unreachable> {
+    // Only local transport tests disable HTTPS; the production entry point always enables it.
+    reqwest::Client::builder()
+        .https_only(https_only)
+        .redirect(reqwest::redirect::Policy::none())
+        .retry(reqwest::retry::never())
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|_| Unreachable)
+}
+
+async fn post_login(
+    client: &reqwest::Client,
+    url: &str,
+    body: String,
+) -> Result<HttpResponse, Unreachable> {
+    let response = client
+        .post(url)
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json")
+        .body(body)
+        .send()
+        .await
+        .map_err(|_| Unreachable)?;
+    let status = response.status().as_u16();
+    let mut stream = response.bytes_stream();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| Unreachable)?;
+        if bytes.len().saturating_add(chunk.len()) > MAX_EVENT {
+            return Err(Unreachable);
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(HttpResponse {
+        status,
+        body: String::from_utf8(bytes).map_err(|_| Unreachable)?,
+    })
+}
+
 /// Sends the few requests the sign-in flow needs.
 pub trait Http {
     /// `POST` `body` as JSON to `url`.
@@ -279,6 +347,144 @@ impl Http for UreqHttp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Return the socket after writing a response, so tests can observe client cleanup.
+    async fn login_server(
+        response: Vec<u8>,
+        keep_open: bool,
+    ) -> (String, tokio::task::JoinHandle<tokio::net::TcpStream>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/token", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut headers = Vec::new();
+            while !headers.ends_with(b"\r\n\r\n") {
+                assert!(headers.len() < 8192);
+                headers.push(stream.read_u8().await.unwrap());
+            }
+            // All requests use this fixed non-secret body; consume it before checking EOF.
+            let mut body = [0; 2];
+            stream.read_exact(&mut body).await.unwrap();
+            assert_eq!(&body, b"{}");
+            // Oversize-response tests intentionally close before the server finishes writing.
+            let _ = stream.write_all(&response).await;
+            if !keep_open {
+                let _ = stream.shutdown().await;
+            }
+            stream
+        });
+        (url, server)
+    }
+
+    #[tokio::test]
+    async fn production_login_transport_rejects_plain_http_before_connecting() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/token", listener.local_addr().unwrap());
+        assert_eq!(
+            AsyncLoginHttp.post_json(&url, "{}".into()).await,
+            Err(Unreachable)
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), listener.accept())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn credential_exchange_redirects_are_returned_without_following_them() {
+        let response = b"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:1/must-not-follow\r\nContent-Length: 0\r\n\r\n".to_vec();
+        let (url, server) = login_server(response, false).await;
+        let client = login_client(false).unwrap();
+        let (result, socket) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(post_login(&client, &url, "{}".into()), server)
+        })
+        .await
+        .unwrap();
+        drop(socket.unwrap());
+        assert_eq!(result.unwrap().status, 302);
+    }
+
+    #[rstest::rstest]
+    #[case::exact_limit(MAX_EVENT, false)]
+    #[case::oversized(MAX_EVENT + 1, false)]
+    #[case::truncated(10, true)]
+    #[tokio::test]
+    async fn credential_response_reads_enforce_size_and_complete_framing(
+        #[case] size: usize,
+        #[case] truncated: bool,
+    ) {
+        let mut response =
+            format!("HTTP/1.1 200 OK\r\nContent-Length: {size}\r\n\r\n").into_bytes();
+        response.extend(std::iter::repeat_n(
+            b'x',
+            if truncated { size - 1 } else { size },
+        ));
+        let (url, server) = login_server(response, false).await;
+        let client = login_client(false).unwrap();
+        let (result, socket) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(post_login(&client, &url, "{}".into()), server)
+        })
+        .await
+        .unwrap();
+        drop(socket.unwrap());
+        if truncated || size > MAX_EVENT {
+            assert_eq!(result, Err(Unreachable));
+        } else {
+            assert_eq!(result.unwrap().body.len(), size);
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::drop(false)]
+    #[case::deadline(true)]
+    #[tokio::test]
+    async fn abandoning_a_credential_response_closes_its_pending_body_read(#[case] deadline: bool) {
+        use tokio::io::AsyncReadExt;
+        let (url, server) = login_server(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n".to_vec(),
+            true,
+        )
+        .await;
+        let client = login_client(false).unwrap();
+        let mut operation = Box::pin(post_login(&client, &url, "{}".into()));
+        // Wait for response headers with the request actually being polled, not a timing sleep.
+        let mut socket = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::select! {
+                socket = server => socket.unwrap(),
+                result = &mut operation => panic!("body must remain pending: {result:?}"),
+            }
+        })
+        .await
+        .unwrap();
+        if deadline {
+            tokio::time::pause();
+            tokio::time::advance(Duration::from_secs(31)).await;
+            tokio::time::resume();
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(5), operation)
+                    .await
+                    .unwrap(),
+                Err(Unreachable)
+            );
+        } else {
+            drop(operation);
+        }
+        let mut byte = [0];
+        let closed = tokio::time::timeout(Duration::from_secs(5), socket.read(&mut byte))
+            .await
+            .unwrap();
+        // Abandoning unread HTTP data can close with FIN or reset depending on
+        // the OS and whether headers were consumed before the future was dropped.
+        assert!(
+            matches!(closed, Ok(0))
+                || closed.is_err_and(|error| matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+                ))
+        );
+    }
 
     #[test]
     fn sse_framing_survives_every_possible_byte_boundary() {

@@ -135,11 +135,14 @@ async fn both_streams_are_drained_without_deadlock_and_truncation_keeps_valid_js
 #[tokio::test]
 async fn a_timeout_retains_partial_output_and_reports_termination() {
     let root = TempDir::new().unwrap();
+    // Instrumented Windows runners can spend over a second starting Git Bash;
+    // leave time to emit the prefixes before testing execution-time termination.
+    let timeout_ms = if cfg!(windows) { 5000 } else { 1000 };
     let result = run(
         &root,
         // A builtin loop tests direct-child termination on every platform; Unix
         // descendant cleanup is exercised separately below.
-        json!({"command":"printf started; printf problem >&2; while :; do :; done", "timeout_ms":1000}),
+        json!({"command":"printf started; printf problem >&2; while :; do :; done", "timeout_ms":timeout_ms}),
         4096,
     )
     .await;

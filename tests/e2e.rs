@@ -250,12 +250,27 @@ async fn the_binary_completes_a_native_workflow_and_retains_correlated_results()
         Response::json(response)
     });
     let (tx, mut updates) = tokio::sync::mpsc::unbounded_channel();
-    let client = Client.v2().on_receive_notification(
-        async move |update: v2::UpdateSessionNotification, _| {
-            tx.send(update).map_err(Error::into_internal_error)
-        },
-        agent_client_protocol::on_receive_notification!(),
-    );
+    let client = Client
+        .v2()
+        .on_receive_request(
+            async |_request: v2::RequestPermissionRequest,
+                   responder: agent_client_protocol::Responder<v2::RequestPermissionResponse>,
+                   _| {
+                responder.respond(
+                    serde_json::from_value(
+                        json!({"outcome":{"outcome":"selected","optionId":"allow_once"}}),
+                    )
+                    .unwrap(),
+                )
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_notification(
+            async move |update: v2::UpdateSessionNotification, _| {
+                tx.send(update).map_err(Error::into_internal_error)
+            },
+            agent_client_protocol::on_receive_notification!(),
+        );
     tokio::time::timeout(
         TIMEOUT,
         client.connect_with(subprocess(&isolated, &http.url), async |connection| {

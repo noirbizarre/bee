@@ -269,6 +269,10 @@ fn bash_output_is_captured_without_corrupting_the_protocol_stream() {
     loop {
         // recv parses every stdout line, including any accidental child output.
         let message = agent.recv();
+        if message["method"] == "session/request_permission" {
+            assert_eq!(message["params"]["subject"]["toolCallId"], "bash-call");
+            agent.send(&json!({"jsonrpc":"2.0","id":message["id"],"result":{"outcome":{"outcome":"selected","optionId":"allow_once"}}}));
+        }
         if message["params"]["update"]["state"] == "idle" {
             break;
         }
@@ -278,6 +282,73 @@ fn bash_output_is_captured_without_corrupting_the_protocol_stream() {
     assert!(result.contains("child-stdout"));
     assert!(result.contains("child-stderr"));
     assert!(result.contains("timed_out"));
+    let (status, stderr) = agent.finish();
+    assert!(status.success());
+    assert!(stderr.is_empty());
+}
+
+#[rstest::rstest]
+#[case::malformed(false)]
+#[case::direct_close(true)]
+#[test]
+fn unapproved_stdio_commands_never_run_and_close_follows_request_cleanup(#[case] close: bool) {
+    let root = tempfile::tempdir().unwrap();
+    let server = support::Server::start(vec![
+        support::Response::json(
+            json!({"choices":[{"index":0,"message":{"tool_calls":[{"id":"protected","type":"function","function":{"name":"bash","arguments":"{\"command\":\"printf bad > sentinel\"}"}}]},"finish_reason":"tool_calls"}]}),
+        ),
+        support::Response::json(support::chat_text("declined")),
+    ]);
+    let mut agent = Agent::configured(&format!(
+        "[providers.test]\nmodel='test'\nprotocols={{openai-chat={{base_url='{}'}}}}",
+        server.url
+    ));
+    agent.initialize(1);
+    agent
+        .send(&json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":root.path()}}));
+    let session = agent.recv()["result"]["sessionId"].clone();
+    agent.send(&json!({"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"text","text":"run"}]}}));
+    let permission = loop {
+        let message = agent.recv();
+        if message["method"] == "session/request_permission" {
+            break message;
+        }
+    };
+    if close {
+        agent.send(&json!({"jsonrpc":"2.0","id":4,"method":"session/close","params":{"sessionId":session}}));
+    } else {
+        agent.send(&json!({"jsonrpc":"2.0","id":permission["id"],"result":{}}));
+    }
+    let mut cancelled = false;
+    let mut terminal = false;
+    loop {
+        let message = agent.recv();
+        if message["method"] == "$/cancel_request" {
+            assert_eq!(message["params"]["requestId"], permission["id"]);
+            assert!(!terminal);
+            cancelled = true;
+        }
+        if message["params"]["update"]["state"] == "idle" {
+            assert!(!terminal);
+            terminal = true;
+            if close {
+                assert!(cancelled);
+            } else {
+                break;
+            }
+        }
+        if message["id"] == 4 {
+            assert!(close && terminal);
+            assert!(message.get("result").is_some());
+            break;
+        }
+    }
+    if close {
+        agent.send(&json!({"jsonrpc":"2.0","id":permission["id"],"result":{"outcome":{"outcome":"selected","optionId":"allow_once"}}}));
+        agent.send(&json!({"jsonrpc":"2.0","id":5,"method":"session/list","params":{}}));
+        assert_eq!(agent.recv()["id"], 5);
+    }
+    assert!(!root.path().join("sentinel").exists());
     let (status, stderr) = agent.finish();
     assert!(status.success());
     assert!(stderr.is_empty());

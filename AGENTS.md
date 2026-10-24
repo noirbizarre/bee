@@ -22,6 +22,9 @@ loop supports configurable turn limits and injected tool executors; production A
 registers the native bash, read, glob, list, write and edit tools with session-relative execution contexts.
 Client-hosted MCP tools are discovered per prompt and invoked through ACP's MCP transport, with session-scoped
 attachments, offline schema validation and complete JSON result envelopes. The client owns permission policy.
+Production ACP requests permission for Bash only, adds `ask_user` for form-capable clients,
+and initiates cancellable provider browser login for missing/expired stored credentials when URL elicitation is supported.
+Pending interactions are turn-owned; cleanup precedes terminal idle and direct-close responses.
 Each native backend preserves its own continuation and tool-result semantics.
 Project/nested AGENTS.md and additive user instructions feed a separate counted system payload. Standard Agent Skills
 use metadata-first discovery and read-based activation; semantic snapshots commit with successful history and survive
@@ -55,6 +58,7 @@ src/
 ├── acp.rs      the ACPv2 boundary: only this module and its submodules import the SDK;
 │               the agent core, and `serve` over any transport
 ├── acp/mcp.rs  session-scoped client MCP discovery, routing and composite execution
+├── acp/interactions.rs client-owned Bash authorization, form input and URL login correlation
 ├── session.rs  session state, free of the SDK
 ├── config.rs   layered XDG configuration (ADR-006), free of the SDK
 ├── provider.rs provider profiles from the configuration (ADR-007), free of the SDK

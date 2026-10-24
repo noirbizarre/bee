@@ -64,6 +64,10 @@ The [native tool contract](tools.md) provides typed schema validation, registrat
 Normal ACP sessions advertise and execute the shipped `bash`, `read`, `glob`, `list`, `write`, and `edit` tools
 through this
 same interface.
+The ACP boundary requests client permission before Bash execution and adds `ask_user`
+when form elicitation is negotiated. Missing/expired stored credentials can initiate
+URL-based browser login before the first model request. See
+[ACP user interactions](tools.md#acp-user-interactions) for outcomes and cancellation.
 Client-hosted [MCP tools](tools.md#client-hosted-mcp-tools) join this catalog through the ACP boundary's composite
 executor. Catalog discovery runs on each prompt; permission denials and invocation failures are correlated tool
 results. Complete MCP result/error envelopes are JSON strings in each provider's native tool-result representation.

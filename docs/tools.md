@@ -6,6 +6,40 @@ to the bounded inference loop. Normal ACP sessions advertise and execute the
 shipped `bash`, `read`, `glob`, `list`, `write`, and `edit` tools. Their execution base is the session cwd,
 not the launch directory used to load configuration.
 
+## ACP user interactions
+
+Before each validated native `bash` call, Bee sends `session/request_permission`
+with the command, absolute session cwd and originating tool-call ID. Options are
+`allow_once` and `reject_once`. Only the exact offered allow ID permits execution;
+rejection, unknown IDs/outcomes, cancellation, malformed replies, request errors and
+timeouts execute nothing. The client decides policy and can answer automatically.
+Bee does not classify commands or cache approval. Command timeout starts after approval.
+Other native tools keep their existing contracts; client-hosted MCP has its own policy.
+
+A client advertising `capabilities.elicitation.form` receives an additional ACP tool,
+`ask_user`. Input is `{"question":"Which environment should I use?"}`; the question
+must be nonempty and at most 4096 UTF-8 bytes. Bee requests a form with one required
+string, `answer`, correlated with the session and model tool call. Valid accepted
+answers become `{"data":{"answer":"staging"}}`. Answers must be nonempty, at most
+4096 UTF-8 bytes, and fit the complete tool-output budget; extra fields are rejected.
+Decline/cancel/unknown actions, errors and invalid answers become bounded `interaction`
+tool errors. This tool is for task information, not credentials. `ask_user` is reserved
+in ACP runtimes and cannot be replaced by an injected native tool.
+
+Form and URL capabilities are negotiated independently. Missing, null or empty
+elicitation capabilities enable neither. URL support enables prompt-time
+[provider browser login](index.md#acp-browser-sign-in), not a model-facing URL tool.
+Permission requests do not require an elicitation capability.
+
+Permission/form waits have five-minute deadlines; browser login has a five-minute
+overall deadline. Bee reports `requires_action` while blocked on user input and
+`running` when progress resumes. An interaction-level denial/cancel is a recoverable
+tool error; session cancellation or close aborts the whole turn. Pending requests and
+listeners are dropped before the single terminal idle; direct close responds afterward.
+Late replies cannot authorize work or revive an ended turn. Active resume snapshots
+`requires_action` when appropriate. ACP interactions do not implement MCP
+`input_required` or task continuation.
+
 ## Client-hosted MCP tools
 
 Bee advertises `session.mcp.acp`. The client hosts or proxies MCP servers and declares their opaque server IDs in
@@ -352,7 +386,8 @@ Arguments must be JSON objects. Validation performs no coercion or insertion of
 defaults; Serde applies declared defaults during decoding. Unknown fields follow
 the advertised schema. Prefer `#[serde(deny_unknown_fields)]` for closed inputs.
 JSON Schema `format` follows Draft 2020-12 annotation semantics, not additional
-format assertions. Implement tool-specific semantic checks in `execute`, returning
+format assertions. Implement reusable authorization-time semantic checks in `Tool::preflight`
+and enforce them in `execute`, returning
 `Failure::new(Code::InvalidArguments, "actionable guidance")` when appropriate.
 
 Successful results are JSON envelopes containing `data`. Ordinary errors contain
