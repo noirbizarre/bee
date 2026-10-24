@@ -1,5 +1,9 @@
 # bee
 
+<p align="center">
+  <img src="images/logo.svg" alt="Bee" style="max-width: 100%; height: auto;">
+</p>
+
 Bee is a lightweight, headless agent runtime written in Rust that implements ACPv2. It provides the core agentic loop
 and LLM provider integration, allowing it to work with any compatible ACPv2 client.
 
