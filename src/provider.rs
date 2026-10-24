@@ -63,19 +63,31 @@ const PRESET_KEYS: &[&str] = &[
 pub enum Protocol {
     /// OpenAI Chat Completions, and the many servers that copy it.
     OpenAiChat,
+    /// OpenAI Responses, the newer OpenAI API. Another endpoint with other
+    /// request and event shapes, so it is a protocol of its own and not an
+    /// option of `OpenAiChat` (ADR-011).
+    OpenAiResponses,
     /// Anthropic Messages.
     AnthropicMessages,
 }
 
 impl Protocol {
     /// Every protocol, in the order diagnostics list them.
-    pub const ALL: [Self; 2] = [Self::OpenAiChat, Self::AnthropicMessages];
+    // Appended to, never reordered: `prefer` puts the protocols it leaves out in
+    // this order, so inserting before an existing one would change which of them
+    // a configuration that omits it ends up preferring.
+    pub const ALL: [Self; 3] = [
+        Self::OpenAiChat,
+        Self::OpenAiResponses,
+        Self::AnthropicMessages,
+    ];
 
     /// The name used in configuration.
     #[must_use]
     pub fn name(self) -> &'static str {
         match self {
             Self::OpenAiChat => "openai-chat",
+            Self::OpenAiResponses => "openai-responses",
             Self::AnthropicMessages => "anthropic-messages",
         }
     }
@@ -87,7 +99,7 @@ impl Protocol {
     #[must_use]
     pub fn default_base_url(self) -> &'static str {
         match self {
-            Self::OpenAiChat => "https://api.openai.com/v1",
+            Self::OpenAiChat | Self::OpenAiResponses => "https://api.openai.com/v1",
             Self::AnthropicMessages => "https://api.anthropic.com",
         }
     }
@@ -159,6 +171,9 @@ pub enum ProtocolOptions {
         /// Which field carries the output limit.
         max_tokens_field: MaxTokensField,
     },
+    /// For [`Protocol::OpenAiResponses`]. It has no settings yet: the output
+    /// limit is always `max_output_tokens`, so there is nothing to switch.
+    OpenAiResponses,
     /// For [`Protocol::AnthropicMessages`].
     AnthropicMessages {
         /// The `anthropic-version` header, if not the backend's own.
@@ -174,6 +189,7 @@ impl ProtocolOptions {
             Protocol::OpenAiChat => Self::OpenAiChat {
                 max_tokens_field: MaxTokensField::default(),
             },
+            Protocol::OpenAiResponses => Self::OpenAiResponses,
             Protocol::AnthropicMessages => Self::AnthropicMessages {
                 version: None,
                 max_tokens: None,
@@ -184,6 +200,7 @@ impl ProtocolOptions {
     fn allowed_keys(protocol: Protocol) -> &'static [&'static str] {
         match protocol {
             Protocol::OpenAiChat => &["max_tokens_field"],
+            Protocol::OpenAiResponses => &[],
             Protocol::AnthropicMessages => &["version", "max_tokens"],
         }
     }
@@ -549,7 +566,13 @@ impl Reader<'_> {
                 Err(Error::ProviderUnknownKey {
                     path: self.path(&key),
                     key,
-                    allowed: allowed.join(", "),
+                    // A table that accepts nothing says so, instead of ending
+                    // the sentence "this table accepts: ".
+                    allowed: if allowed.is_empty() {
+                        "no keys".to_owned()
+                    } else {
+                        allowed.join(", ")
+                    },
                 })
             }
         }
@@ -939,6 +962,8 @@ impl Reader<'_> {
                     };
                 }
             }
+            // Nothing to read: `only_keys` above already refused every key.
+            ProtocolOptions::OpenAiResponses => {}
             ProtocolOptions::AnthropicMessages {
                 version,
                 max_tokens,

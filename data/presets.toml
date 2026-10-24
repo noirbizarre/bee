@@ -39,15 +39,24 @@ response_key = "key"
 # Each preset lists the protocols its provider speaks, each under `protocols`
 # with its own `base_url` and `options`. One protocol needs no `prefer`.
 [presets.openrouter]
+prefer = ["openai-chat", "openai-responses"]
 credential = { store = true, login = "openrouter" }
 
 [presets.openrouter.protocols.openai-chat]
 base_url = "https://openrouter.ai/api/v1"
 
+# Its Responses API is documented as a beta, so Chat stays preferred.
+[presets.openrouter.protocols.openai-responses]
+base_url = "https://openrouter.ai/api/v1"
+
+# OpenAI recommends the Responses API for new work, so it is preferred.
 [presets.openai]
+prefer = ["openai-responses", "openai-chat"]
 credential = { env = "OPENAI_API_KEY" }
 
-# The protocol's own default base URL, which is OpenAI's.
+# The protocols' own default base URL, which is OpenAI's.
+[presets.openai.protocols.openai-responses]
+
 [presets.openai.protocols.openai-chat]
 
 [presets.anthropic]
@@ -58,3 +67,76 @@ credential = { env = "ANTHROPIC_API_KEY" }
 # A local server needs no credential, which is what no `credential` means.
 [presets.ollama.protocols.openai-chat]
 base_url = "http://localhost:11434/v1"
+
+# --- Gateways and other vendors --------------------------------------------------
+#
+# Every URL below comes from the vendor's own documentation. A vendor is listed
+# by the protocols Bee speaks: Google's native API is not one of them.
+
+# OpenCode Zen, the pay-as-you-go gateway. It serves the open and the free models
+# over Chat Completions, the GPT, Grok and Muse models over Responses and the
+# Claude models over Messages, so no single protocol reaches them all. Chat is
+# preferred because it reaches the most models, until a protocol can be chosen
+# per model. Its Gemini models are only offered over Google's native protocol,
+# which Bee does not speak. Another key than Zen's (OpenCode Go has its own
+# endpoints under `/inference/go`) needs a profile of its own.
+[presets.opencode]
+prefer = ["openai-chat", "openai-responses", "anthropic-messages"]
+credential = { env = "OPENCODE_API_KEY" }
+
+[presets.opencode.protocols.openai-chat]
+base_url = "https://opencode.ai/inference/openai/v1"
+
+[presets.opencode.protocols.openai-responses]
+base_url = "https://opencode.ai/inference/openai/v1"
+
+[presets.opencode.protocols.anthropic-messages]
+base_url = "https://opencode.ai/inference/anthropic"
+
+# DeepSeek serves all three from its own API.
+[presets.deepseek]
+prefer = ["openai-chat", "openai-responses", "anthropic-messages"]
+credential = { env = "DEEPSEEK_API_KEY" }
+
+[presets.deepseek.protocols.openai-chat]
+base_url = "https://api.deepseek.com"
+
+[presets.deepseek.protocols.openai-responses]
+base_url = "https://api.deepseek.com"
+
+[presets.deepseek.protocols.anthropic-messages]
+base_url = "https://api.deepseek.com/anthropic"
+
+# Gemini, through its OpenAI-compatible endpoint.
+[presets.google]
+credential = { env = "GEMINI_API_KEY" }
+
+[presets.google.protocols.openai-chat]
+base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+
+[presets.groq]
+prefer = ["openai-chat", "openai-responses"]
+credential = { env = "GROQ_API_KEY" }
+
+[presets.groq.protocols.openai-chat]
+base_url = "https://api.groq.com/openai/v1"
+
+[presets.groq.protocols.openai-responses]
+base_url = "https://api.groq.com/openai/v1"
+
+[presets.mistral]
+credential = { env = "MISTRAL_API_KEY" }
+
+[presets.mistral.protocols.openai-chat]
+base_url = "https://api.mistral.ai/v1"
+
+# xAI's own documentation is written against the Responses API.
+[presets.xai]
+prefer = ["openai-responses", "openai-chat"]
+credential = { env = "XAI_API_KEY" }
+
+[presets.xai.protocols.openai-responses]
+base_url = "https://api.x.ai/v1"
+
+[presets.xai.protocols.openai-chat]
+base_url = "https://api.x.ai/v1"

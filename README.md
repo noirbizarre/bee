@@ -53,11 +53,12 @@ selectable per ACPv2 session, but no LLM is called yet. See the [documentation](
 
 A profile's `credential` names an environment variable (`{ env = "KEY" }`) or Bee's credential store
 (`{ store = true }`, optionally with `login = "openrouter"` for a browser sign-in). `bee auth login`, `logout` and
-`status` manage the store, which is a `0600` file under `$XDG_DATA_HOME/bee`. Providers are data: `preset = "openrouter"`
-(also `openai`, `anthropic`, `ollama`) fills in a profile, and your own `presets` and `login_flows` tables extend or
-override the shipped ones. OpenRouter's sign-in returns an API key;
-Cloudflare uses a scoped API token and not Wrangler's login; remote MCP server authorization is a separate audience and
-is not implemented. No LLM is called yet, so stored credentials are not used for requests. See the
+`status` manage the store, which is a `0600` file under `$XDG_DATA_HOME/bee`. Providers are data:
+`preset = "openrouter"` (also `openai`, `anthropic`, `opencode`, `deepseek`, `google`, `groq`, `mistral`, `xai`,
+`ollama`) fills in a profile, and your own `presets` and `login_flows` tables extend or override the shipped ones.
+OpenRouter's sign-in returns an API key; Cloudflare uses a scoped API token and not Wrangler's login; remote MCP server
+authorization is a separate audience and is not implemented. No LLM is called yet, so stored credentials are not used
+for requests. See the
 [documentation](https://noirbizarre.github.io/bee/#authentication).
 
 ## Scope

@@ -33,3 +33,4 @@ by editing the old one. The history is the value.
   sign-in per provider that has one
 - [ADR-009](009-provider-presets-and-login-flows.md) — Describe provider presets and browser sign-ins as data
 - [ADR-010](010-several-protocols-per-provider.md) — Let a provider speak several protocols, ordered by `prefer`
+- [ADR-011](011-openai-responses-protocol.md) — Add `openai-responses` as a protocol of its own

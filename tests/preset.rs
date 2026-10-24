@@ -160,6 +160,109 @@ fn the_openrouter_preset_is_a_stored_credential_with_the_shipped_sign_in() {
     );
 }
 
+#[rstest]
+#[case::openai("openai", "OPENAI_API_KEY")]
+#[case::anthropic("anthropic", "ANTHROPIC_API_KEY")]
+#[case::opencode("opencode", "OPENCODE_API_KEY")]
+#[case::deepseek("deepseek", "DEEPSEEK_API_KEY")]
+#[case::google("google", "GEMINI_API_KEY")]
+#[case::groq("groq", "GROQ_API_KEY")]
+#[case::mistral("mistral", "MISTRAL_API_KEY")]
+#[case::xai("xai", "XAI_API_KEY")]
+fn a_shipped_vendor_preset_reads_its_key_from_the_vendors_own_variable(
+    #[case] preset: &str,
+    #[case] variable: &str,
+) {
+    let providers = project(&format!("[providers.p]\npreset = \"{preset}\"\n")).unwrap();
+
+    assert_eq!(
+        providers.get("p").unwrap().credential(),
+        Some(&CredentialSource::Env(variable.to_owned()))
+    );
+}
+
+#[rstest]
+#[case::opencode(
+    "opencode",
+    "https://opencode.ai/inference/openai/v1",
+    "https://opencode.ai/inference/openai/v1",
+    Some("https://opencode.ai/inference/anthropic"),
+    Protocol::OpenAiChat
+)]
+#[case::deepseek(
+    "deepseek",
+    "https://api.deepseek.com",
+    "https://api.deepseek.com",
+    Some("https://api.deepseek.com/anthropic"),
+    Protocol::OpenAiChat
+)]
+#[case::openai(
+    "openai",
+    "https://api.openai.com/v1",
+    "https://api.openai.com/v1",
+    None,
+    Protocol::OpenAiResponses
+)]
+#[case::xai(
+    "xai",
+    "https://api.x.ai/v1",
+    "https://api.x.ai/v1",
+    None,
+    Protocol::OpenAiResponses
+)]
+#[case::openrouter(
+    "openrouter",
+    "https://openrouter.ai/api/v1",
+    "https://openrouter.ai/api/v1",
+    None,
+    Protocol::OpenAiChat
+)]
+#[case::groq(
+    "groq",
+    "https://api.groq.com/openai/v1",
+    "https://api.groq.com/openai/v1",
+    None,
+    Protocol::OpenAiChat
+)]
+fn a_multi_protocol_preset_has_each_protocol_at_the_vendors_documented_url_and_its_preference(
+    #[case] preset: &str,
+    #[case] chat_url: &str,
+    #[case] responses_url: &str,
+    #[case] anthropic_url: Option<&str>,
+    #[case] preferred: Protocol,
+) {
+    let providers = project(&format!("[providers.p]\npreset = \"{preset}\"\n")).unwrap();
+    let profile = providers.get("p").unwrap();
+
+    let url = |protocol| {
+        profile
+            .endpoint(protocol)
+            .map(|endpoint| endpoint.base_url())
+    };
+    assert_eq!(url(Protocol::OpenAiChat), Some(chat_url));
+    assert_eq!(url(Protocol::OpenAiResponses), Some(responses_url));
+    assert_eq!(url(Protocol::AnthropicMessages), anthropic_url);
+    assert_eq!(profile.protocol(), preferred);
+}
+
+#[test]
+fn the_shipped_presets_all_name_a_url_or_use_their_protocols_default() {
+    let catalog = Catalog::builtin();
+
+    for name in catalog.preset_names() {
+        let providers = project(&format!("[providers.p]\npreset = \"{name}\"\n")).unwrap();
+        for endpoint in providers.get("p").unwrap().endpoints() {
+            assert!(
+                endpoint.base_url().starts_with("https://")
+                    || endpoint.base_url().starts_with("http://localhost"),
+                "{name}: {}",
+                endpoint.base_url()
+            );
+            assert!(!endpoint.base_url().ends_with('/'), "{name}");
+        }
+    }
+}
+
 #[test]
 fn a_local_server_preset_has_no_credential() {
     let providers = project("[providers.l]\npreset = \"ollama\"\n").unwrap();
@@ -307,13 +410,13 @@ preset = "ollama"
 #[test]
 fn a_profile_can_add_a_protocol_to_a_preset_but_must_then_say_which_to_prefer() {
     let without = project(
-        "[providers.p]\npreset = \"openrouter\"\n\
-         [providers.p.protocols.anthropic-messages]\nbase_url = \"https://openrouter.ai/api\"",
+        "[providers.p]\npreset = \"mistral\"\n\
+         [providers.p.protocols.anthropic-messages]\nbase_url = \"https://gw.example/anthropic\"",
     )
     .unwrap_err();
     let with = project(
-        "[providers.p]\npreset = \"openrouter\"\nprefer = [\"openai-chat\"]\n\
-         [providers.p.protocols.anthropic-messages]\nbase_url = \"https://openrouter.ai/api\"",
+        "[providers.p]\npreset = \"mistral\"\nprefer = [\"openai-chat\"]\n\
+         [providers.p.protocols.anthropic-messages]\nbase_url = \"https://gw.example/anthropic\"",
     )
     .unwrap();
 
@@ -323,7 +426,7 @@ fn a_profile_can_add_a_protocol_to_a_preset_but_must_then_say_which_to_prefer() 
     assert_eq!(profile.protocol(), Protocol::OpenAiChat);
     assert_eq!(
         profile.endpoint(Protocol::OpenAiChat).unwrap().base_url(),
-        "https://openrouter.ai/api/v1",
+        "https://api.mistral.ai/v1",
         "the preset's own protocol is kept"
     );
 }

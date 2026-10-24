@@ -554,7 +554,7 @@ pub fn resolve(
 #[must_use]
 pub fn header_for(protocol: Protocol, secret: &Secret) -> (&'static str, Secret) {
     match protocol {
-        Protocol::OpenAiChat => (
+        Protocol::OpenAiChat | Protocol::OpenAiResponses => (
             "Authorization",
             Secret::new(format!("Bearer {}", secret.expose())),
         ),

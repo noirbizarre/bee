@@ -700,6 +700,7 @@ fn an_expired_credential_is_not_used() {
 
 #[rstest]
 #[case::openai(Protocol::OpenAiChat, "Authorization", format!("Bearer {SECRET}"))]
+#[case::responses(Protocol::OpenAiResponses, "Authorization", format!("Bearer {SECRET}"))]
 #[case::anthropic(Protocol::AnthropicMessages, "x-api-key", SECRET.to_owned())]
 fn the_protocol_decides_how_the_secret_is_presented(
     #[case] protocol: Protocol,

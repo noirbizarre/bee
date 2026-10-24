@@ -45,7 +45,8 @@ models = ["corp/base"]             # optional suggestions for model selectors, n
 credential = { env = "GATEWAY_KEY" }           # optional: names where the secret lives, see Authentication
 headers = { "X-Team" = "infra" }   # optional, sent only to this profile
 
-# `protocols` is required: one table per protocol the provider speaks, "openai-chat" or "anthropic-messages".
+# `protocols` is required: one table per protocol the provider speaks: "openai-chat", "openai-responses" or
+# "anthropic-messages".
 [providers.work.protocols.openai-chat]
 base_url = "https://gateway.corp.example/v1"   # optional; defaults per protocol
 options = { max_tokens_field = "max_completion_tokens" }   # settings only this protocol understands
@@ -85,8 +86,8 @@ Profiles are validated and selectable, but no LLM is called yet: they have no ef
 ## Authentication
 
 A profile's `credential` says where its secret comes from. It is separate from the `protocol` (which only decides how
-the secret is presented: `Authorization: Bearer` for `openai-chat`, `x-api-key` for `anthropic-messages`) and from the
-model. Exactly one source, or none:
+the secret is presented: `Authorization: Bearer` for `openai-chat` and `openai-responses`, `x-api-key` for
+`anthropic-messages`) and from the model. Exactly one source, or none:
 
 ```toml
 credential = { env = "OPENROUTER_API_KEY" }            # a variable in the environment that launches Bee
@@ -109,11 +110,29 @@ preset = "openrouter"              # protocols and credential come from the pres
 model = "anthropic/claude-sonnet-4"
 ```
 
-Shipped presets: `openrouter` (a stored credential with browser sign-in), `openai` (`OPENAI_API_KEY`), `anthropic`
-(`ANTHROPIC_API_KEY`) and `ollama` (a local server, no credential). Scalars and arrays in the profile replace the
-preset's, `headers` and each protocol's table under `protocols` merge key by key, `prefer` replaces, and `credential`
-is replaced whole. The catalogue deliberately has
-no model lists: name your own `model`.
+Shipped presets, with the variable each reads its key from:
+
+| Preset       | Protocols, preferred first                              | Credential                        |
+| ------------ | ------------------------------------------------------- | --------------------------------- |
+| `openai`     | `openai-responses`, `openai-chat`                       | `OPENAI_API_KEY`                  |
+| `anthropic`  | `anthropic-messages`                                    | `ANTHROPIC_API_KEY`               |
+| `openrouter` | `openai-chat`, `openai-responses`                       | stored, with browser sign-in      |
+| `opencode`   | `openai-chat`, `openai-responses`, `anthropic-messages` | `OPENCODE_API_KEY` (OpenCode Zen) |
+| `deepseek`   | `openai-chat`, `openai-responses`, `anthropic-messages` | `DEEPSEEK_API_KEY`                |
+| `google`     | `openai-chat` (Gemini's compatible endpoint)            | `GEMINI_API_KEY`                  |
+| `groq`       | `openai-chat`, `openai-responses`                       | `GROQ_API_KEY`                    |
+| `mistral`    | `openai-chat`                                           | `MISTRAL_API_KEY`                 |
+| `xai`        | `openai-responses`, `openai-chat`                       | `XAI_API_KEY`                     |
+| `ollama`     | `openai-chat`, local server                             | none                              |
+
+Scalars and arrays in the profile replace the preset's, `headers` and each protocol's table under `protocols` merge key
+by key, `prefer` replaces, and `credential` is replaced whole. Every URL is taken from the vendor's own documentation,
+and a vendor is listed by the protocols Bee speaks: OpenCode Zen serves its GPT, Grok and Muse models over
+`openai-responses`, its Claude models over `anthropic-messages` and the rest over `openai-chat`, and only its Gemini
+models (Google's native protocol) cannot be reached. Today one protocol serves a whole profile, the first of `prefer`;
+choosing per model is tracked in [#24](https://github.com/noirbizarre/bee/issues/24). OpenCode Go uses other endpoints
+(`/inference/go`) and needs a profile of its own. The catalogue deliberately has no model lists: name your own
+`model`.
 
 Define your own preset, or override a shipped one by name, in a `presets` table of any configuration file:
 

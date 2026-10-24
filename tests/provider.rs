@@ -112,6 +112,7 @@ fn a_profile_name_says_nothing_about_its_protocol() {
 
 #[rstest]
 #[case::openai("openai-chat", "https://api.openai.com/v1")]
+#[case::responses("openai-responses", "https://api.openai.com/v1")]
 #[case::anthropic("anthropic-messages", "https://api.anthropic.com")]
 fn the_base_url_defaults_to_the_protocols_and_is_overridable(
     #[case] protocol: &str,
@@ -230,6 +231,52 @@ fn one_protocol_needs_no_preference_and_prefer_may_still_name_it() {
     assert!(
         load("[providers.p]\nprefer = [\"openai-chat\"]\n[providers.p.protocols.openai-chat]")
             .is_ok()
+    );
+}
+
+#[test]
+fn the_responses_protocol_takes_no_options_and_says_so() {
+    let text = rendered(
+        load("[providers.p.protocols.openai-responses.options]\nmax_tokens = 5").unwrap_err(),
+    );
+
+    assert!(text.contains("bee::provider::unknown_key"), "{text}");
+    assert!(text.contains("no keys"), "{text}");
+}
+
+#[test]
+fn the_responses_protocol_has_no_settings_and_an_empty_options_table_is_fine() {
+    let providers = load("[providers.p.protocols.openai-responses]\noptions = {}").unwrap();
+
+    assert_eq!(
+        *providers.get("p").unwrap().options(),
+        ProtocolOptions::OpenAiResponses
+    );
+}
+
+#[test]
+fn protocols_that_prefer_leaves_out_follow_in_the_order_of_protocol_all() {
+    let providers = load(
+        "[providers.p]\nprefer = [\"anthropic-messages\"]\n\
+         [providers.p.protocols.openai-responses]\n[providers.p.protocols.openai-chat]\n\
+         [providers.p.protocols.anthropic-messages]",
+    )
+    .unwrap();
+
+    let order: Vec<_> = providers
+        .get("p")
+        .unwrap()
+        .endpoints()
+        .iter()
+        .map(|e| e.protocol())
+        .collect();
+    assert_eq!(
+        order,
+        [
+            Protocol::AnthropicMessages,
+            Protocol::OpenAiChat,
+            Protocol::OpenAiResponses
+        ]
     );
 }
 
@@ -445,6 +492,14 @@ fn a_project_can_add_a_profile_and_choose_it_as_the_default() {
     "[providers.p]\nprotocols = { openai-chat = {} }\nprefer = \"openai-chat\"",
     "bee::provider::wrong_type"
 )]
+#[case::an_option_of_a_protocol_with_none(
+    "[providers.p]\nprotocols = { openai-responses = { options = { max_tokens_field = \"max_tokens\" } } }",
+    "bee::provider::unknown_key"
+)]
+#[case::all_three_protocols_without_a_preference(
+    "[providers.p]\nprotocols = { openai-chat = {}, openai-responses = {}, anthropic-messages = {} }",
+    "bee::provider::no_preference"
+)]
 #[case::an_endpoint_with_an_unknown_key(
     "[providers.p]\nprotocols = { openai-chat = { version = \"1\" } }",
     "bee::provider::unknown_key"
@@ -598,10 +653,14 @@ fn an_invalid_value_names_its_key_and_file_so_it_can_be_found() {
 
 #[test]
 fn an_unknown_protocol_lists_the_supported_ones() {
-    let text = rendered(load("[providers.p]\nprotocols = { grpc = {} }").unwrap_err());
+    let error = load("[providers.p]\nprotocols = { grpc = {} }").unwrap_err();
+    // The help is the one place the list appears, and the renderer wraps it at
+    // the terminal width, even inside a hyphenated name.
+    let text = rendered(error).split_whitespace().collect::<String>();
 
-    assert!(text.contains("openai-chat"), "{text}");
-    assert!(text.contains("anthropic-messages"), "{text}");
+    for name in ["openai-chat", "openai-responses", "anthropic-messages"] {
+        assert!(text.contains(name), "{name} in {text}");
+    }
 }
 
 #[rstest]
