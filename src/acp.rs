@@ -21,6 +21,28 @@ use crate::provider::Providers;
 use crate::session::{SessionError, Sessions, Settings};
 use crate::{Error, Result};
 
+/// Immutable execution policy and complete native catalog for one connection.
+pub struct Runtime {
+    limits: crate::agent::Limits,
+    tools: crate::tool::Registry,
+}
+
+impl Runtime {
+    /// Supply a complete catalog, which may be empty or extended by the caller.
+    pub fn new(limits: crate::agent::Limits, tools: crate::tool::Registry) -> Self {
+        Self { limits, tools }
+    }
+
+    /// Compile the shipped catalog before accepting prompts.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Tool`] if shipped metadata or schemas fail registration.
+    pub fn builtins(limits: crate::agent::Limits) -> Result<Self> {
+        Ok(Self::new(limits, crate::tool::builtins()?))
+    }
+}
+
 /// Why a turn failed.
 ///
 /// Reported to the client as the `error` stop reason, with this text as the
@@ -53,7 +75,7 @@ pub struct Reply {
     session_id: v2::SessionId,
     message_id: String,
     token: u64,
-    input: Option<(crate::provider::Profile, String, Vec<crate::llm::Message>)>,
+    input: Option<crate::session::InferenceInput>,
     completed: Arc<Mutex<Option<crate::agent::Outcome>>>,
 }
 
@@ -81,8 +103,8 @@ impl Reply {
 }
 
 /// Credentials are resolved at request time, not while loading configuration.
-async fn inference(reply: Reply) -> std::result::Result<(), TurnFailure> {
-    let (profile, model, messages) = reply.input.clone().ok_or_else(|| TurnFailure::new(
+async fn inference(reply: Reply, runtime: Arc<Runtime>) -> std::result::Result<(), TurnFailure> {
+    let crate::session::InferenceInput { profile, model, messages, cwd } = reply.input.clone().ok_or_else(|| TurnFailure::new(
         "configure a provider and model in Bee's configuration or select a model over ACP before prompting"
     ))?;
     let env = crate::config::Environment::from_process();
@@ -102,9 +124,23 @@ async fn inference(reply: Reply) -> std::result::Result<(), TurnFailure> {
     let credential = credential.map(|value| value.secret().clone());
     let model = crate::llm::Model::new(profile, model, credential)
         .map_err(|error| TurnFailure::new(error.to_string()))?;
-    let outcome = crate::agent::run(&model, messages, &[], None, &mut |text| reply.text(text))
-        .await
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    // ACP owns the terminal update; dropping its future also signals tool observers.
+    let _guard = cancellation.clone().drop_guard();
+    let context = crate::tool::Context::new(cwd, cancellation, crate::tool::MAX_OUTPUT_BYTES)
         .map_err(|error| TurnFailure::new(error.to_string()))?;
+    let executor = crate::agent::NativeExecutor::new(&runtime.tools, context);
+    let tools = executor.definitions();
+    let outcome = crate::agent::run_with_limits(
+        &model,
+        messages,
+        &tools,
+        Some(&executor),
+        &mut |text| reply.text(text),
+        runtime.limits,
+    )
+    .await
+    .map_err(|error| TurnFailure::new(error.to_string()))?;
     *lock(&reply.completed) = Some(outcome);
     Ok(())
 }
@@ -117,11 +153,30 @@ async fn inference(reply: Reply) -> std::result::Result<(), TurnFailure> {
 /// # Errors
 ///
 /// Returns [`Error::Connection`] if the connection ends with a protocol or
-/// transport error. A peer that simply closes its end is not an error.
+/// transport error, or [`Error::Tool`] if the shipped catalog cannot register.
+/// A peer that simply closes its end is not an error.
 pub async fn serve(transport: impl ConnectTo<Agent>, providers: Providers) -> Result<()> {
+    serve_with_runtime(
+        transport,
+        providers,
+        Runtime::builtins(crate::agent::Limits::default())?,
+    )
+    .await
+}
+
+/// Serve with caller-owned execution limits and native catalog.
+///
+/// # Errors
+///
+/// Returns [`Error::Connection`] if the transport ends with a protocol error.
+pub async fn serve_with_runtime(
+    transport: impl ConnectTo<Agent>,
+    providers: Providers,
+    runtime: Runtime,
+) -> Result<()> {
     // `agent()` is `ConnectTo<Client>`, and the transport is the client's end,
     // so it is the transport that the agent connects to.
-    agent_with_providers(providers)
+    agent_with_runtime(providers, runtime)
         .connect_to(transport)
         .await
         .map_err(|error| Error::Connection {
@@ -139,6 +194,15 @@ pub async fn serve_stdio(providers: Providers) -> Result<()> {
     // No debug callback on purpose: stdout carries protocol traffic only, and a
     // trace line written there would corrupt the client's JSON-RPC stream.
     serve(Stdio::new(), providers).await
+}
+
+/// Serve stdio with validated policy and a precompiled catalog.
+///
+/// # Errors
+///
+/// As [`serve_with_runtime`].
+pub async fn serve_stdio_with_runtime(providers: Providers, runtime: Runtime) -> Result<()> {
+    serve_with_runtime(Stdio::new(), providers, runtime).await
 }
 
 /// Build the ACPv2 agent side of a connection.
@@ -163,7 +227,19 @@ pub fn agent() -> impl ConnectTo<Client> {
 /// choice is a session setting; the profile's endpoint, headers and credential
 /// are configuration, and no request can change them (ADR-007).
 pub fn agent_with_providers(providers: Providers) -> impl ConnectTo<Client> {
-    build(providers, inference)
+    // Fixed shipped schemas failing registration is an internal programming error.
+    agent_with_runtime(
+        providers,
+        Runtime::builtins(crate::agent::Limits::default()).expect("valid shipped tool schemas"),
+    )
+}
+
+/// Build sessions using the supplied complete native catalog and turn budgets.
+pub fn agent_with_runtime(providers: Providers, runtime: Runtime) -> impl ConnectTo<Client> {
+    let runtime = Arc::new(runtime);
+    build(providers, move |reply| {
+        inference(reply, Arc::clone(&runtime))
+    })
 }
 
 /// [`agent`], with `body` as the turn that answers every prompt.
@@ -397,7 +473,7 @@ where
                         Err(error) => return responder.respond_with_error(session_error(error)),
                     };
                     let mut input = registry.inference(&id);
-                    if let Some((_, _, history)) = &mut input {
+                    if let Some(input) = &mut input {
                         let content = request
                             .prompt
                             .iter()
@@ -411,7 +487,7 @@ where
                             })
                             .collect::<Vec<_>>()
                             .join("\n");
-                        history.push(crate::llm::Message::User(content));
+                        input.messages.push(crate::llm::Message::User(content));
                     }
                     drop(registry);
                     let session_id = request.session_id;

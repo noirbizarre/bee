@@ -428,7 +428,7 @@ async fn a_stalled_request_obeys_the_configured_deadline() {
 }
 
 #[tokio::test]
-async fn an_unsolicited_tool_call_cannot_execute_in_the_production_scope() {
+async fn an_unsolicited_tool_call_cannot_execute_with_an_empty_catalog() {
     let server = Server::start(vec![Response::json(
         json!({"choices":[{"index":0,"message":{"tool_calls":[{"id":"x","type":"function","function":{"name":"echo","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}),
     )]);

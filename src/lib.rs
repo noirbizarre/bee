@@ -34,7 +34,8 @@ pub use error::{Error, Result};
 ///
 /// Returns a configuration error if a configuration file is unreadable,
 /// malformed or conflicts with another layer, a provider error if a provider
-/// profile is invalid, [`Error::Io`] if the working
+/// profile is invalid, [`Error::AgentSetting`] if turn limits are invalid,
+/// [`Error::Tool`] if the shipped catalog cannot register, [`Error::Io`] if the working
 /// directory cannot be determined, and [`Error::Connection`] if the connection
 /// ends with an error.
 pub fn run() -> Result<()> {
@@ -50,6 +51,7 @@ pub fn run() -> Result<()> {
     // Validated here for the same reason: a typo in a base URL must stop the
     // launch, not surface as a connection error on the first prompt (ADR-007).
     let providers = provider::Providers::from_config(&config)?;
+    let runtime_options = acp::Runtime::builtins(agent::Limits::from_config(&config)?)?;
 
     // Async model sockets and timers need a reactor even while ACP is idle.
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -59,5 +61,5 @@ pub fn run() -> Result<()> {
             path: "<async runtime>".into(),
             source,
         })?;
-    runtime.block_on(acp::serve_stdio(providers))
+    runtime.block_on(acp::serve_stdio_with_runtime(providers, runtime_options))
 }

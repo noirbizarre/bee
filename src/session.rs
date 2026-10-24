@@ -130,6 +130,15 @@ pub struct Listing {
     pub cwd: PathBuf,
 }
 
+/// One atomic turn snapshot, including the execution base for native tools.
+#[derive(Clone)]
+pub(crate) struct InferenceInput {
+    pub(crate) profile: crate::provider::Profile,
+    pub(crate) model: String,
+    pub(crate) messages: Vec<Message>,
+    pub(crate) cwd: PathBuf,
+}
+
 #[derive(Debug)]
 struct Session {
     cwd: PathBuf,
@@ -211,17 +220,16 @@ impl Sessions {
 
     /// Snapshot the selected configuration and committed model context.
     /// Called under the same registry lock that registers the turn.
-    pub(crate) fn inference(
-        &self,
-        id: &str,
-    ) -> Option<(crate::provider::Profile, String, Vec<Message>)> {
+    pub(crate) fn inference(&self, id: &str) -> Option<InferenceInput> {
         let settings = self.settings(id).ok()??;
         let profile = self.providers.get(&settings.provider)?.clone();
-        Some((
+        let session = self.by_id.get(id)?;
+        Some(InferenceInput {
             profile,
-            settings.model?,
-            self.by_id.get(id)?.history.clone(),
-        ))
+            model: settings.model?,
+            messages: session.history.clone(),
+            cwd: session.cwd.clone(),
+        })
     }
 
     /// Commit only while this turn owns the session; cancelled work is stale.
