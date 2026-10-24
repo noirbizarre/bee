@@ -24,6 +24,9 @@ Client-hosted MCP tools are discovered and invoked through ACPv2's `session.mcp.
 catalog. The client supplies server attachments and enforces permissions. See [tools](tools.md) for the contracts,
 execution context and supported MCP subset.
 
+See [ACPv2 compatibility](compatibility.md) for the version baseline, automated workflow
+coverage, official TCK results and outstanding protocol gaps.
+
 Bee loads project and nested `AGENTS.md` instructions, additive `~/.agents/AGENTS.md`, and standard Agent Skills from
 project/user `.agents/skills` directories. Additional skill roots use `[skills] extra_roots = ["/opt/team/skills"]` in the
 normal configuration hierarchy. See [project instructions and skills](instructions.md) for scope, precedence and loading.
