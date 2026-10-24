@@ -48,6 +48,48 @@ fn stream(blocks: Vec<Value>, reason: &str) -> String {
 }
 
 #[tokio::test]
+async fn native_tool_errors_and_success_preserve_anthropic_flags_and_call_ids() {
+    let blocks = vec![
+        json!({"type":"tool_use","id":"failure","name":"echo","input":{"text":"fail"}}),
+        json!({"type":"tool_use","id":"success","name":"echo","input":{"text":"yes"}}),
+    ];
+    let server = Server::start(vec![
+        Response::sse(stream(blocks.clone(), "tool_use")),
+        Response::json(answer("done")),
+    ]);
+    let model = Model::new(
+        profile("anthropic-messages", &server.url, ""),
+        "opaque".into(),
+        None,
+    )
+    .unwrap();
+    let registry = support::native_registry();
+    let executor = bee::agent::NativeExecutor::new(&registry, support::native_context());
+    let result = bee::agent::run(
+        &model,
+        vec![Message::User("echo".into())],
+        &executor.definitions(),
+        Some(&executor),
+        &mut |_| {},
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.stop, Stop::End);
+    server.request();
+    let request = server.request();
+    assert_eq!(request.body["messages"][1]["content"], json!(blocks));
+    let results = &request.body["messages"][2]["content"];
+    assert_eq!(results[0]["tool_use_id"], "failure");
+    assert_eq!(results[0]["is_error"], true);
+    let failure: Value = serde_json::from_str(results[0]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(failure["error"]["code"], "execution");
+    assert_eq!(results[1]["tool_use_id"], "success");
+    assert_eq!(results[1]["is_error"], false);
+    let success: Value = serde_json::from_str(results[1]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(success, json!({"data":"yes"}));
+}
+
+#[tokio::test]
 async fn native_text_streaming_sets_authentication_version_limits_and_usage() {
     let server = Server::start(vec![Response::sse(stream(
         vec![json!({"type":"text","text":"héllo"})],

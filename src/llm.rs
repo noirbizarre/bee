@@ -66,6 +66,10 @@ pub enum Error {
     #[error("the model requested an unavailable tool; configure a matching tool executor")]
     #[diagnostic(code(bee::llm::tool))]
     Tool,
+    /// An injected executor's cancellation signal stopped the turn.
+    #[error("tool execution was cancelled; start a new turn to continue")]
+    #[diagnostic(code(bee::llm::cancelled))]
+    Cancelled,
 }
 
 /// The result of a single model step.

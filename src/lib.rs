@@ -22,6 +22,7 @@ pub mod login;
 pub mod preset;
 pub mod provider;
 pub mod session;
+pub mod tool;
 
 pub use error::{Error, Result};
 

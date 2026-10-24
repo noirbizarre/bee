@@ -7,6 +7,54 @@ use serde_json::json;
 use support::{Echo, Response, Server, chat_text, event, profile, tool};
 
 #[tokio::test]
+async fn a_registered_native_tool_returns_a_schema_error_then_executes_the_corrected_call() {
+    let call = |id: &str, arguments: &str| {
+        Response::json(
+            json!({"choices":[{"index":0,"message":{"tool_calls":[{"id":id,"type":"function","function":{"name":"echo","arguments":arguments}}]},"finish_reason":"tool_calls"}]}),
+        )
+    };
+    let server = Server::start(vec![
+        call("invalid", r#"{"text":""}"#),
+        call("corrected", r#"{"text":"héllo"}"#),
+        Response::json(chat_text("done")),
+    ]);
+    let model = Model::new(
+        profile("openai-chat", &server.url, ""),
+        "opaque".into(),
+        None,
+    )
+    .unwrap();
+    let registry = support::native_registry();
+    let executor = bee::agent::NativeExecutor::new(&registry, support::native_context());
+    let result = bee::agent::run(
+        &model,
+        vec![Message::User("echo".into())],
+        &executor.definitions(),
+        Some(&executor),
+        &mut |_| {},
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.stop, Stop::End);
+    let first = server.request();
+    assert_eq!(
+        first.body["tools"][0]["function"]["parameters"],
+        registry.definitions().next().unwrap().input_schema
+    );
+    let second = server.request();
+    let error = &second.body["messages"][2];
+    assert_eq!(error["tool_call_id"], "invalid");
+    let value: serde_json::Value =
+        serde_json::from_str(error["content"].as_str().unwrap()).unwrap();
+    assert_eq!(value["error"]["code"], "invalid_arguments");
+    let third = server.request();
+    assert_eq!(third.body["messages"][4]["tool_call_id"], "corrected");
+    let value: serde_json::Value =
+        serde_json::from_str(third.body["messages"][4]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(value, json!({"data":"héllo"}));
+}
+
+#[tokio::test]
 async fn a_custom_endpoint_receives_the_selected_model_limits_and_safe_headers() {
     let server = Server::start(vec![Response::json(chat_text("answer"))]);
     let model = Model::new(
