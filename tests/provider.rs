@@ -59,6 +59,58 @@ fn load(text: &str) -> bee::Result<Providers> {
 }
 
 #[test]
+fn context_windows_merge_per_model_across_presets_and_layers() {
+    let sandbox = Sandbox::new();
+    sandbox.write(&sandbox.global(), "[presets.local]\ncontext_window=10000\nmodel_context_windows={small=1000,large=20000}\n[presets.local.protocols.openai-chat]\n[providers.work]\npreset='local'\nmodel_context_windows={small=2000}\n");
+    sandbox.write(
+        &sandbox.project(),
+        "[providers.work]\ncontext_window=12000\nmodel_context_windows={large=30000}\n",
+    );
+    let providers = sandbox.providers().unwrap();
+    let profile = providers.get("work").unwrap();
+    assert_eq!(profile.context_window("small"), Some(2000));
+    assert_eq!(profile.context_window("large"), Some(30000));
+    assert_eq!(profile.context_window("unknown"), Some(12000));
+    let unknown = load("[providers.work.protocols.openai-chat]").unwrap();
+    assert_eq!(
+        unknown.get("work").unwrap().context_window("anything"),
+        None
+    );
+}
+
+#[rstest]
+#[case("context_window=0")]
+#[case("context_window=-1")]
+#[case("context_window=4294967296")]
+#[case("context_window='sk-super-secret-token'")]
+#[case("model_context_windows={ 'sk-super-secret-token'=0 }")]
+#[case("model_context_windows={ 'sk-super-secret-token'='sk-super-secret-token' }")]
+#[case("model_context_windows={ 'sk-super-secret-token'=4294967296 }")]
+#[case("model_context_windows='sk-super-secret-token'")]
+fn invalid_context_limits_never_echo_values_or_model_map_keys(#[case] setting: &str) {
+    let error = load(&format!(
+        "[providers.work]\n{setting}\n[providers.work.protocols.openai-chat]"
+    ))
+    .unwrap_err();
+    assert!(!format!("{error:?} {error}").contains(SECRET));
+}
+
+#[test]
+fn context_model_map_diagnostics_preserve_leaf_provenance_and_redact_debug() {
+    let sandbox = Sandbox::new();
+    sandbox.write(&sandbox.global(), &format!("[providers.work]\nmodel_context_windows={{'{SECRET}'=0}}\n[providers.work.protocols.openai-chat]"));
+    sandbox.write(&sandbox.project(), "[providers.work]\ncontext_window=2000");
+    let error = sandbox.providers().unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains(&sandbox.global().display().to_string())
+    );
+    sandbox.write(&sandbox.global(), &format!("[providers.work]\nmodel_context_windows={{'{SECRET}'=1000}}\n[providers.work.protocols.openai-chat]"));
+    assert!(!format!("{:?}", sandbox.providers().unwrap()).contains(SECRET));
+}
+
+#[test]
 fn exact_model_mappings_override_preference_without_restricting_unknown_models() {
     let providers = load(r#"
 [providers.gateway]

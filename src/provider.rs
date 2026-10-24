@@ -41,6 +41,8 @@ const PROFILE_KEYS: &[&str] = &[
     "headers",
     "timeout_ms",
     "max_output_tokens",
+    "context_window",
+    "model_context_windows",
 ];
 
 /// The keys a table under `protocols` accepts.
@@ -58,6 +60,8 @@ const PRESET_KEYS: &[&str] = &[
     "headers",
     "timeout_ms",
     "max_output_tokens",
+    "context_window",
+    "model_context_windows",
 ];
 
 /// How Bee talks to an endpoint.
@@ -262,6 +266,8 @@ pub struct Profile {
     headers: Vec<(String, String)>,
     timeout_ms: u32,
     max_output_tokens: u32,
+    context_window: Option<u32>,
+    model_context_windows: BTreeMap<String, u32>,
 }
 
 // Written by hand: header values are routinely secrets (`Authorization`), and
@@ -291,6 +297,15 @@ impl fmt::Debug for Profile {
 }
 
 impl Profile {
+    /// Explicit capacity for an opaque model; unknown capacity stays unknown.
+    #[must_use]
+    pub fn context_window(&self, model: &str) -> Option<u32> {
+        self.model_context_windows
+            .get(model)
+            .copied()
+            .or(self.context_window)
+    }
+
     /// Whole-request deadline, including streamed body reads. Defaults to 120s.
     #[must_use]
     pub fn timeout(&self) -> std::time::Duration {
@@ -715,7 +730,48 @@ impl Reader<'_> {
             headers,
             timeout_ms: self.positive(table, &key, "timeout_ms", 120_000)?,
             max_output_tokens: self.positive(table, &key, "max_output_tokens", 4096)?,
+            context_window: table
+                .get("context_window")
+                .map(|_| self.positive(table, &key, "context_window", 1))
+                .transpose()?,
+            model_context_windows: self.model_context_windows(&key, table, preset)?,
         })
+    }
+
+    fn model_context_windows(
+        &self,
+        key: &str,
+        table: &Table,
+        preset: Option<&str>,
+    ) -> Result<BTreeMap<String, u32>> {
+        let key = format!("{key}.model_context_windows");
+        let Some(value) = table.get("model_context_windows") else {
+            return Ok(BTreeMap::new());
+        };
+        let mut result = BTreeMap::new();
+        for (model, value) in self.table(&key, value)? {
+            // Model IDs are values even when represented as keys: never echo them.
+            let origin = self.config.origin(&format!("{key}.{model}")).or_else(|| {
+                preset.and_then(|preset| {
+                    self.config
+                        .origin(&format!("presets.{preset}.model_context_windows.{model}"))
+                })
+            });
+            let path = origin.map_or_else(|| self.path(&key), |path| path.display().to_string());
+            let invalid = |reason| Error::ProviderInvalid {
+                key: key.clone(),
+                path: path.clone(),
+                reason,
+            };
+            check_model_id(model).map_err(invalid)?;
+            let count = value
+                .as_integer()
+                .and_then(|count| u32::try_from(count).ok())
+                .filter(|count| *count > 0)
+                .ok_or_else(|| invalid("must be a positive 32-bit integer"))?;
+            result.insert(model.clone(), count);
+        }
+        Ok(result)
     }
 
     fn model_protocols(

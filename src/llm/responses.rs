@@ -13,6 +13,23 @@ pub(super) async fn run(
     tools: &[Tool],
     text: &mut (dyn FnMut(&str) + Send),
 ) -> Result<Step, Error> {
+    let body = request(model, messages, tools)?;
+    let mut parser = Parser::default();
+    model
+        .http
+        .post(
+            &format!("{}/responses", model.endpoint().base_url()),
+            model.headers(None)?,
+            body,
+            model.profile.timeout(),
+            model.endpoint().protocol(),
+            &mut |event, data| parser.event(event, data, text),
+        )
+        .await?;
+    parser.result.ok_or(Error::Malformed)
+}
+
+pub(super) fn request(model: &Model, messages: &[Message], tools: &[Tool]) -> Result<Value, Error> {
     let mut input = Vec::new();
     for message in messages {
         match message {
@@ -49,18 +66,7 @@ pub(super) async fn run(
         // out so the same caller-owned JSON schema retains its meaning.
         body["tools"] = tools.iter().map(|tool| json!({"type":"function","name":tool.name,"description":tool.description,"parameters":tool.parameters,"strict":false})).collect();
     }
-    let mut parser = Parser::default();
-    model
-        .http
-        .post(
-            &format!("{}/responses", model.endpoint().base_url()),
-            model.headers(None)?,
-            body,
-            model.profile.timeout(),
-            &mut |event, data| parser.event(event, data, text),
-        )
-        .await?;
-    parser.result.ok_or(Error::Malformed)
+    Ok(body)
 }
 
 #[derive(Default)]
@@ -194,7 +200,18 @@ impl Parser {
                 }
                 self.complete(&value["response"], true, text)?;
             }
-            "response.failed" | "error" => return Err(Error::Provider),
+            "response.failed" => {
+                return Err(super::provider_error(
+                    Protocol::OpenAiResponses,
+                    &value["response"]["error"],
+                ));
+            }
+            "error" => {
+                return Err(super::provider_error(
+                    Protocol::OpenAiResponses,
+                    value.get("error").unwrap_or(&value),
+                ));
+            }
             // Reasoning is never presented as visible assistant text. Its final
             // replayable item is retained verbatim by response.completed.
             "response.reasoning_summary_part.added"
@@ -232,11 +249,19 @@ impl Parser {
                 Some("content_filter") => Stop::Refusal,
                 _ => return Err(Error::Unsupported("Responses incomplete reason")),
             },
-            Some("failed" | "cancelled") => return Err(Error::Provider),
+            Some("failed" | "cancelled") => {
+                return Err(super::provider_error(
+                    Protocol::OpenAiResponses,
+                    &response["error"],
+                ));
+            }
             _ => return Err(Error::Malformed),
         };
         if response.get("error").is_some_and(|error| !error.is_null()) {
-            return Err(Error::Provider);
+            return Err(super::provider_error(
+                Protocol::OpenAiResponses,
+                &response["error"],
+            ));
         }
         let output = response["output"].as_array().ok_or(Error::Malformed)?;
         if streaming

@@ -65,6 +65,8 @@ credential = { env = "GATEWAY_KEY" }           # optional: names where the secre
 headers = { "X-Team" = "infra" }   # optional, sent only to this profile
 timeout_ms = 120000               # optional whole-request deadline, including streaming
 max_output_tokens = 4096          # optional output limit
+context_window = 32768            # optional explicit context capacity; no default
+model_context_windows = { "corp/base" = 16384 } # optional exact-model capacity overrides
 
 # `protocols` is required: one table per protocol the provider speaks: "openai-chat", "openai-responses" or
 # "anthropic-messages".
@@ -99,6 +101,14 @@ catalog. `prefer` is still required for multi-protocol profiles because unmapped
 `model_protocols` merges key by key across global, `BEE_CONFIG` and project files, and over presets: a higher-priority
 entry replaces the same model ID while retaining other entries. An empty table (`model_protocols = {}`) does not clear
 inherited mappings. See [ADR-013](adr/013-per-model-protocol-selection.md).
+
+`context_window` and entries of `model_context_windows` are positive 32-bit token capacities. Exact model entries win
+over the profile fallback; otherwise capacity is unknown. The model map merges per key across layers and presets,
+without clearing inherited entries for an empty table. Before each request, Bee estimates input, reserves the effective
+output maximum and drops oldest complete turns when needed. The active turn and its tool pairs remain intact.
+Configured sessions report labeled estimates and notices when older context is removed. See
+[conversation context and token budgets](inference.md#conversation-context-and-token-budgets) for the estimate formula,
+transactional retention and explicit overflow handling.
 
 Several profiles can use the same protocol, so a gateway, a local server and a vendor API are just three profiles.
 Layers merge as above: a project file can override one header or the model of a global profile. Unknown keys,
@@ -162,8 +172,9 @@ Shipped presets, with the variable each reads its key from:
 | `xai`        | `openai-responses`, `openai-chat`                       | `XAI_API_KEY`                     |
 | `ollama`     | `openai-chat`, local server                             | none                              |
 
-Scalars and arrays in the profile replace the preset's, `model_protocols`, `headers` and each protocol's table under
-`protocols` merge key by key, `prefer` replaces, and `credential` is replaced whole. Every URL comes from vendor documentation,
+Scalars and arrays in the profile replace the preset's. `model_protocols`, `model_context_windows`, `headers` and each
+protocol's table under `protocols` merge key by key, `prefer` replaces, and `credential` is replaced whole.
+Every URL comes from vendor documentation,
 and a vendor is listed by the protocols Bee speaks: OpenCode Zen serves its GPT, Grok and Muse models over
 `openai-responses`, its Claude models over `anthropic-messages` and the rest over `openai-chat`, and only its Gemini
 models (Google's native protocol) cannot be reached. Set exact `model_protocols` entries for models needing a protocol

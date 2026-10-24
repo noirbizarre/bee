@@ -191,6 +191,8 @@ pub struct Outcome {
     pub stop: Stop,
     /// Summed known usage; absent when no step supplied that counter.
     pub usage: Usage,
+    /// Estimated occupancy and completeness of the summed known usage counters.
+    pub context: crate::context::Report,
 }
 
 /// Run with the default sixteen model steps and sixty-four tool calls.
@@ -214,13 +216,24 @@ pub async fn run_with_limits(
     limits: Limits,
 ) -> Result<Outcome, Error> {
     let mut usage = Usage::default();
+    // ACP adds exactly one user message per turn; no user means nothing is evictable.
+    let mut active = messages
+        .iter()
+        .rposition(|message| matches!(message, Message::User(_)))
+        .unwrap_or(0);
+    let mut removed_turns = 0;
+    let mut input_steps = 0;
+    let mut output_steps = 0;
     let mut calls_seen = HashSet::new();
     let names: HashSet<_> = tools.iter().map(|tool| &tool.name).collect();
     if names.len() != tools.len() {
         return Err(Error::Tool);
     }
     for index in 0..limits.max_steps {
+        removed_turns += crate::context::fit(model, &mut messages, tools, &mut active)?;
         let step = model.step(&messages, tools, text).await?;
+        input_steps += usize::from(step.usage.input.is_some());
+        output_steps += usize::from(step.usage.output.is_some());
         for (total, count) in [
             (&mut usage.input, step.usage.input),
             (&mut usage.output, step.usage.output),
@@ -237,10 +250,16 @@ pub async fn run_with_limits(
                 return Err(Error::Malformed);
             }
             messages.push(step.message);
+            let mut context = model.context(&messages, tools)?;
+            context.removed_turns = removed_turns;
+            context.steps = index + 1;
+            context.input_steps = input_steps;
+            context.output_steps = output_steps;
             return Ok(Outcome {
                 messages,
                 stop: step.stop,
                 usage,
+                context,
             });
         }
         if calls.is_empty() {

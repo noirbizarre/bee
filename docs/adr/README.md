@@ -36,3 +36,4 @@ by editing the old one. The history is the value.
 - [ADR-011](011-openai-responses-protocol.md) — Add `openai-responses` as a protocol of its own
 - [ADR-012](012-streaming-inference.md) — SDK-free inference with cancellable HTTP and caller-owned tools
 - [ADR-013](013-per-model-protocol-selection.md) — Select protocols by exact model ID independently of catalogs
+- [ADR-014](014-conversation-context-and-token-limits.md) — Budget explicit context windows and truncate whole turns
