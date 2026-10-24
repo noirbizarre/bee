@@ -473,17 +473,16 @@ fn an_error_in_what_a_preset_supplies_names_the_file_that_defined_the_preset() {
         "[providers.p]\npreset = \"bad\"\n",
     );
 
-    let text = rendered(sandbox.providers().unwrap_err());
+    let error = sandbox.providers().unwrap_err();
+    // Long temporary paths wrap in diagnostics; origin checks must also tolerate native separators.
+    let Error::ProviderInvalid { key, path, .. } = &error else {
+        panic!("expected an invalid provider setting: {error:?}");
+    };
+    assert_eq!(key, "providers.p.protocols.openai-chat.base_url");
+    assert_eq!(Path::new(path), sandbox.global());
 
+    let text = rendered(error);
     assert!(text.contains("bee::provider::invalid"), "{text}");
-    assert!(
-        text.contains("providers.p.protocols.openai-chat.base_url"),
-        "{text}"
-    );
-    assert!(
-        text.contains(".config/bee/config.toml"),
-        "the preset's file should be named, not `<unknown>`: {text}"
-    );
 }
 
 #[test]

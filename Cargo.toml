@@ -81,6 +81,12 @@ strip = true
 # its own would open a conflict against every one of those PRs. Resolve in
 # favour of the project if `git tpl update` ever touches it.
 
+[profile.ci]
+inherits = "test"
+# Full type and variable debug info makes Windows coverage builds memory-heavy;
+# line tables retain file/line backtraces without that cost.
+debug = "line-tables-only"
+
 [dependencies]
 # Errors & diagnostics. `thiserror` for typed errors inside the library,
 # `miette` to render them at the binary edge.

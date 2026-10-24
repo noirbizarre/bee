@@ -75,12 +75,12 @@ fn rendered(error: Error) -> String {
 
 #[test]
 fn xdg_config_home_selects_the_global_directory() {
-    let env = Environment::new(Some("/custom/xdg".into()), Some("/home/user".into()), None);
+    // A Unix-rooted fixture has no drive prefix and is not absolute on Windows.
+    let root = TempDir::new().unwrap();
+    let xdg = root.path().join("custom/xdg");
+    let env = Environment::new(Some(xdg.clone()), Some(root.path().join("home")), None);
 
-    assert_eq!(
-        env.global_config_path(),
-        Some(PathBuf::from("/custom/xdg/bee/config.toml"))
-    );
+    assert_eq!(env.global_config_path(), Some(xdg.join("bee/config.toml")));
 }
 
 #[test]
@@ -108,12 +108,15 @@ fn an_invalid_xdg_config_home_is_ignored(#[case] xdg: &str) {
 
 #[test]
 fn credentials_live_under_the_xdg_data_directory() {
-    let env = Environment::new(None, Some("/home/user".into()), None)
-        .with_xdg_data_home(Some("/custom/data".into()));
+    // Use a native absolute path so Windows exercises XDG precedence too.
+    let root = TempDir::new().unwrap();
+    let xdg = root.path().join("custom/data");
+    let env = Environment::new(None, Some(root.path().join("home")), None)
+        .with_xdg_data_home(Some(xdg.clone()));
 
     assert_eq!(
         env.credentials_path(),
-        Some(PathBuf::from("/custom/data/bee/credentials.json"))
+        Some(xdg.join("bee/credentials.json"))
     );
 }
 
