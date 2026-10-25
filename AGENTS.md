@@ -26,6 +26,8 @@ Production ACP requests permission for Bash only, adds `ask_user` for form-capab
 and initiates cancellable provider browser login for missing/expired stored credentials when URL elicitation is supported.
 Pending interactions are turn-owned; cleanup precedes terminal idle and direct-close responses.
 Each native backend preserves its own continuation and tool-result semantics.
+Optional Models.dev discovery enriches selection without blocking inference; public cache and account-specific endpoint
+listings stay separate. Explicit configuration wins over opted-in catalog protocol hints/context budgets, frozen per turn.
 Project/nested AGENTS.md and additive user instructions feed a separate counted system payload. Standard Agent Skills
 use metadata-first discovery and read-based activation; semantic snapshots commit with successful history and survive
 whole-turn eviction. Typed native targets defer calls when new scoped guidance must first reach the model.
@@ -65,6 +67,7 @@ src/
 ├── auth.rs     credential sources, the 0600 store and secret handling (ADR-008), free of the SDK
 ├── login.rs    the `pkce-key` browser sign-in, driven by a `LoginSpec`, free of the SDK
 ├── preset.rs   presets and login flows as data (ADR-009), free of the SDK
+├── models.rs   optional catalog/cache, endpoint discovery and metadata provenance, free of the SDK
 ├── http.rs     the one HTTP seam, so flows are tested against a fake
 ├── llm.rs      SDK-free inference types, errors and protocol dispatch
 ├── llm/        native wire adapters

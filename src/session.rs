@@ -91,9 +91,13 @@ pub struct Settings {
     pub providers: Vec<String>,
     /// The effective model, if the profile or the client gave one.
     pub model: Option<String>,
-    /// The model ids to suggest: the profile's, plus the client's choice if it
-    /// is not among them. A suggestion, never a limit.
+    /// Configured/discovered IDs, retaining any current custom choice.
+    /// Suggestions are never a limit or an automatic default.
     pub models: Vec<String>,
+    /// Enriched choices; discovery remains suggestions rather than validation.
+    pub model_info: Vec<crate::models::ModelInfo>,
+    /// Public catalog freshness, including unavailable and cache-only states.
+    pub catalog_status: serde_json::Value,
 }
 
 /// The identifiers of one prompt turn.
@@ -133,6 +137,7 @@ pub struct Listing {
 /// One atomic turn snapshot, including the execution base for native tools.
 #[derive(Clone)]
 pub(crate) struct InferenceInput {
+    pub(crate) selection: crate::models::Selection,
     pub(crate) instructions: crate::instructions::State,
     pub(crate) profile: crate::provider::Profile,
     pub(crate) model: String,
@@ -142,6 +147,7 @@ pub(crate) struct InferenceInput {
 
 #[derive(Debug)]
 struct Session {
+    protocol: Option<crate::provider::Protocol>,
     instructions: crate::instructions::State,
     cwd: PathBuf,
     open: bool,
@@ -184,6 +190,7 @@ pub struct Sessions {
     created: u64,
     by_id: HashMap<String, Session>,
     providers: Providers,
+    discovery: Option<std::sync::Arc<crate::models::Service>>,
 }
 
 impl Sessions {
@@ -202,6 +209,27 @@ impl Sessions {
         }
     }
 
+    /// Attach optional discovery; querying settings never performs I/O.
+    pub(crate) fn with_discovery(
+        mut self,
+        discovery: Option<std::sync::Arc<crate::models::Service>>,
+    ) -> Self {
+        self.discovery = discovery;
+        self
+    }
+
+    /// Background option updates must not target closed sessions.
+    pub(crate) fn open_settings(&self) -> Vec<(String, Settings)> {
+        self.by_id
+            .iter()
+            .filter(|(_, session)| session.open)
+            .filter_map(|(id, session)| {
+                self.describe(session)
+                    .map(|settings| (id.clone(), settings))
+            })
+            .collect()
+    }
+
     /// The provider and model `id` would use for its next turn.
     ///
     /// Precedence: the client's choice for this session, then the
@@ -217,20 +245,45 @@ impl Sessions {
             .by_id
             .get(id)
             .ok_or_else(|| SessionError::Unknown(id.to_owned()))?;
-        Ok(Self::describe(&self.providers, session))
+        Ok(self.describe(session))
     }
 
     /// Snapshot the selected configuration and committed model context.
     /// Called under the same registry lock that registers the turn.
     pub(crate) fn inference(&self, id: &str) -> Option<InferenceInput> {
-        let settings = self.settings(id).ok()??;
-        let profile = self.providers.get(&settings.provider)?.clone();
         let session = self.by_id.get(id)?;
+        // Inference only needs the selected ID, never the potentially large
+        // selector projection of every catalog model under the registry lock.
+        let name = session
+            .provider
+            .as_deref()
+            .or_else(|| self.providers.default_name())?;
+        let profile = self.providers.get(name)?.clone();
+        let model = session
+            .model
+            .clone()
+            .or_else(|| profile.default_model().map(str::to_owned))?;
+        let selection = self
+            .discovery
+            .as_ref()
+            .map(|service| service.snapshot())
+            .unwrap_or_default()
+            .resolve(&profile, &model);
+        let mut messages = session.history.clone();
+        // Refresh may change protocol with no model-ID change. Only the turn's
+        // copy becomes portable, so failure/cancellation cannot destroy history.
+        if session
+            .protocol
+            .is_some_and(|protocol| protocol != selection.protocol)
+        {
+            portable(&mut messages);
+        }
         Some(InferenceInput {
+            selection,
             instructions: session.instructions.clone(),
             profile,
-            model: settings.model?,
-            messages: session.history.clone(),
+            model,
+            messages,
             cwd: session.cwd.clone(),
         })
     }
@@ -242,40 +295,43 @@ impl Sessions {
         token: u64,
         history: Vec<Message>,
         instructions: crate::instructions::State,
+        protocol: Option<crate::provider::Protocol>,
     ) {
         if self.is_current(id, token)
             && let Some(session) = self.by_id.get_mut(id)
         {
             session.history = history;
             session.instructions = instructions;
+            session.protocol = protocol;
         }
     }
 
-    fn describe(providers: &Providers, session: &Session) -> Option<Settings> {
+    fn describe(&self, session: &Session) -> Option<Settings> {
+        let providers = &self.providers;
         let name = session
             .provider
             .as_deref()
             .or_else(|| providers.default_name())?;
         let profile = providers.get(name)?;
-        let mut models: Vec<String> = profile
-            .suggested_models()
-            .into_iter()
-            .map(str::to_owned)
-            .collect();
         let model = session
             .model
             .clone()
             .or_else(|| profile.default_model().map(str::to_owned));
-        if let Some(chosen) = &model
-            && !models.contains(chosen)
-        {
-            models.push(chosen.clone());
-        }
+        let snapshot = self
+            .discovery
+            .as_ref()
+            .map(|service| service.snapshot())
+            .unwrap_or_default();
+        let model_info = snapshot.suggestions(profile, model.as_deref());
+        // Keep the original public ID list consistent with the enriched view.
+        let models = model_info.iter().map(|info| info.id.clone()).collect();
         Some(Settings {
             provider: name.to_owned(),
             providers: providers.names().map(str::to_owned).collect(),
             model,
             models,
+            model_info,
+            catalog_status: serde_json::json!({"available": snapshot.fetched_at.is_some(), "stale": snapshot.stale, "fetched_at": snapshot.fetched_at, "error": snapshot.error, "cache_error": snapshot.cache_error}),
         })
     }
 
@@ -344,6 +400,7 @@ impl Sessions {
         self.by_id.insert(
             id.clone(),
             Session {
+                protocol: None,
                 instructions: crate::instructions::State::default(),
                 cwd: cwd.into(),
                 open: true,

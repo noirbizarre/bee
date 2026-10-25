@@ -40,3 +40,4 @@ by editing the old one. The history is the value.
 - [ADR-015](015-client-hosted-mcp-execution.md) — Execute client-hosted MCP tools through the ACP boundary
 - [ADR-016](016-project-instructions-and-agent-skills.md) — Load scoped AGENTS.md instructions and standard Agent Skills
 - [ADR-017](017-acp-permission-and-elicitation.md) — Keep Bash authorization, user input and browser login turn-owned
+- [ADR-018](018-optional-model-discovery.md) — Enrich selection with optional catalog and endpoint discovery

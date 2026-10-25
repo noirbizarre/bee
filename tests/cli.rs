@@ -17,6 +17,87 @@ fn the_version_flag_names_the_binary() {
 }
 
 #[test]
+fn models_commands_browse_dynamic_cached_providers_and_preserve_manual_ids_offline() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("selected.toml");
+    std::fs::write(&config, "[catalog]\nrefresh=false\n[providers.local]\nmodel='private/unknown'\ncatalog_provider='dynamic'\nprotocols={openai-chat={}}\n").unwrap();
+    let cache = dir.path().join("cache/bee/models.dev.json");
+    std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+    std::fs::write(&cache, serde_json::to_vec(&serde_json::json!({"version":1,"fetched_at":1,"catalog":{"dynamic":{"name":"Dynamic provider","models":{"public":{"name":"Public model","tool_call":true}}}}})).unwrap()).unwrap();
+    let output = isolated(dir.path())
+        .env("BEE_CONFIG", &config)
+        .args(["models", "providers", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let output: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(output["catalog"]["stale"], true);
+    assert_eq!(output["result"]["providers"][0]["id"], "dynamic");
+    isolated(dir.path())
+        .env("BEE_CONFIG", &config)
+        .args(["models", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("private/unknown"))
+        .stdout(predicate::str::contains("Public model"))
+        .stderr(predicate::str::contains("stale"));
+    isolated(dir.path())
+        .env("BEE_CONFIG", &config)
+        .args(["models", "list", "--catalog-provider", "dynamic", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("models.dev"));
+}
+
+#[test]
+fn disabled_catalog_keeps_manual_model_queries_working_and_refresh_fails_actionably() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("selected.toml");
+    std::fs::write(&config, "[catalog]\nenabled=false\n[providers.local]\nmodel='private/model'\nprotocols={openai-chat={}}\n").unwrap();
+    isolated(dir.path())
+        .env("BEE_CONFIG", &config)
+        .args(["models", "list", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("private/model"));
+    isolated(dir.path())
+        .env("BEE_CONFIG", &config)
+        .args(["models", "refresh"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("bee::models::discovery"));
+    isolated(dir.path())
+        .env("BEE_CONFIG", &config)
+        .args(["models", "providers"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("configure model IDs manually"));
+}
+
+#[test]
+fn invalid_catalog_settings_do_not_echo_values_or_unknown_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("selected.toml");
+    for setting in [
+        format!("enabled='{SECRET}'"),
+        format!("{SECRET}=true"),
+        "refresh_interval_secs=0".into(),
+    ] {
+        std::fs::write(&config, format!("[catalog]\n{setting}")).unwrap();
+        isolated(dir.path())
+            .env("BEE_CONFIG", &config)
+            .write_stdin("")
+            .assert()
+            .failure()
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::contains("bee::models::setting"))
+            .stderr(predicate::str::contains(SECRET).not());
+    }
+}
+
+#[test]
 fn the_help_flag_describes_bee_as_an_acpv2_runtime() {
     bee()
         .arg("--help")
@@ -47,6 +128,7 @@ fn isolated(dir: &std::path::Path) -> Command {
         .env("XDG_CONFIG_HOME", dir.join("xdg"))
         // Where credentials are kept: never the developer's own.
         .env("XDG_DATA_HOME", dir.join("data"))
+        .env("XDG_CACHE_HOME", dir.join("cache"))
         .env_remove("BEE_CONFIG")
         .env_remove("BEE_TEST_KEY")
         .current_dir(dir);

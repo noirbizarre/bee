@@ -37,6 +37,7 @@ pub struct Runtime {
     tools: crate::tool::Registry,
     auth_environment: Option<crate::config::Environment>,
     login_http: Arc<dyn crate::http::LoginHttp>,
+    discovery: Option<Arc<crate::models::Service>>,
 }
 
 impl Runtime {
@@ -48,7 +49,15 @@ impl Runtime {
             instructions: None,
             auth_environment: None,
             login_http: Arc::new(crate::http::AsyncLoginHttp),
+            discovery: None,
         }
+    }
+
+    /// Enable optional discovery with explicitly injected transport/cache dependencies.
+    #[must_use]
+    pub fn with_discovery(mut self, service: Arc<crate::models::Service>) -> Self {
+        self.discovery = Some(service);
+        self
     }
 
     /// Supply credential sources and transport explicitly for an embedded runtime.
@@ -160,7 +169,7 @@ impl Reply {
 
 /// Credentials are resolved at request time, not while loading configuration.
 async fn inference(reply: Reply, runtime: Arc<Runtime>) -> std::result::Result<(), TurnFailure> {
-    let crate::session::InferenceInput { profile, model, messages, cwd, instructions } = reply.input.clone().ok_or_else(|| TurnFailure::new(
+    let crate::session::InferenceInput { profile, model, messages, cwd, instructions, selection } = reply.input.clone().ok_or_else(|| TurnFailure::new(
         "configure a provider and model in Bee's configuration or select a model over ACP before prompting"
     ))?;
     let env = runtime
@@ -186,6 +195,9 @@ async fn inference(reply: Reply, runtime: Arc<Runtime>) -> std::result::Result<(
             reply
                 .login(&profile, &store, &env, runtime.login_http.as_ref())
                 .await?;
+            if let Some(discovery) = &runtime.discovery {
+                discovery.invalidate_endpoint(profile.name());
+            }
             crate::auth::resolve(&profile, &env, &store, crate::auth::unix_now()).map_err(|_| {
                 TurnFailure::new("cannot resolve the stored credential; run `bee auth login`")
             })?
@@ -198,7 +210,8 @@ async fn inference(reply: Reply, runtime: Arc<Runtime>) -> std::result::Result<(
     };
     let credential = credential.map(|value| value.secret().clone());
     let model = crate::llm::Model::new(profile, model, credential)
-        .map_err(|error| TurnFailure::new(error.to_string()))?;
+        .map_err(|error| TurnFailure::new(error.to_string()))?
+        .with_selection(selection);
     let guidance = if let Some(sources) = &runtime.instructions {
         Some(
             sources
@@ -361,7 +374,12 @@ pub fn agent_with_providers(providers: Providers) -> impl ConnectTo<Client> {
 /// Build sessions using the supplied complete native catalog and turn budgets.
 pub fn agent_with_runtime(providers: Providers, runtime: Runtime) -> impl ConnectTo<Client> {
     let runtime = Arc::new(runtime);
-    build(providers, move |reply| {
+    let discovery = runtime.discovery.clone();
+    let environment = runtime
+        .auth_environment
+        .clone()
+        .unwrap_or_else(crate::config::Environment::from_process);
+    build(providers, discovery, environment, move |reply| {
         inference(reply, Arc::clone(&runtime))
     })
 }
@@ -375,7 +393,12 @@ where
     F: Fn(Reply) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = std::result::Result<(), TurnFailure>> + Send + 'static,
 {
-    build(Providers::default(), body)
+    build(
+        Providers::default(),
+        None,
+        crate::config::Environment::default(),
+        body,
+    )
 }
 
 /// [`agent_with`], with sessions that choose among `providers`.
@@ -388,19 +411,33 @@ where
     F: Fn(Reply) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = std::result::Result<(), TurnFailure>> + Send + 'static,
 {
-    build(providers, body)
+    build(providers, None, crate::config::Environment::default(), body)
 }
 
-fn build<F, Fut>(providers: Providers, body: F) -> impl ConnectTo<Client>
+fn build<F, Fut>(
+    providers: Providers,
+    discovery: Option<Arc<crate::models::Service>>,
+    environment: crate::config::Environment,
+    body: F,
+) -> impl ConnectTo<Client>
 where
     F: Fn(Reply) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = std::result::Result<(), TurnFailure>> + Send + 'static,
 {
     let body = Arc::new(body);
-    let sessions = Arc::new(Mutex::new(Sessions::with_providers(providers)));
+    let endpoint_profiles: Vec<_> = providers
+        .names()
+        .filter_map(|name| providers.get(name))
+        .filter(|profile| profile.discover_models())
+        .cloned()
+        .collect();
+    let sessions = Arc::new(Mutex::new(
+        Sessions::with_providers(providers).with_discovery(discovery.clone()),
+    ));
     let mcp = Arc::new(Mutex::new(mcp::Bindings::default()));
     let tasks: Tasks = Arc::default();
     let interactions = Arc::new(Mutex::new(interactions::State::default()));
+    let discovery_started = std::sync::atomic::AtomicBool::new(false);
 
     // `Agent.v2()`, not `Agent.builder()`: the latter is the stable v1 surface.
     Agent
@@ -409,9 +446,15 @@ where
         .on_receive_request(
             {
                 let interactions = Arc::clone(&interactions);
+                let discovery = discovery.clone();
+                let sessions = Arc::clone(&sessions);
                 async move |request: v2::InitializeRequest,
                             responder: Responder<v2::InitializeResponse>,
-                            _connection: V2ConnectionTo<Client>| {
+                            connection: V2ConnectionTo<Client>| {
+                    let discovery = discovery.clone();
+                    let sessions = Arc::clone(&sessions);
+                    let endpoint_profiles = endpoint_profiles.clone();
+                    let environment = environment.clone();
                     {
                         let mut state = lock(&interactions);
                         state.form = request
@@ -441,7 +484,55 @@ where
                                 ),
                             ),
                         ),
-                    )
+                    )?;
+                    if let Some(discovery) = discovery.filter(|_| {
+                        !discovery_started.swap(true, std::sync::atomic::Ordering::SeqCst)
+                    }) {
+                        let mut changes = discovery.subscribe();
+                        let worker = Arc::clone(&discovery);
+                        connection.spawn(async move {
+                            worker.run().await;
+                            Ok(())
+                        })?;
+                        if !endpoint_profiles.is_empty() {
+                            let worker = Arc::clone(&discovery);
+                            connection.spawn(async move {
+                                loop {
+                                    // Sequential requests bound concurrency and never start login.
+                                    for profile in &endpoint_profiles {
+                                        let _ = worker.list_endpoint(profile, &environment).await;
+                                    }
+                                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                                }
+                            })?;
+                        }
+                        let updates = connection.clone();
+                        connection.spawn(async move {
+                            let mut sent = BTreeMap::new();
+                            while changes.changed().await.is_ok() {
+                                // Snapshot/send share the selection/close lock; old refreshes
+                                // cannot resurrect a closed session or its previous selection.
+                                let sessions = lock(&sessions);
+                                for (id, settings) in sessions.open_settings() {
+                                    let options = config_options(Some(settings));
+                                    let encoded =
+                                        serde_json::to_value(&options).unwrap_or_default();
+                                    if sent.get(&id) != Some(&encoded) {
+                                        let _ = send_update(
+                                            &updates,
+                                            &id.clone().into(),
+                                            v2::SessionUpdate::ConfigOptionUpdate(
+                                                v2::ConfigOptionUpdate::new(options),
+                                            ),
+                                        );
+                                        sent.insert(id, encoded);
+                                    }
+                                }
+                            }
+                            Ok(())
+                        })?;
+                    }
+                    Ok(())
                 }
             },
             // The SDK requires this macro to tie the handler to the request type.
@@ -791,9 +882,39 @@ fn config_options(settings: Option<Settings>) -> Vec<v2::SessionConfigOption> {
                 MODEL_OPTION,
                 "Model",
                 model.as_str(),
-                select(&settings.models),
+                settings
+                    .model_info
+                    .iter()
+                    .map(|info| {
+                        let label = info
+                            .facts
+                            .get("display_name")
+                            .and_then(|fact| fact.value.as_str())
+                            .unwrap_or(&info.id);
+                        let stale = info.facts.values().any(|fact| fact.stale);
+                        let description = format!(
+                            "{}{}; capabilities are declarations, not endpoint verification",
+                            info.sources.join(", "),
+                            if stale { " (stale catalog)" } else { "" }
+                        );
+                        v2::SessionConfigSelectOption::new(info.id.as_str(), label)
+                            .description(description)
+                            .meta(
+                                serde_json::json!({"bee.dev/models": info})
+                                    .as_object()
+                                    .cloned()
+                                    .unwrap_or_default(),
+                            )
+                    })
+                    .collect::<Vec<_>>(),
             )
             .description("The model id sent to the provider. Any id may be set, listed or not.")
+            .meta(
+                serde_json::json!({"bee.dev/models": settings.catalog_status})
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_default(),
+            )
             .category(v2::SessionConfigOptionCategory::Model),
         );
     }
@@ -821,6 +942,7 @@ where
     let session_id = reply.session_id.clone();
     let token = reply.token;
     let completed = Arc::clone(&reply.completed);
+    let protocol = reply.input.as_ref().map(|input| input.selection.protocol);
     let interactions = Arc::clone(&reply.interactions);
 
     // `catch_unwind` so a panicking turn ends as a failed turn and not as a
@@ -847,10 +969,10 @@ where
         && outcome.stop != crate::llm::Stop::Refusal
         && sessions.is_current(&id, token)
     {
-        sessions.commit(&id, token, outcome.messages, outcome.instructions);
+        sessions.commit(&id, token, outcome.messages, outcome.instructions, protocol);
         // Report only committed context, under the same lock as cancellation/idle.
         if let Some(window) = outcome.context.window {
-            let meta = serde_json::json!({"bee.dev/context": {"estimated":true,"method":"utf8-json-bytes/3+256","reservedOutput":outcome.context.reserved_output}});
+            let meta = serde_json::json!({"bee.dev/context": {"estimated":true,"method":"utf8-json-bytes/3+256","reservedOutput":outcome.context.reserved_output,"window":outcome.context.window_fact}});
             let _ = send_update(
                 &connection,
                 &session_id,
@@ -870,7 +992,7 @@ where
                         "Older conversation removed from model context",
                     )
                     .description(format!(
-                        "Removed {} oldest complete turn(s) to fit the configured context window.",
+                        "Removed {} oldest complete turn(s) to fit the effective context window.",
                         outcome.context.removed_turns
                     )),
                 ),

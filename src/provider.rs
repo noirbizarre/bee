@@ -43,6 +43,12 @@ const PROFILE_KEYS: &[&str] = &[
     "max_output_tokens",
     "context_window",
     "model_context_windows",
+    "catalog_provider",
+    "catalog_protocol_hints",
+    "catalog_context_window",
+    "discover_models",
+    "metadata",
+    "model_metadata",
 ];
 
 /// The keys a table under `protocols` accepts.
@@ -62,6 +68,12 @@ const PRESET_KEYS: &[&str] = &[
     "max_output_tokens",
     "context_window",
     "model_context_windows",
+    "catalog_provider",
+    "catalog_protocol_hints",
+    "catalog_context_window",
+    "discover_models",
+    "metadata",
+    "model_metadata",
 ];
 
 /// How Bee talks to an endpoint.
@@ -268,6 +280,12 @@ pub struct Profile {
     max_output_tokens: u32,
     context_window: Option<u32>,
     model_context_windows: BTreeMap<String, u32>,
+    catalog_provider: Option<String>,
+    catalog_protocol_hints: bool,
+    catalog_context_window: bool,
+    discover_models: bool,
+    metadata: crate::models::Metadata,
+    model_metadata: BTreeMap<String, crate::models::Metadata>,
 }
 
 // Written by hand: header values are routinely secrets (`Authorization`), and
@@ -297,6 +315,43 @@ impl fmt::Debug for Profile {
 }
 
 impl Profile {
+    /// Exact Models.dev association; never a required registry entry.
+    pub fn catalog_provider(&self) -> Option<&str> {
+        self.catalog_provider.as_deref()
+    }
+    /// Whether published SDK signals may inform protocol selection.
+    pub fn catalog_protocol_hints(&self) -> bool {
+        self.catalog_protocol_hints
+    }
+    /// Whether catalog capacities may enforce context eviction.
+    pub fn catalog_context_window(&self) -> bool {
+        self.catalog_context_window
+    }
+    /// Whether to enumerate this endpoint automatically with existing credentials.
+    pub fn discover_models(&self) -> bool {
+        self.discover_models
+    }
+    /// Explicit profile-wide descriptive defaults.
+    pub fn metadata(&self) -> &crate::models::Metadata {
+        &self.metadata
+    }
+    /// Exact model overrides; IDs remain opaque and case-sensitive.
+    pub fn model_metadata(&self, model: &str) -> Option<&crate::models::Metadata> {
+        self.model_metadata.get(model)
+    }
+    /// Whether routing was explicitly configured for this ID.
+    pub fn has_model_protocol(&self, model: &str) -> bool {
+        self.model_protocols.contains_key(model)
+    }
+
+    /// A hint can only select an already-configured protocol, below explicit mappings.
+    pub fn endpoint_for_model_with_hint(&self, model: &str, hint: Option<Protocol>) -> &Endpoint {
+        self.model_protocols
+            .get(model)
+            .and_then(|protocol| self.endpoint(*protocol))
+            .or_else(|| hint.and_then(|protocol| self.endpoint(protocol)))
+            .unwrap_or_else(|| self.preferred())
+    }
     /// Explicit capacity for an opaque model; unknown capacity stays unknown.
     #[must_use]
     pub fn context_window(&self, model: &str) -> Option<u32> {
@@ -735,7 +790,85 @@ impl Reader<'_> {
                 .map(|_| self.positive(table, &key, "context_window", 1))
                 .transpose()?,
             model_context_windows: self.model_context_windows(&key, table, preset)?,
+            catalog_provider: table
+                .get("catalog_provider")
+                .map(|value| self.model(&format!("{key}.catalog_provider"), value))
+                .transpose()?,
+            catalog_protocol_hints: self.boolean(table, &key, "catalog_protocol_hints")?,
+            catalog_context_window: self.boolean(table, &key, "catalog_context_window")?,
+            discover_models: self.boolean(table, &key, "discover_models")?,
+            metadata: table
+                .get("metadata")
+                .map(|value| self.metadata(&format!("{key}.metadata"), value))
+                .transpose()?
+                .unwrap_or_default(),
+            model_metadata: self.model_metadata(&key, table, preset)?,
         })
+    }
+
+    fn boolean(&self, table: &Table, key: &str, field: &str) -> Result<bool> {
+        table
+            .get(field)
+            .map(|value| {
+                value
+                    .as_bool()
+                    .ok_or_else(|| self.wrong_type(&format!("{key}.{field}"), "a boolean", value))
+            })
+            .transpose()
+            .map(|value| value.unwrap_or(false))
+    }
+
+    fn metadata(&self, key: &str, value: &Value) -> Result<crate::models::Metadata> {
+        // Discard serde's value-bearing errors, including unknown field names.
+        let metadata: crate::models::Metadata = value.clone().try_into().map_err(|_| {
+            self.invalid(
+                key,
+                "must contain supported metadata fields with the documented types",
+            )
+        })?;
+        if !metadata.valid() {
+            return Err(self.invalid(
+                key,
+                "metadata must have positive limits and nonempty control-free names/modalities",
+            ));
+        }
+        Ok(metadata)
+    }
+
+    fn model_metadata(
+        &self,
+        key: &str,
+        table: &Table,
+        preset: Option<&str>,
+    ) -> Result<BTreeMap<String, crate::models::Metadata>> {
+        let key = format!("{key}.model_metadata");
+        let Some(value) = table.get("model_metadata") else {
+            return Ok(BTreeMap::new());
+        };
+        let mut metadata = BTreeMap::new();
+        for (id, value) in self.table(&key, value)? {
+            let origin = self.config.origin(&format!("{key}.{id}")).or_else(|| {
+                preset.and_then(|preset| {
+                    self.config
+                        .origin(&format!("presets.{preset}.model_metadata.{id}"))
+                })
+            });
+            let path = origin.map_or_else(|| self.path(&key), |path| path.display().to_string());
+            // IDs used as keys must not escape in errors, even in nested metadata.
+            check_model_id(id).map_err(|reason| Error::ProviderInvalid {
+                key: key.clone(),
+                path: path.clone(),
+                reason,
+            })?;
+            let entry = self.metadata(&key, value).map_err(|error| match error {
+                Error::ProviderInvalid { key, reason, .. } => {
+                    Error::ProviderInvalid { key, path, reason }
+                }
+                error => error,
+            })?;
+            metadata.insert(id.clone(), entry);
+        }
+        Ok(metadata)
     }
 
     fn model_context_windows(

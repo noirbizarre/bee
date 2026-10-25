@@ -8,7 +8,7 @@ use clap::{Args, Parser, Subcommand};
 
 /// A minimal, headless Rust agent runtime implementing ACPv2.
 // Without a subcommand a client launched `bee` and it speaks ACPv2 on
-// stdin/stdout. The only subcommand is `auth`, which a person runs by hand.
+// stdin/stdout. Subcommands are human-facing operations, never ACP traffic.
 #[derive(Debug, Parser)]
 #[command(
     name = "bee",
@@ -31,9 +31,44 @@ pub struct Cli {
 /// What a person can ask Bee to do besides being launched by a client.
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Discover model IDs and metadata without making the catalog an allowlist.
+    #[command(subcommand)]
+    Models(ModelsCommand),
     /// Manage the credentials of provider profiles.
     #[command(subcommand)]
     Auth(AuthCommand),
+}
+
+/// `bee models ...`.
+#[derive(Debug, Subcommand)]
+pub enum ModelsCommand {
+    /// Browse the public catalog's providers, independently of configured profiles.
+    Providers {
+        /// Print structured metadata and freshness rather than a table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show model suggestions or explicitly enumerate an endpoint's visible IDs.
+    List {
+        /// Configured profile; the default profile when omitted.
+        #[arg(conflicts_with = "catalog_provider")]
+        profile: Option<String>,
+        /// Browse a Models.dev provider rather than a configured profile.
+        #[arg(long, conflicts_with = "endpoint")]
+        catalog_provider: Option<String>,
+        /// Query configured OpenAI-compatible endpoints using existing credentials.
+        #[arg(long)]
+        endpoint: bool,
+        /// Print per-field provenance and freshness as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Refresh the public catalog, retaining the last valid cache on failure.
+    Refresh {
+        /// Print structured refresh status.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// `bee auth ...`.

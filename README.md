@@ -31,7 +31,7 @@ prompts. Bee advertises the baseline session lifecycle (`session/new`, `list`, `
 
 **Chat Completions, Responses and Anthropic Messages inference are implemented.** Prompts stream responses from the
 selected endpoint. Turns can be cancelled or closed, and another prompt is refused until the session is idle. Context is
-retained in memory, with oldest-whole-turn truncation when explicit model context windows are configured; provider
+retained in memory, with oldest-whole-turn truncation for explicit or opted-in catalog context windows; provider
 context overflow fails explicitly. No ACP history is retained for replay; start resume synchronizes current state.
 Prompts accept text and resource links (references
 only, never fetched). The SDK-free loop supports injected function executors; production ACP executes native
@@ -61,7 +61,10 @@ are replaced rather than extended. A malformed or unreadable file, or a missing 
 with an actionable error that never repeats the file's contents. Provider profiles (`[providers.<name>]`: the protocols
 the provider speaks, each with its base URL and options, plus model, credential reference and headers) are validated and
 selectable per ACPv2 session. An optional `model_protocols = { "vendor/model.v2" = "openai-responses" }` table
-routes exact model IDs to configured protocols; unmapped IDs use `prefer`, without a catalog lookup.
+routes exact model IDs to configured protocols; unmapped IDs use `prefer` unless catalog hints are explicitly enabled.
+Optional [model discovery](docs/models.md) enriches ACP selectors and `bee models` commands with Models.dev metadata,
+cached offline fallback and separately enabled endpoint listings. Catalog refresh never blocks configured inference;
+explicit configuration wins over opted-in catalog protocol hints and context budgets.
 See the [documentation](https://noirbizarre.github.io/bee/#configuration).
 
 ## Authentication

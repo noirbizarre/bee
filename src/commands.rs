@@ -17,6 +17,8 @@ use bee::provider::{Profile, Providers};
 
 use crate::cli::{AuthCommand, LoginArgs};
 
+pub mod models;
+
 /// How long a request to the provider may take.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 

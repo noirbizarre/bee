@@ -9,8 +9,10 @@ use crate::llm::{Error, Message, Model, Tool};
 pub struct Report {
     /// Estimated retained input tokens, including tool definitions.
     pub estimated_input: u64,
-    /// Explicit model capacity, absent when unknown.
+    /// Effective explicit or opted-in catalog capacity, absent when unknown.
     pub window: Option<u32>,
+    /// Source/confidence of the enforced capacity, separate from token estimates.
+    pub window_fact: Option<crate::models::Fact>,
     /// Output capacity reserved for the next request.
     pub reserved_output: u64,
     /// Complete historical turns removed during this attempt.
