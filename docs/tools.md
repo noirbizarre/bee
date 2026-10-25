@@ -6,6 +6,37 @@ to the bounded inference loop. Normal ACP sessions advertise and execute the
 shipped `bash`, `read`, `glob`, `grep`, `list`, `write`, and `edit` tools. Their execution base is the session cwd,
 not the launch directory used to load configuration.
 
+## Execution plans
+
+Every ACP runtime also offers the turn-owned `update_plan` operation. Models use
+it for substantive multi-step work and send complete ordered snapshots:
+
+```json
+{"entries":[{"content":"Inspect the implementation","priority":"medium","status":"in_progress"},
+            {"content":"Implement and verify","priority":"high","status":"pending"}]}
+```
+
+Each entry requires `content`, `priority` (`high`, `medium`, `low`) and `status`
+(`pending`, `in_progress`, `completed`, `cancelled`). Descriptions must be nonblank
+and at most 4096 UTF-8 bytes. At most 128 entries and 64 KiB of serialized arguments
+are accepted; extra fields are rejected. Invalid calls return `invalid_arguments`
+tool errors without changing the plan. Accepted calls return `{"updated":true}`.
+`update_plan` is reserved and cannot be replaced by an injected native tool.
+
+The operation creates one plan per turn, with a runtime-owned stable `planId`.
+Calls replace the whole list, including descriptions, priorities, statuses and
+ordering; identical snapshots produce no additional notification. `{"entries":[]}`
+explicitly creates an empty plan or clears an existing list. Simple answers need
+no plan, and Bee never synthesizes one from assistant text or tool activity.
+
+Clients receive separate standard ACP v2 `plan_update` notifications, rather than
+assistant-message chunks or tool-lifecycle events. Plan entries have no standard
+item IDs: their order is the array order, and clients replace by `planId`.
+At every terminal stop, including normal completion, Bee preserves completed and
+cancelled entries and changes unfinished entries to `cancelled` before idle.
+Only explicit model updates mark work completed. Recoverable tool errors do not
+end the plan. See [plan retention and replay](sessions.md#execution-plan-retention).
+
 ## ACP user interactions
 
 Before each validated native `bash` call, Bee sends `session/request_permission`

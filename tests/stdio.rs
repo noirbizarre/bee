@@ -200,6 +200,101 @@ impl Drop for Agent {
 }
 
 #[test]
+fn standard_plan_messages_survive_process_restart_without_reexecuting_model_work() {
+    for interrupted in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join("state");
+        let initial = json!([{"content":"Inspect","priority":"high","status":"in_progress"}]);
+        let revised = json!([
+            {"content":"Verify","priority":"medium","status":"in_progress"},
+            {"content":"Inspected","priority":"high","status":"completed"}
+        ]);
+        let call = |id: &str, entries: Value| {
+            support::Response::json(
+                json!({"choices":[{"index":0,"message":{"tool_calls":[{"id":id,"type":"function","function":{"name":"update_plan","arguments":json!({"entries":entries}).to_string()}}]},"finish_reason":"tool_calls"}]}),
+            )
+        };
+        let (blocked, release) = support::Response::json(support::chat_text("done")).gated();
+        let terminal = if interrupted {
+            blocked
+        } else {
+            support::Response::json(support::chat_text("done"))
+        };
+        let server = support::Server::start(vec![
+            call("plan-a", initial.clone()),
+            call("plan-b", revised.clone()),
+            terminal,
+        ]);
+        let config = format!(
+            "[providers.test]\nmodel='test'\nprotocols={{openai-chat={{base_url='{}'}}}}",
+            server.url
+        );
+        let mut first = Agent::configured_with_state(&config, Some(&state));
+        first.initialize(1);
+        first.send(
+            &json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":root.path()}}),
+        );
+        let session = first.recv()["result"]["sessionId"].clone();
+        first.send(&json!({"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"text","text":"work"}]}}));
+        let mut plans = Vec::new();
+        loop {
+            let message = first.recv();
+            if message["params"]["update"]["sessionUpdate"] == "plan_update" {
+                assert_eq!(message["method"], "session/update");
+                assert_eq!(message["params"]["sessionId"], session);
+                plans.push(message["params"]["update"].clone());
+            }
+            if (interrupted && plans.len() == 2) || message["params"]["update"]["state"] == "idle" {
+                break;
+            }
+        }
+        assert_eq!(
+            plans[0],
+            json!({"sessionUpdate":"plan_update","plan":{"type":"items","planId":"plan-1","entries":initial}})
+        );
+        assert_eq!(
+            plans[1],
+            json!({"sessionUpdate":"plan_update","plan":{"type":"items","planId":"plan-1","entries":revised}})
+        );
+        server.request();
+        server.request();
+        server.request();
+        if interrupted {
+            // Kill without shutdown so recovery must reconcile the durable active plan.
+            drop(first);
+            let _ = release.send(());
+        } else {
+            assert!(first.finish().0.success());
+        }
+        let expected = json!({"sessionUpdate":"plan_update","plan":{"type":"items","planId":"plan-1","entries":[
+            {"content":"Verify","priority":"medium","status":"cancelled"},
+            {"content":"Inspected","priority":"high","status":"completed"}
+        ]}});
+        if !interrupted {
+            assert_eq!(
+                plans,
+                vec![plans[0].clone(), plans[1].clone(), expected.clone()]
+            );
+        }
+        let mut second = Agent::configured_with_state(&config, Some(&state));
+        second.initialize(1);
+        let replay = second.resume(&session, root.path(), true);
+        let retained: Vec<_> = replay
+            .iter()
+            .filter(|message| message["params"]["update"]["sessionUpdate"] == "plan_update")
+            .collect();
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0]["params"]["update"], expected);
+        // A conventional client can deserialize the raw update without metadata
+        // conventions or assistant-text/Hive-specific parsing.
+        let _: agent_client_protocol::schema::v2::UpdateSessionNotification =
+            serde_json::from_value(retained[0]["params"].clone()).unwrap();
+        server.assert_no_more_requests();
+        assert!(second.finish().0.success());
+    }
+}
+
+#[test]
 fn a_new_process_restores_native_identity_transcript_selection_and_tool_context_without_reexecution()
  {
     let root = tempfile::tempdir().unwrap();
@@ -881,7 +976,16 @@ fn configured_turn_limits_reach_real_stdio_inference() {
         .collect();
     assert_eq!(
         names,
-        ["bash", "edit", "glob", "grep", "list", "read", "write"]
+        [
+            "bash",
+            "edit",
+            "glob",
+            "grep",
+            "list",
+            "read",
+            "update_plan",
+            "write"
+        ]
     );
     server.assert_no_more_requests();
     let (status, stderr) = agent.finish();
@@ -919,11 +1023,11 @@ fn context_truncation_reports_committed_history_and_failures_leave_it_intact_ove
     .unwrap();
     let registry = bee::tool::builtins().unwrap();
     let executor = bee::agent::NativeExecutor::new(&registry, support::native_context());
+    let mut definitions = executor.definitions();
+    // ACP's turn-owned operation also consumes the model's context budget.
+    definitions.push(bee::acp::plan_tool());
     let report = model
-        .context(
-            &[bee::llm::Message::User(first.clone())],
-            &executor.definitions(),
-        )
+        .context(&[bee::llm::Message::User(first.clone())], &definitions)
         .unwrap();
     let window = report.estimated_input + report.reserved_output + 400;
     let mut agent = Agent::configured(&format!(

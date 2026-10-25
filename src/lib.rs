@@ -23,6 +23,7 @@ pub mod instructions;
 pub mod llm;
 pub mod login;
 pub mod models;
+mod plan;
 pub mod preset;
 pub mod provider;
 pub mod session;

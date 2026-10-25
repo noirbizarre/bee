@@ -154,6 +154,7 @@ pub(crate) struct InferenceInput {
 struct Session {
     durable: Option<crate::history::Handle>,
     transcript: Vec<crate::history::Message>,
+    plans: std::collections::BTreeMap<u64, crate::plan::Entries>,
     finalizing: bool,
     protocol: Option<crate::provider::Protocol>,
     instructions: crate::instructions::State,
@@ -410,6 +411,7 @@ impl Sessions {
             Session {
                 durable: None,
                 transcript: Vec::new(),
+                plans: Default::default(),
                 finalizing: false,
                 protocol: None,
                 instructions: crate::instructions::State::default(),
@@ -614,6 +616,7 @@ impl Sessions {
             Session {
                 durable: Some(handle),
                 transcript: Vec::new(),
+                plans: Default::default(),
                 finalizing: false,
                 cwd: snapshot.cwd,
                 turns: snapshot.turns,
@@ -695,6 +698,21 @@ impl Sessions {
             .get(id)
             .map(|session| session.transcript.as_slice())
             .unwrap_or(&[])
+    }
+
+    pub(crate) fn record_plan(&mut self, id: &str, turn: u64, plan: crate::plan::Entries) {
+        if let Some(session) = self.by_id.get_mut(id)
+            && session.durable.is_none()
+        {
+            session.plans.insert(turn, plan);
+        }
+    }
+
+    pub(crate) fn plans(&self, id: &str) -> impl Iterator<Item = (u64, &crate::plan::Entries)> {
+        self.by_id
+            .get(id)
+            .into_iter()
+            .flat_map(|session| session.plans.iter().map(|(turn, plan)| (*turn, plan)))
     }
 }
 

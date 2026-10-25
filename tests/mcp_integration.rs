@@ -372,8 +372,14 @@ async fn paginated_servers_with_identical_tool_names_route_stably_and_stay_sessi
         "discovery order cannot rename tools"
     );
     http.request();
-    assert!(
-        http.request().body.get("tools").is_none(),
+    assert_eq!(
+        http.request().body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["function"]["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["update_plan"],
         "attachments cannot leak to another session"
     );
 }
@@ -491,11 +497,14 @@ async fn failed_discovery_is_sanitized_and_resume_with_no_servers_recovers(
     .unwrap();
     let request = http.request();
     assert!(!request.body.to_string().contains("discarded"));
-    assert!(
-        request
-            .body
-            .get("tools")
-            .is_none_or(|tools| tools.as_array().unwrap().is_empty())
+    assert_eq!(
+        request.body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["function"]["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["update_plan"]
     );
 }
 

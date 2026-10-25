@@ -751,6 +751,59 @@ impl Handle {
         }
     }
 
+    pub(crate) fn plan(
+        &self,
+        turn: u64,
+        plan: crate::plan::Entries,
+        emit: impl FnOnce() + Send + 'static,
+    ) -> tokio::sync::oneshot::Receiver<Result<()>> {
+        let (send, receive) = tokio::sync::oneshot::channel();
+        // Plans are size-bounded before enqueue, but still share streaming's
+        // aggregate bound so slow disks cannot accumulate unbounded output.
+        let bytes = serde_json::to_vec(&plan).map_or(crate::plan::MAX_BYTES, |v| v.len()) + 256;
+        if let Err(error) = self.healthy() {
+            let _ = send.send(Err(error));
+            return receive;
+        }
+        if self
+            .0
+            .queued
+            .fetch_add(bytes, Ordering::AcqRel)
+            .saturating_add(bytes)
+            > 4 * 1024 * 1024
+        {
+            self.0.queued.fetch_sub(bytes, Ordering::AcqRel);
+            let failure = error(&self.0.path, "history output queue is full");
+            self.fail(failure.clone());
+            let _ = send.send(Err(failure));
+            return receive;
+        }
+        let handle = self.clone();
+        if self
+            .0
+            .sender
+            .send(Job::Run(Box::new(move |journal| {
+                let result = handle.healthy().and_then(|()| {
+                    if journal.projection.plans.get(&turn) != Some(&plan) {
+                        journal.append(Event::PlanUpdated { turn, plan })?;
+                    }
+                    emit();
+                    Ok(())
+                });
+                if let Err(failure) = &result {
+                    handle.fail(failure.clone());
+                }
+                handle.0.queued.fetch_sub(bytes, Ordering::AcqRel);
+                let _ = send.send(result);
+            })))
+            .is_err()
+        {
+            self.0.queued.fetch_sub(bytes, Ordering::AcqRel);
+            self.fail(error(&self.0.path, "history worker stopped"));
+        }
+        receive
+    }
+
     fn fail(&self, failure: Error) {
         let mut slot = self
             .0
@@ -825,10 +878,20 @@ impl Handle {
         .inspect_err(|failure| self.fail(failure.clone()))
     }
 
+    #[cfg(test)]
     pub(crate) async fn replay(
         &self,
         budget: Arc<ReplayBudget>,
+        emit: impl FnMut(Message) -> Result<()> + Send + 'static,
+    ) -> Result<()> {
+        self.replay_with_plans(budget, emit, |_, _| Ok(())).await
+    }
+
+    pub(crate) async fn replay_with_plans(
+        &self,
+        budget: Arc<ReplayBudget>,
         mut emit: impl FnMut(Message) -> Result<()> + Send + 'static,
+        mut emit_plan: impl FnMut(u64, crate::plan::Entries) -> Result<()> + Send + 'static,
     ) -> Result<()> {
         self.run(move |journal, _| {
             if journal.projection.transcript_bytes > budget.0.load(Ordering::Acquire) {
@@ -846,8 +909,17 @@ impl Handle {
                 }
                 Ok(())
             })?;
+            for plan in journal.projection.plans.values() {
+                bytes = bytes
+                    .checked_add(plan_replay_bytes(plan)?)
+                    .ok_or_else(ReplayBudget::exhausted)?;
+            }
             budget.reserve(bytes)?;
-            journal.for_each_message(&mut emit)
+            journal.for_each_message(&mut emit)?;
+            for (turn, plan) in &journal.projection.plans {
+                emit_plan(*turn, plan.clone())?;
+            }
+            Ok(())
         })
         .await
     }
@@ -866,6 +938,13 @@ impl Handle {
             .await
             .map_err(|_| error(&self.0.path, "history worker stopped"))?
     }
+}
+
+pub(crate) fn plan_replay_bytes(plan: &crate::plan::Entries) -> Result<usize> {
+    // Include protocol framing and the runtime-owned identity in replay budgets.
+    serde_json::to_vec(plan)
+        .map(|bytes| bytes.len() + 256)
+        .map_err(|_| ReplayBudget::exhausted())
 }
 
 #[cfg(test)]

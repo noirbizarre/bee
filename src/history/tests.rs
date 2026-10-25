@@ -2,6 +2,119 @@ use super::*;
 use journal::{Fault, Reader};
 use serde_json::json;
 
+fn plan() -> crate::plan::Entries {
+    serde_json::from_value(json!({"entries":[
+        {"content":"Done","priority":"high","status":"completed"},
+        {"content":"Work","priority":"medium","status":"in_progress"}
+    ]}))
+    .unwrap()
+}
+
+#[tokio::test]
+async fn plan_revisions_are_durable_deduplicated_and_recovered_without_context() {
+    let (_root, store, id, handle) = create().await;
+    handle.accept(1, json!([])).await.unwrap();
+    handle.plan(1, plan(), || {}).await.unwrap().unwrap();
+    handle.plan(1, plan(), || {}).await.unwrap().unwrap();
+    assert_eq!(
+        events(&handle.0.path)
+            .iter()
+            .filter(|event| matches!(event, Event::PlanUpdated { .. }))
+            .count(),
+        1
+    );
+    handle.release().await.unwrap();
+    let (snapshot, restored, interrupted) = store.attach(&id).await.unwrap();
+    assert!(interrupted);
+    assert!(snapshot.messages.is_empty());
+    restored.recover().await.unwrap();
+    let retained = restored
+        .run(|journal, _| Ok(journal.projection.plans.clone()))
+        .await
+        .unwrap();
+    let mut expected = plan();
+    expected.cancel_unfinished();
+    assert_eq!(retained.get(&1), Some(&expected));
+    restored.release().await.unwrap();
+    let (_, restored, interrupted) = store.attach(&id).await.unwrap();
+    assert!(!interrupted);
+    assert_eq!(
+        restored
+            .run(|journal, _| Ok(journal.projection.plans.clone()))
+            .await
+            .unwrap(),
+        retained
+    );
+}
+
+#[rstest::rstest]
+#[case(false)]
+#[case(true)]
+#[tokio::test]
+async fn failed_plan_writes_never_publish_and_failed_finishes_recover_unfinished_work(
+    #[case] fail_finish: bool,
+) {
+    let (_root, store, id, handle) = create().await;
+    handle.accept(1, json!([])).await.unwrap();
+    if fail_finish {
+        handle.plan(1, plan(), || {}).await.unwrap().unwrap();
+    }
+    handle
+        .run(|journal, _| {
+            journal.fault = Some(Fault::BeforeWrite);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    if fail_finish {
+        assert!(handle.finish(1, "completed", None).await.is_err());
+    } else {
+        let published = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = published.clone();
+        assert!(
+            handle
+                .plan(1, plan(), move || {
+                    observed.store(true, Ordering::SeqCst);
+                })
+                .await
+                .unwrap()
+                .is_err()
+        );
+        assert!(!published.load(Ordering::SeqCst));
+    }
+    handle.release().await.unwrap();
+    let (_, restored, _) = store.attach(&id).await.unwrap();
+    restored.recover().await.unwrap();
+    let plans = restored
+        .run(|journal, _| Ok(journal.projection.plans.clone()))
+        .await
+        .unwrap();
+    assert_eq!(plans.len(), usize::from(fail_finish));
+    if fail_finish {
+        assert_eq!(plans[&1].entries[1].status, crate::plan::Status::Cancelled);
+    }
+}
+
+#[tokio::test]
+async fn plan_replay_reserves_the_entire_budget_before_delivering_messages_or_plans() {
+    let (_root, _, _, handle) = create().await;
+    handle.accept(1, json!([])).await.unwrap();
+    handle.plan(1, plan(), || {}).await.unwrap().unwrap();
+    handle.finish(1, "cancelled", None).await.unwrap();
+    let bytes = Arc::new(ReplayBudget::new(Settings::default()));
+    bytes.0.store(1, Ordering::SeqCst);
+    assert!(
+        handle
+            .replay_with_plans(
+                bytes,
+                |_| panic!("message before budget reservation"),
+                |_, _| panic!("plan before budget reservation")
+            )
+            .await
+            .is_err()
+    );
+}
+
 fn snapshot() -> Snapshot {
     Snapshot {
         cwd: std::env::temp_dir(),
@@ -132,7 +245,7 @@ async fn incomplete_creations_are_not_published_to_the_session_listing() {
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(first["version"], 1);
+    assert_eq!(first["version"], 2);
     assert_eq!(first["seq"], 0);
     assert_eq!(first["event"]["id"], id);
 }

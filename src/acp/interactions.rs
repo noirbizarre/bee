@@ -272,6 +272,7 @@ pub(super) struct Native<'a> {
 impl Native<'_> {
     pub fn definitions(&self) -> Vec<Tool> {
         let mut definitions = self.inner.definitions();
+        definitions.push(super::plans::definition());
         if lock(&self.reply.interactions).form {
             definitions.push(Tool {
                 name: "ask_user".into(),
@@ -296,7 +297,7 @@ impl crate::agent::Executor for Native<'_> {
         snapshot: std::sync::Arc<str>,
     ) -> Pin<Box<dyn Future<Output = Result<ToolResult, Error>> + Send + 'a>> {
         // Snapshot activation cannot bypass authorization for a custom native target.
-        if call.name == "bash" || call.name == "ask_user" {
+        if matches!(call.name.as_str(), "bash" | "ask_user" | "update_plan") {
             return self.execute(call);
         }
         self.inner.execute_snapshot(call, snapshot)
@@ -306,6 +307,9 @@ impl crate::agent::Executor for Native<'_> {
         call: &'a Call,
     ) -> Pin<Box<dyn Future<Output = Result<ToolResult, Error>> + Send + 'a>> {
         Box::pin(async move {
+            if call.name == "update_plan" {
+                return self.reply.update_plan(call).await;
+            }
             if call.name == "ask_user" {
                 return self.reply.ask(call, self.output_limit()).await;
             }

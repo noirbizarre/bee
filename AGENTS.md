@@ -25,7 +25,9 @@ registers the native bash, read, glob, grep, list, write and edit tools with ses
 Client-hosted MCP tools are discovered per prompt and invoked through ACP's MCP transport, with session-scoped
 attachments, offline schema validation and complete JSON result envelopes. The client owns permission policy.
 Production ACP requests permission for Bash only, adds `ask_user` for form-capable clients,
-and initiates cancellable provider browser login for missing/expired stored credentials when URL elicitation is supported.
+and provides `update_plan` for explicit per-turn ACP item plans. Latest snapshots are durable,
+replayed independently of model context, and unfinished entries are cancelled before terminal idle.
+Bee initiates cancellable provider browser login for missing/expired stored credentials when URL elicitation is supported.
 Pending interactions are turn-owned; cleanup precedes terminal idle and direct-close responses.
 Each native backend preserves its own continuation and tool-result semantics.
 Optional Models.dev discovery enriches selection without blocking inference; public cache and account-specific endpoint
@@ -63,6 +65,7 @@ src/
 │               the agent core, and `serve` over any transport
 ├── acp/mcp.rs  session-scoped client MCP discovery, routing and composite execution
 ├── acp/interactions.rs client-owned Bash authorization, form input and URL login correlation
+├── acp/plans.rs turn-owned plan operations and standard ACP item-plan publication
 ├── session.rs  session state, free of the SDK
 ├── history.rs  private durable sessions, ordered JSONL journals and successful-context projections, free of the SDK
 ├── config.rs   layered XDG configuration (ADR-006), free of the SDK
@@ -76,6 +79,7 @@ src/
 ├── llm/        native wire adapters
 ├── agent.rs    bounded model/tool loop with an injected executor
 ├── context.rs  SDK-free context estimates, explicit budgets and whole-turn eviction
+├── plan.rs     SDK-free bounded plan snapshots and unfinished-entry reconciliation
 ├── instructions.rs scoped AGENTS.md, persistent payloads and transactional guidance
 ├── skills.rs   standard YAML skill metadata, deterministic discovery and configured roots
 ├── tool.rs     typed native tools, validation, execution context and registry
