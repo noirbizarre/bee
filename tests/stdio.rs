@@ -435,6 +435,21 @@ fn repeated_replay_is_bounded_without_deleting_history_or_preventing_state_only_
     assert!(agent.finish().0.success());
 }
 
+#[test]
+fn a_resume_response_releases_its_request_gate_before_the_next_request() {
+    let mut agent = Agent::spawn();
+    agent.initialize(1);
+    let cwd = agent._isolated.path().to_owned();
+    agent.send(&json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":cwd}}));
+    let session = agent.recv()["result"]["sessionId"].clone();
+    // Each response is a readiness barrier, even when the worker publishes it
+    // before the async resume continuation gets another turn on the reactor.
+    for index in 0..200 {
+        assert_eq!(agent.resume(&session, &cwd, index % 2 == 0).len(), 1);
+    }
+    assert!(agent.finish().0.success());
+}
+
 #[rstest::rstest]
 #[case::cancelled("cancel")]
 #[case::interrupted("kill")]

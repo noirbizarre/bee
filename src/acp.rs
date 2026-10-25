@@ -830,8 +830,13 @@ where
                                 let state = if lock(&tasks).contains_key(&id) {
                                     interactions::phase(lock(&interactions).waiting.contains_key(&id))
                                 } else { idle(None) };
+                                let options = config_options(sessions.settings(&id).ok().flatten());
+                                // Release on this publication lane, before the
+                                // client can observe the snapshot/response. The
+                                // awaiting continuation may not be scheduled yet.
+                                drop(_gate);
                                 let _ = send_update(&updates, &request.session_id, state);
-                                let _ = responder.respond(v2::ResumeSessionResponse::new().config_options(config_options(sessions.settings(&id).ok().flatten())));
+                                let _ = responder.respond(v2::ResumeSessionResponse::new().config_options(options));
                             }).await;
                             Ok(())
                         });
@@ -867,6 +872,7 @@ where
                     };
                     // The protocol requires a current-state snapshot before the
                     // response: the response alone does not imply idle.
+                    drop(gate);
                     responder.respond(v2::ResumeSessionResponse::new().config_options(options))
                 }
             },
@@ -932,6 +938,7 @@ where
                             let options = config_options(sessions.settings(&id).ok().flatten());
                             lock(&tasks).remove(&id);
                             let _ = finished.send(());
+                            drop(_gate);
                             match result {
                                 Ok(()) => responder.respond(v2::SetSessionConfigOptionResponse::new(options)),
                                 Err(error) => responder.respond_with_error(history_error(error)),
@@ -939,6 +946,7 @@ where
                         });
                     }
                     let options = config_options(sessions.settings(&id).ok().flatten());
+                    drop(gate);
                     responder.respond(v2::SetSessionConfigOptionResponse::new(options))
                 }
             },
@@ -1044,6 +1052,9 @@ where
                             return responder.respond_with_error(history_error(error));
                     }
                     lock(&sessions).record_user(&id, turn.user_message_id.clone(), content);
+                    // The accepted turn's busy barrier now protects execution;
+                    // do not keep a request reservation after acknowledging it.
+                    drop(gate);
 
                     // Acceptance only: the response says the user message was
                     // inserted, not that anything has been answered. Everything
@@ -1058,8 +1069,6 @@ where
                         let _ = finished.send(());
                         return Err(error);
                     }
-                    drop(gate);
-
                     // Both updates precede invoking the cancellable body, so
                     // even cancellation during durable acceptance ends after them.
                     // Send failures mean the peer is gone and the response is
@@ -1170,6 +1179,8 @@ async fn close_session(
             return responder.respond_with_error(history_error(error));
         }
     }
+    drop(_gate);
+    drop(closing);
     responder.respond(v2::CloseSessionResponse::new())
 }
 
