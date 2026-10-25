@@ -37,6 +37,7 @@ pub struct Environment {
     xdg_config_home: Option<PathBuf>,
     xdg_data_home: Option<PathBuf>,
     xdg_cache_home: Option<PathBuf>,
+    xdg_state_home: Option<PathBuf>,
     home: Option<PathBuf>,
     bee_config: Option<PathBuf>,
     variables: Variables,
@@ -94,6 +95,7 @@ impl Environment {
         Self {
             xdg_data_home: None,
             xdg_cache_home: None,
+            xdg_state_home: None,
             // No variables: a hermetic description holds only what it is given
             // (see `with_variable`).
             variables: Variables::default(),
@@ -112,13 +114,28 @@ impl Environment {
     /// Read the process environment.
     #[must_use]
     pub fn from_process() -> Self {
+        // Native Windows clients commonly set USERPROFILE rather than HOME.
+        // Resolve it here so all injected XDG consumers share the same home.
+        let home = std::env::var_os("HOME")
+            .filter(|home| !home.is_empty())
+            .or({
+                #[cfg(windows)]
+                {
+                    std::env::var_os("USERPROFILE")
+                }
+                #[cfg(not(windows))]
+                {
+                    None
+                }
+            });
         Self::new(
             std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
-            std::env::var_os("HOME").map(PathBuf::from),
+            home.map(PathBuf::from),
             std::env::var_os(BEE_CONFIG_VAR).map(PathBuf::from),
         )
         .with_xdg_data_home(std::env::var_os("XDG_DATA_HOME").map(PathBuf::from))
         .with_xdg_cache_home(std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from))
+        .with_xdg_state_home(std::env::var_os("XDG_STATE_HOME").map(PathBuf::from))
         .with_process_variables()
     }
 
@@ -137,6 +154,21 @@ impl Environment {
     pub fn with_xdg_cache_home(mut self, root: Option<PathBuf>) -> Self {
         self.xdg_cache_home = non_empty(root).filter(|path| path.is_absolute());
         self
+    }
+
+    /// Set the durable state root without consulting process-global state.
+    #[must_use]
+    pub fn with_xdg_state_home(mut self, root: Option<PathBuf>) -> Self {
+        self.xdg_state_home = non_empty(root).filter(|path| path.is_absolute());
+        self
+    }
+
+    /// Durable sessions are state, independent of disposable model caches.
+    pub fn history_path(&self) -> Option<PathBuf> {
+        self.xdg_state_home
+            .clone()
+            .or_else(|| self.home.as_ref().map(|home| home.join(".local/state")))
+            .map(|root| root.join("bee"))
     }
 
     /// Public model catalog cache; account-specific endpoint results never live here.

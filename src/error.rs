@@ -17,6 +17,22 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, Error, Diagnostic)]
 #[non_exhaustive]
 pub enum Error {
+    /// Replay limits are validated without quoting configuration values.
+    #[error("history setting in `{path}` {reason}")]
+    #[diagnostic(
+        code(bee::history::setting),
+        help("use [history] replay_max_bytes with a positive integer")
+    )]
+    HistorySetting {
+        /// Configuration source, never its contents.
+        path: String,
+        /// Fixed failure classification.
+        reason: &'static str,
+    },
+    /// Durable history cannot silently fall back to an empty memory registry.
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    History(#[from] crate::history::Error),
     /// Discovery is optional for inference but explicit discovery commands can fail.
     #[error(transparent)]
     #[diagnostic(

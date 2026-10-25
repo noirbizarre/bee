@@ -226,6 +226,16 @@ async fn resuming_an_active_session_reports_running_without_ending_its_turn(#[ca
                 request.replay_from = Some(v2::ReplayFrom::Start(v2::ReplayFromStart::new()));
             }
             connection.send_request(request).block_task().await?;
+            if start {
+                assert!(matches!(
+                    next(&mut updates).await.update,
+                    v2::SessionUpdate::UserMessage(_)
+                ));
+                assert!(matches!(
+                    next(&mut updates).await.update,
+                    v2::SessionUpdate::AgentMessage(_)
+                ));
+            }
             assert!(matches!(
                 next(&mut updates).await.update,
                 v2::SessionUpdate::StateUpdate(v2::StateUpdate::Running(_))

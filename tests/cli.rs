@@ -129,6 +129,7 @@ fn isolated(dir: &std::path::Path) -> Command {
         // Where credentials are kept: never the developer's own.
         .env("XDG_DATA_HOME", dir.join("data"))
         .env("XDG_CACHE_HOME", dir.join("cache"))
+        .env("XDG_STATE_HOME", dir.join("state"))
         .env_remove("BEE_CONFIG")
         .env_remove("BEE_TEST_KEY")
         .current_dir(dir);

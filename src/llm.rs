@@ -116,7 +116,7 @@ pub struct Tool {
 }
 
 /// A fully assembled function call, never an argument delta.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Call {
     /// Correlates the model call with its result.
     pub id: String,
@@ -127,7 +127,7 @@ pub struct Call {
 }
 
 /// Native continuation is kept separate from portable text.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Native {
     /// The only protocol permitted to replay this value.
     pub protocol: Protocol,
@@ -136,7 +136,7 @@ pub struct Native {
 }
 
 /// A conversation entry. Contents deliberately have no derived Debug.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Message {
     /// User text, including explicitly described resource links.
     User(String),

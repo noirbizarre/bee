@@ -17,6 +17,7 @@ pub mod auth;
 pub mod config;
 pub mod context;
 pub mod error;
+pub mod history;
 pub mod http;
 pub mod instructions;
 pub mod llm;
@@ -40,6 +41,7 @@ pub use error::{Error, Result};
 /// malformed or conflicts with another layer, a provider error if a provider
 /// profile is invalid, [`Error::AgentSetting`] if turn limits are invalid,
 /// [`Error::BashSetting`] if Bash policy is invalid,
+/// [`Error::History`] if private durable session storage is unavailable,
 /// [`Error::Tool`] if the shipped catalog cannot register, [`Error::Io`] if the working
 /// directory cannot be determined, and [`Error::Connection`] if the connection
 /// ends with an error.
@@ -63,6 +65,8 @@ pub fn run() -> Result<()> {
         &environment,
     ));
     let runtime_options = acp::Runtime::new(agent::Limits::from_config(&config)?, tools)
+        .with_history(history::Store::from_environment(&environment)?)
+        .with_history_settings(history::Settings::from_config(&config)?)
         .with_instructions(instructions::Sources::from_config(
             &config,
             &environment,

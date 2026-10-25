@@ -31,8 +31,9 @@ prompts. Bee advertises the baseline session lifecycle (`session/new`, `list`, `
 
 **Chat Completions, Responses and Anthropic Messages inference are implemented.** Prompts stream responses from the
 selected endpoint. Turns can be cancelled or closed, and another prompt is refused until the session is idle. Context is
-retained in memory, with oldest-whole-turn truncation for explicit or opted-in catalog context windows; provider
-context overflow fails explicitly. No ACP history is retained for replay; start resume synchronizes current state.
+durably retained, with oldest-whole-turn truncation for explicit or opted-in catalog context windows; provider
+context overflow fails explicitly. Sessions survive process restart, and start resume restores the visible transcript
+through normal ACP updates. See [session history](docs/sessions.md) for storage, retention and client restoration.
 Prompts accept text and resource links (references
 only, never fetched). The SDK-free loop supports injected function executors; production ACP executes native
 `bash`, `read`, `glob`, `grep`, `list`, `write`, and `edit` tools in each session's working directory.

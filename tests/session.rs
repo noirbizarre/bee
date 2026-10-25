@@ -428,7 +428,7 @@ async fn resuming_with_another_cwd_is_rejected() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn resuming_from_start_synchronizes_state_without_replaying_history() {
+async fn resuming_from_start_replays_full_messages_before_current_state() {
     run(async |connection, mut updates| {
         let cwd = dir("a");
         let session = new_session(&connection, cwd.clone()).await?;
@@ -438,6 +438,10 @@ async fn resuming_from_start_synchronizes_state_without_replaying_history() {
         request.replay_from = Some(v2::ReplayFrom::Start(v2::ReplayFromStart::new()));
 
         connection.send_request(request).block_task().await?;
+        let user = next(&mut updates).await;
+        assert!(matches!(user.update, v2::SessionUpdate::UserMessage(_)));
+        let agent = next(&mut updates).await;
+        assert!(matches!(agent.update, v2::SessionUpdate::AgentMessage(_)));
         let snapshot = next(&mut updates).await;
         assert_eq!(snapshot.session_id, session);
         assert!(matches!(

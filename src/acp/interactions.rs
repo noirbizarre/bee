@@ -42,7 +42,7 @@ impl Reply {
                 state.next_url += 1;
                 format!("bee-login-{}", state.next_url)
             };
-            self.phase(true).map_err(|_| failed())?;
+            self.phase(true).await.map_err(|_| failed())?;
             let request = v2::CreateElicitationRequest::new(
                 v2::ElicitationUrlMode::new(
                     v2::ElicitationSessionScope::new(self.session_id.clone()),
@@ -63,7 +63,7 @@ impl Reply {
                 return Err(failed());
             }
             let code = login.callback().await.map_err(|_| failed())?;
-            self.phase(false).map_err(|_| failed())?;
+            self.phase(false).await.map_err(|_| failed())?;
             let secret = login
                 .exchange(flow, &code, http)
                 .await
@@ -100,24 +100,50 @@ impl Reply {
         lock(&self.sessions).is_current(&self.id, self.token)
     }
 
-    pub(super) fn phase(&self, waiting: bool) -> Result<(), Error> {
+    pub(super) async fn phase(&self, waiting: bool) -> Result<(), Error> {
         // Publication shares the cancellation gate, preventing late running updates.
-        let sessions = lock(&self.sessions);
-        if !sessions.is_current(&self.id, self.token) {
-            return Err(Error::Cancelled);
-        }
-        let mut state = lock(&self.interactions);
-        if waiting {
-            state.waiting.insert(self.id.clone(), self.token);
-        } else {
-            state.waiting.remove(&self.id);
-        }
-        send_update(&self.connection, &self.session_id, phase(waiting))
-            .map_err(|_| Error::Cancelled)
+        let history = {
+            let sessions = lock(&self.sessions);
+            if !sessions.is_current(&self.id, self.token) {
+                return Err(Error::Cancelled);
+            }
+            let mut state = lock(&self.interactions);
+            if waiting {
+                state.waiting.insert(self.id.clone(), self.token);
+            } else {
+                state.waiting.remove(&self.id);
+            }
+            let Some(history) = sessions.history(&self.id) else {
+                return send_update(&self.connection, &self.session_id, phase(waiting))
+                    .map_err(|_| Error::Cancelled);
+            };
+            history
+        };
+        let connection = self.connection.clone();
+        let session_id = self.session_id.clone();
+        let sessions = std::sync::Arc::clone(&self.sessions);
+        let id = self.id.clone();
+        let token = self.token;
+        let (send, receive) = tokio::sync::oneshot::channel();
+        // Await publication before sending the associated outgoing request;
+        // permission/form/login requests must not overtake requires_action.
+        history
+            .publish(move || {
+                let sessions = lock(&sessions);
+                let result = if sessions.is_current(&id, token) {
+                    send_update(&connection, &session_id, phase(waiting))
+                        .map_err(|_| Error::Cancelled)
+                } else {
+                    Err(Error::Cancelled)
+                };
+                let _ = send.send(result);
+            })
+            .await;
+        receive.await.unwrap_or(Err(Error::Cancelled))
     }
 
     async fn permission(&self, call: &Call) -> Result<bool, Error> {
-        self.phase(true)?;
+        self.phase(true).await?;
         let cwd = self.input.as_ref().ok_or(Error::Tool)?.cwd.clone();
         let subject = v2::CommandPermissionSubject::new(
             call.arguments["command"].as_str().ok_or(Error::Tool)?,
@@ -151,7 +177,7 @@ impl Reply {
         };
         let response =
             tokio::time::timeout(crate::login::DEFAULT_TIMEOUT, pending.block_task()).await;
-        self.phase(false)?;
+        self.phase(false).await?;
         // Selection alone is not approval: resolve only the exact offered allow ID.
         Ok(matches!(response, Ok(Ok(v2::RequestPermissionResponse {
             outcome: v2::RequestPermissionOutcome::Selected(ref selected), ..
@@ -176,7 +202,7 @@ impl Reply {
         if !lock(&self.interactions).form {
             return Ok(failure("The client does not support form input."));
         }
-        self.phase(true)?;
+        self.phase(true).await?;
         let request = v2::CreateElicitationRequest::new(
             v2::ElicitationFormMode::new(
                 v2::ElicitationSessionScope::new(self.session_id.clone())
@@ -200,7 +226,7 @@ impl Reply {
         };
         let response =
             tokio::time::timeout(crate::login::DEFAULT_TIMEOUT, pending.block_task()).await;
-        self.phase(false)?;
+        self.phase(false).await?;
         if let Ok(Ok(response)) = response
             && let v2::ElicitationAction::Accept(accepted) = response.action
             && let Some(content) = accepted.content

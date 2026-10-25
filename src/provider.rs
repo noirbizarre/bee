@@ -80,7 +80,7 @@ const PRESET_KEYS: &[&str] = &[
 ///
 /// A closed set on purpose: each variant is code that exists. New endpoints
 /// need no variant, only a profile that picks one of these.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub enum Protocol {
     /// OpenAI Chat Completions, and the many servers that copy it.
