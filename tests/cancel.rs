@@ -206,8 +206,11 @@ async fn cancelling_a_running_turn_ends_it_with_a_cancelled_idle_update() {
     .await;
 }
 
+#[rstest::rstest]
+#[case::omitted(false)]
+#[case::start(true)]
 #[tokio::test(flavor = "current_thread")]
-async fn resuming_an_active_session_reports_running_without_ending_its_turn() {
+async fn resuming_an_active_session_reports_running_without_ending_its_turn(#[case] start: bool) {
     let (dropped, _signal) = mpsc::unbounded_channel();
     run(
         never_ending_body!(dropped),
@@ -215,13 +218,14 @@ async fn resuming_an_active_session_reports_running_without_ending_its_turn() {
             let session = new_session(&connection).await?;
             prompt(&connection, &session).await?;
             while !is_agent_text(&next(&mut updates).await.update) {}
-            connection
-                .send_request(v2::ResumeSessionRequest::new(
-                    session.clone(),
-                    std::env::temp_dir().join("bee-cancel"),
-                ))
-                .block_task()
-                .await?;
+            let mut request = v2::ResumeSessionRequest::new(
+                session.clone(),
+                std::env::temp_dir().join("bee-cancel"),
+            );
+            if start {
+                request.replay_from = Some(v2::ReplayFrom::Start(v2::ReplayFromStart::new()));
+            }
+            connection.send_request(request).block_task().await?;
             assert!(matches!(
                 next(&mut updates).await.update,
                 v2::SessionUpdate::StateUpdate(v2::StateUpdate::Running(_))

@@ -69,11 +69,15 @@ reading `agent-client-protocol` 3.5.0 and `agent-client-protocol-schema` 1.12.0:
 | Invalid JSON; unknown method; method before `initialize`       | `-32700`, `-32601`, `-32600` (SDK)   |
 | Request params that do not parse                               | `-32602` (SDK)                       |
 | Unknown or closed session; `cwd` mismatch                      | `-32602`                             |
-| `cursor` on list, `replayFrom` on resume                       | `-32602`                             |
+| `cursor` on list, unknown/malformed resume cursor               | `-32602`                             |
 | Prompt content Bee does not support                            | `-32602`                             |
 | Prompt while the session's turn is running                     | `-32600`                             |
 | Failure or panic of a turn after insertion                     | `idle` with the `error` stop reason  |
 | Malformed or unknown-session `session/cancel` (notification)   | nothing on the wire                  |
+
+Resume clarification from #13 (2026-10-25): omitted/null `replayFrom` and
+`{"type":"start"}` succeed with a current-state snapshot before the response.
+No ACP history is retained, independently of successful model context.
 
 `-32800` is not used: a prompt is never pending, because it is answered on
 insertion.

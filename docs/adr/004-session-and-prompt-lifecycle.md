@@ -49,9 +49,11 @@ From reading `agent-client-protocol` 3.5.0 and `agent-client-protocol-schema`
   one client, so unguessability buys nothing.
 - Closed sessions are retained and can be resumed. `close` is idempotent;
   `resume` requires the session's own `cwd`.
-- `replayFrom` and `session/list` cursors are rejected with `-32602`. The
-  protocol forbids resuming without a replay that was asked for, Bee retains no
-  history, and it never issues a cursor.
+- Initially, all `replayFrom` and `session/list` cursors were rejected with
+  `-32602`. **Superseded for resume by #13 (2026-10-25):** the draft permits zero
+  retained ACP history, so omitted/null and the standard `start` cursor succeed
+  with a current-state snapshot before the response. Unknown/malformed replay
+  cursors and list cursors still return `-32602`; Bee never issues a list cursor.
 - `session/cancel` is accepted and does nothing. The placeholder turn ends
   inside its own handler, so no work is ever in flight. Real cancellation is
   the cancellation issue.

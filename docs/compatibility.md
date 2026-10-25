@@ -2,7 +2,7 @@
 
 Bee targets the draft ACP **wire version 2** over newline-delimited JSON-RPC on stdio.
 The supported subset is tested against the real binary and in-process. This page records
-the actual coverage and known gaps; Bee does not currently pass the full official TCK.
+the actual coverage and known gaps, including a passing pinned official TCK run.
 
 ## Version baseline
 
@@ -47,7 +47,7 @@ Paths below are relative to the repository root.
 | Complete native prompt → tools → final answer → retained context | `tests/e2e.rs`; all three inference protocols in `tests/inference.rs` |
 | Complete client-hosted MCP prompt → tool → final answer | Official SDK/RMCP client against the subprocess in `tests/e2e.rs`; three protocols in `tests/mcp_integration.rs` |
 | Native-tool failures, limits and recovery through production ACP | `tests/e2e.rs`, `tests/inference.rs` |
-| Per-tool invalid inputs, failure preservation and output limits | `tests/read.rs`, `tests/discovery.rs`, `tests/write.rs`, `tests/edit.rs`, `tests/bash.rs`, `tests/tools.rs` |
+| Per-tool invalid inputs, failure preservation and output limits | `tests/read.rs`, `tests/discovery.rs`, `tests/grep.rs`, `tests/write.rs`, `tests/edit.rs`, `tests/bash.rs`, `tests/tools.rs` |
 | Malformed requests, errors, protocol-only stdout, EOF shutdown | `tests/stdio.rs`, `tests/cli.rs`, `tests/cancel.rs` |
 | Bash permission allow/reject/cancel/unknown/error/timeout, no nonapproval side effects | `tests/interactions.rs`; malformed replies and direct-close wire ordering in `tests/stdio.rs` |
 | Independent form/URL negotiation, validated form responses, model-call correlation | `tests/interactions.rs`, across all three inference protocols |
@@ -55,6 +55,10 @@ Paths below are relative to the repository root.
 | Login transport HTTPS-only policy, redirect refusal, bounded/framed bodies, cancellation and deadlines | Unit tests in `src/http.rs` |
 | Whole browser-login deadline during URL create, callback wait and exchange; cleanup and retry | Virtual-time cases in `tests/interactions.rs` |
 | Pending permission/form/URL cancellation, direct close, late replies and session isolation | `tests/interactions.rs`; cleanup-before-idle assertions in client handlers |
+| Omitted/null/start resume, unknown/malformed cursor rejection, snapshot-before-response and retained model context | `tests/session.rs`, `tests/stdio.rs`, `tests/cancel.rs`, `tests/interactions.rs`, `tests/inference.rs` |
+
+Browser-login success, concurrency and cancellation scenarios in `tests/interactions.rs`
+are Unix-only; the CI platforms do not all execute the same login matrix.
 
 The native subprocess workflow discovers files with glob/list, reads a discovered
 file, writes content derived from that read, makes a targeted edit, reads it back,
@@ -78,7 +82,11 @@ mise run ci
 
 The existing Linux/macOS/Windows CI nextest matrix discovers these integration targets
 automatically. `mise run ci` also checks formatting, Clippy, spelling, Markdown,
-workflows and the documentation build.
+workflows and the documentation build. The separate project-owned
+`.github/workflows/compatibility.yaml` runs the pinned TCK on Linux for pull requests
+and main pushes, fails on TCK failure, and uploads its JSON requirement/transcript report.
+On 2026-10-25, `mise run ci` passed locally on Linux: **736 Rust tests**, formatting,
+Clippy, spelling, workflow/Markdown linting and the documentation build.
 
 ## Official compatibility tooling
 
@@ -94,35 +102,36 @@ mise run test:compatibility -- --report-json /tmp/bee-acp-tck.json
 
 This task builds Bee and runs `tests/compatibility.py`, which starts a local mock Chat
 Completions endpoint and launches the pinned TCK through `uvx`. It needs `uv`, Python
-and network access to install the pinned tooling on the first run. The TCK launches a
-fresh Bee process per test with an isolated cwd, HOME and configuration. Its cancellation
+3.14 or newer and network access to install the pinned tooling on the first run.
+CI provisions Python 3.14 with uv and selects it for both the runner and nested TCK.
+The TCK launches a fresh Bee process per test with an isolated cwd, HOME and configuration. Its cancellation
 prompt deliberately holds a model response pending; it does not use a live provider.
 Additional arguments are passed to the TCK. The runner preserves the TCK exit code.
 
-### Recorded result — 2026-10-24
+### Recorded result — 2026-10-25
 
-On Linux, against the baseline above: **82 tests passed, 40 skipped, 3 failed**.
-All mandatory requirements that ran passed; the TCK verdict was **NOT CONFORMANT**
-because three session-capability requirements failed:
+On Linux, against the baseline above: **85 tests passed, 40 skipped, 0 failed**.
+The TCK verdict was **CONFORMANT**. Requirement totals (distinct from test counts):
 
-| Requirement | Observed gap |
-| --- | --- |
-| `ACP-RESUME-202` | TCK requires accepting `replayFrom: {"type":"start"}` and ordering any replay before the response. Bee rejects it. |
-| `ACP-RESUME-206` | The snapshot test also requests `replayFrom: start`; that request is rejected. Snapshot ordering without replay passes. |
-| `ACP-RESUME-209` | Replay/schema validation cannot proceed because `replayFrom: start` is rejected. |
+| Tier | Passed | Failed | Skipped |
+| --- | --- | --- | --- |
+| Mandatory | 21 | 0 | 3 |
+| Capability | 40 | 0 | 25 |
+| Advisory | 15 | 0 | 4 |
+| Informational | 10 | 0 | 7 |
 
-The draft permits zero retained replay updates, but this TCK still requires accepting
-the start request. Bee's current explicit rejection is a compatibility gap, not a TCK
-pass or an independently negotiable capability. It remains tracked under
-[#13](https://github.com/noirbizarre/bee/issues/13). The TCK task therefore currently
-exits nonzero and is separate from the passing Rust CI regression suite.
+The previously failing `ACP-RESUME-202/206/209` now pass: Bee accepts the standard
+start cursor, replays zero retained ACP conversation updates, and sends a schema-valid
+current-state snapshot before responding. Unknown and malformed cursors still fail
+with `-32602` (`ACP-RESUME-207/208`). Retained-message identity is skipped because
+Bee retains no ACP conversation updates; this is permitted by the draft.
 
 Skipped tests include unadvertised authentication/content/session extensions and
 interaction/tool-update paths this fixture does not produce. In particular, the TCK
 run does not validate native mutations, MCP round trips, permissions, or elicitation.
 Bee's own deterministic workflows cover native/MCP execution and production ACP
-permission and elicitation callers. A passing TCK run
-would still not be an official certification or complete protocol coverage.
+permission and elicitation callers. This passing TCK run is not an official
+certification or complete protocol coverage.
 
 ## Native content search
 
@@ -136,8 +145,10 @@ See the [search contract and dependency licenses](tools.md#built-in-content-sear
 
 ## Unsupported and deferred behavior
 
-- **ACP update replay:** model context survives close/resume in memory, but ACP event
-  replay is not retained. Any supplied `replayFrom` is rejected with invalid params.
+- **ACP history retention:** model context survives close/resume in memory, but no ACP
+  conversation updates are retained for replay. Omitted/null `replayFrom` and
+  `{"type":"start"}` all resume with only the current-state snapshot. Unsupported
+  cursor types and malformed values return invalid params; no replay capability is invented.
 - **MCP interaction:** client-hosted MCP denials are ordinary tool errors; they are not
   ACP permission outcomes. MCP `input_required` and task continuations are rejected.
   Only client-hosted ACP MCP attachments are advertised, not direct stdio/HTTP MCP servers.
@@ -145,9 +156,9 @@ See the [search contract and dependency licenses](tools.md#built-in-content-sear
   forks and additional directories are not advertised. Resource links are references
   only and are never fetched.
 
-Issue [#46](https://github.com/noirbizarre/bee/issues/46) adds production permission and
+Issue [#46](https://github.com/noirbizarre/bee/issues/46) supplied production permission and
 elicitation coverage for [#13](https://github.com/noirbizarre/bee/issues/13), as mapped
-above. Replay remains outstanding; this is not full ACPv2 conformance.
+above; [#30](https://github.com/noirbizarre/bee/issues/30) supplied native content search.
 
 ## Client evidence
 
@@ -155,10 +166,27 @@ The official Rust SDK client **3.5.0** and the independent Python TCK above have
 run against the real Bee stdio binary. These are automated interoperability evidence,
 not a claim that an editor or session hub has been validated.
 
-[Hive](https://github.com/noirbizarre/hive) was checked as a real application candidate
-at commit `0f0662b0fe77faedba2794759c65608d332f22ec`: its manifest targets draft v2
-with SDK **3.4.0**. No Hive executable or release binary was available in the test
-environment, so no runtime application-client result is recorded. Its `doctor` command
-probes initialization only; its CLI has no headless prompt-submission command. A future
-application smoke should record the exact client commit, transport, launch configuration,
-and observed session/prompt/cancellation behavior. Bee has no dependency on Hive.
+### Real application smoke — 2026-10-25
+
+[Hive](https://github.com/noirbizarre/hive) **0.1.0** was exercised with its actual
+terminal client and daemon: **TUI WebSocket → Hive → Bee stdio**, ACPv2 throughout.
+The inspected source checkout was `0f0662b0fe77faedba2794759c65608d332f22ec`, pinning
+SDK **3.4.0**. The available development executable's SHA-256 was
+`84745f999318d123fc3fc0c37aefb0eea75d3f832460c9368d130a2eb8fa17cb`;
+its exact build commit was not independently established.
+
+The smoke used temporary HOME/XDG directories and a project workspace, a daemon bound
+to an ephemeral loopback port, and a Hive default profile with Bee's absolute binary
+path, `versions = ["v2"]` and `BEE_CONFIG` pointing to an isolated mock Chat Completions
+provider. The TUI ran in a pseudo-terminal with `--address <host:port> --agent bee`;
+Ctrl-N/Enter created the session, Enter submitted prompts, and Ctrl-C cancelled work.
+No live credentials or existing Hive instance/configuration were used.
+
+Observed assertions: the created session had the expected cwd; `HIVE_STREAM` appeared
+in the terminal while the SSE provider was still gated and the session was running;
+releasing the provider led to idle; Ctrl-C during a second pending model request led
+to idle; a third prompt rendered `HIVE_RECOVERED` and completed. The third provider
+request retained the successful first answer and excluded the cancelled second prompt.
+All three requests used the same session. Smoke-owned processes were stopped afterward.
+This establishes application session/prompt/streaming/cancellation/recovery behavior,
+not Hive permission or elicitation coverage. Bee has no dependency on Hive.

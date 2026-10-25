@@ -248,6 +248,67 @@ fn pending_inference_can_be_stopped_over_stdio_and_the_session_recovers(#[case] 
 }
 
 #[test]
+fn resume_cursors_preserve_wire_order_and_reject_invalid_requests_without_reopening() {
+    let server = support::Server::start(vec![support::Response::json(support::chat_text(
+        "previous answer",
+    ))]);
+    let mut agent = Agent::configured(&format!(
+        "[providers.test]\nmodel='test'\n[providers.test.protocols.openai-chat]\nbase_url='{}'",
+        server.url
+    ));
+    agent.initialize(1);
+    let cwd = agent._isolated.path().to_path_buf();
+    agent.send(&json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":cwd}}));
+    let session = agent.recv()["result"]["sessionId"].clone();
+    agent.send(&json!({"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"text","text":"previous question"}]}}));
+    assert_eq!(agent.recv()["id"], 3);
+    while agent.recv()["params"]["update"]["state"] != "idle" {}
+    server.request();
+
+    for cursor in [None, Some(Value::Null), Some(json!({"type":"start"}))] {
+        agent.send(&json!({"jsonrpc":"2.0","id":4,"method":"session/close","params":{"sessionId":session}}));
+        assert_eq!(agent.recv()["id"], 4);
+        for invalid in [
+            json!({"type":"future_cursor"}),
+            json!("start"),
+            json!({}),
+            json!({"type":5}),
+        ] {
+            agent.send(&json!({"jsonrpc":"2.0","id":5,"method":"session/resume","params":{"sessionId":session,"cwd":cwd,"replayFrom":invalid}}));
+            let rejected = agent.recv();
+            assert_eq!(rejected["id"], 5);
+            assert_eq!(rejected["error"]["code"], -32602);
+            // A rejected resume must not publish a snapshot or reopen the session.
+            agent.send(&json!({"jsonrpc":"2.0","id":6,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"text","text":"still closed"}]}}));
+            let closed = agent.recv();
+            assert_eq!(closed["id"], 6);
+            assert_eq!(closed["error"]["code"], -32602);
+        }
+        let mut params = json!({"sessionId":session,"cwd":cwd});
+        if let Some(cursor) = cursor {
+            params["replayFrom"] = cursor;
+        }
+        agent.send(&json!({"jsonrpc":"2.0","id":7,"method":"session/resume","params":params}));
+        let snapshot = agent.recv();
+        assert_eq!(snapshot["method"], "session/update");
+        assert_eq!(snapshot["params"]["sessionId"], session);
+        assert_eq!(snapshot["params"]["update"]["state"], "idle");
+        let resumed = agent.recv();
+        assert_eq!(
+            resumed["id"], 7,
+            "only the current snapshot precedes the response"
+        );
+        assert!(resumed.get("result").is_some());
+        // An ordered request detects any trailing history or duplicate snapshot.
+        agent.send(&json!({"jsonrpc":"2.0","id":8,"method":"session/list","params":{}}));
+        assert_eq!(agent.recv()["id"], 8);
+    }
+    let (status, stderr) = agent.finish();
+    assert!(status.success());
+    assert!(stderr.is_empty());
+}
+
+#[test]
 fn bash_output_is_captured_without_corrupting_the_protocol_stream() {
     let server = support::Server::start(vec![
         support::Response::json(

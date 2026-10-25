@@ -99,13 +99,12 @@ async fn unsuccessful_truncation_preserves_prior_context_across_close_and_resume
                             .send_request(v2::CloseSessionRequest::new(session.clone()))
                             .block_task()
                             .await?;
-                        connection
-                            .send_request(v2::ResumeSessionRequest::new(
-                                session.clone(),
-                                cwd.clone(),
-                            ))
-                            .block_task()
-                            .await?;
+                        let mut request =
+                            v2::ResumeSessionRequest::new(session.clone(), cwd.clone());
+                        // Empty ACP replay must not discard committed model context.
+                        request.replay_from =
+                            Some(v2::ReplayFrom::Start(v2::ReplayFromStart::new()));
+                        connection.send_request(request).block_task().await?;
                         // Resume's idle snapshot is not a completed prompt.
                         assert!(matches!(
                             updates.recv().await.unwrap().update,

@@ -15,7 +15,8 @@ prompts. Bee advertises the baseline session lifecycle (`session/new`, `list`, `
 
 **Chat Completions, Responses and Anthropic Messages inference are implemented.** Selected profiles receive prompts and
 stream answers over ACP. Cancellation and close interrupt pending inference. Successful context is retained in memory,
-across close/resume; ACP update replay is unsupported. Cancelled, failed and refused turns do not enter model context.
+across close/resume. No ACP history is retained for replay; start resume synchronizes current state.
+Cancelled, failed and refused turns do not enter model context.
 Prompts accept text and resource links, represented as references without fetching their contents.
 
 The bounded SDK-free loop supports injected function executors. Normal ACP sessions advertise and execute the native

@@ -876,6 +876,7 @@ impl Pending {
 async fn stopping_pending_interactions_cleans_up_before_idle_and_isolates_sessions(
     #[case] form: bool,
     #[case] close: bool,
+    #[values(false, true)] start: bool,
 ) {
     let root = tempfile::tempdir().unwrap();
     let other_root = tempfile::tempdir().unwrap();
@@ -938,10 +939,11 @@ async fn stopping_pending_interactions_cleans_up_before_idle_and_isolates_sessio
                 *cancellation.lock().unwrap() = Some(held.cancellation());
                 // Drain initial events; resume must produce a requires_action snapshot.
                 while updates.try_recv().is_ok() {}
-                connection
-                    .send_request(v2::ResumeSessionRequest::new(first.clone(), root.path()))
-                    .block_task()
-                    .await?;
+                let mut request = v2::ResumeSessionRequest::new(first.clone(), root.path());
+                if start {
+                    request.replay_from = Some(v2::ReplayFrom::Start(v2::ReplayFromStart::new()));
+                }
+                connection.send_request(request).block_task().await?;
                 assert!(matches!(
                     updates.recv().await.unwrap().update,
                     v2::SessionUpdate::StateUpdate(v2::StateUpdate::RequiresAction(_))

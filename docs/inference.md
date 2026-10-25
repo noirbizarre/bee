@@ -56,7 +56,8 @@ These turn budgets are separate from per-request timeouts, token limits and resp
 Successful conversation context is retained within the ACP connection, including close/resume. Cancelled, failed and
 refused turns may already have visible text but are excluded from future context. Changing provider/model preserves
 portable text and drops protocol-specific continuation. Explicit context windows bound retained history as described
-below. This does not implement ACP update replay or disk persistence.
+below. This does not retain ACP update history or persist context to disk; see the
+[resume cursor policy](compatibility.md#unsupported-and-deferred-behavior).
 
 The SDK-free `agent::run` accepts tool definitions and an injected `Executor`, with correlated call/result history.
 The [native tool contract](tools.md) provides typed schema validation, registration, bounded results, and
