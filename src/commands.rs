@@ -105,6 +105,40 @@ fn login(args: &LoginArgs, context: &mut Context<'_>) -> Result<()> {
     auth::require_store(profile)?;
     let name = profile.name();
 
+    if profile
+        .login_spec()
+        .is_some_and(bee::preset::LoginSpec::is_chatgpt)
+    {
+        if args.with_token || args.paste_code {
+            return Err(Error::ChatGpt {
+                reason: "ChatGPT requires browser authorization with a loopback callback",
+            });
+        }
+        let store = context
+            .store
+            .file_store()
+            .ok_or(Error::AuthStoreUnsupported)?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|_| Error::ChatGpt {
+                reason: "cannot start sign-in runtime",
+            })?;
+        return runtime.block_on(async {
+            tokio::time::timeout(context.timeout, async {
+                let login = auth::chatgpt::SignIn::prepare(store, name).await?;
+                writeln!(context.err, "Continue with ChatGPT for `{name}`:\n\n  {}\n\nWaiting for browser authorization...", login.url).map_err(write_error)?;
+                if !args.no_browser { (context.open)(&login.url); }
+                let credential = login.complete(&bee::http::AsyncLoginHttp).await?;
+                login.commit(store, name, &credential).await?;
+                if credential.chatgpt_plan_enabled() == Some(false) {
+                    return writeln!(context.err, "Signed in to ChatGPT for `{name}`, but ChatGPT plan use is disabled. Repeat `bee auth login {name}` to grant permission before inference.").map_err(write_error);
+                }
+                writeln!(context.err, "Signed in to ChatGPT for `{name}`. Eligible inference uses your ChatGPT plan. Manage usage: https://chatgpt.com/settings/usage").map_err(write_error)
+            }).await.map_err(|_| Error::ChatGpt { reason: "browser sign-in timed out; retry login" })?
+        });
+    }
+
     if args.with_token {
         if context.interactive {
             writeln!(
@@ -180,6 +214,27 @@ fn login(args: &LoginArgs, context: &mut Context<'_>) -> Result<()> {
 
 fn logout(name: Option<&str>, context: &mut Context<'_>) -> Result<()> {
     let profile = chosen(context.providers, name)?;
+    if profile
+        .login_spec()
+        .is_some_and(bee::preset::LoginSpec::is_chatgpt)
+    {
+        let store = context
+            .store
+            .file_store()
+            .ok_or(Error::AuthStoreUnsupported)?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|_| Error::ChatGpt {
+                reason: "cannot start logout runtime",
+            })?;
+        let confirmed = runtime.block_on(auth::chatgpt::logout(
+            store,
+            profile.name(),
+            &bee::http::AsyncLoginHttp,
+        ))?;
+        return writeln!(context.err, "Signed out of ChatGPT for `{}`. {}", profile.name(), if confirmed { "Renewable session revoked; registration retained." } else { "Remote revocation was not confirmed; disconnect Bee in ChatGPT settings: https://chatgpt.com/settings/usage" }).map_err(write_error);
+    }
     let message = if auth::forget(profile, context.store)? {
         format!(
             "Removed the stored credential for `{}`. It stays valid with the provider until you revoke it there.",
@@ -231,6 +286,12 @@ fn status(name: Option<&str>, context: &mut Context<'_>) -> Result<()> {
                     StoreState::LoggedIn => "stored credential present",
                     StoreState::NotLoggedIn => "no stored credential; run `bee auth login`",
                     StoreState::Expired => "stored credential expired; run `bee auth login`",
+                    StoreState::PlanDisabled => {
+                        "signed in; ChatGPT plan use disabled; repeat `bee auth login` to enable"
+                    }
+                    StoreState::Refreshable => {
+                        "ChatGPT access token expired; will renew on next request"
+                    }
                     _ => "stored credential in an unknown state",
                 };
                 let how = match login {

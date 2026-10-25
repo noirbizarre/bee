@@ -70,7 +70,8 @@ src/
 ├── history.rs  private durable sessions, ordered JSONL journals and successful-context projections, free of the SDK
 ├── config.rs   layered XDG configuration (ADR-006), free of the SDK
 ├── provider.rs provider profiles from the configuration (ADR-007), free of the SDK
-├── auth.rs     credential sources, the 0600 store and secret handling (ADR-008), free of the SDK
+├── auth.rs     credential sources, transactional 0600 store and secret handling (ADR-008), free of the SDK
+├── auth/chatgpt.rs official local/OSS ChatGPT OAuth, verified identity, renewal and revocation (ADR-020)
 ├── login.rs    the `pkce-key` browser sign-in, driven by a `LoginSpec`, free of the SDK
 ├── preset.rs   presets and login flows as data (ADR-009), free of the SDK
 ├── models.rs   optional catalog/cache, endpoint discovery and metadata provenance, free of the SDK

@@ -14,7 +14,10 @@ pub(super) async fn run(
     text: &mut (dyn FnMut(&str) + Send),
 ) -> Result<Step, Error> {
     let body = request(model, messages, tools)?;
-    let mut parser = Parser::default();
+    let mut parser = Parser {
+        chatgpt: model.is_chatgpt(),
+        ..Parser::default()
+    };
     model
         .http
         .post(
@@ -51,7 +54,12 @@ pub(super) fn request(model: &Model, messages: &[Message], tools: &[Tool]) -> Re
                         input.push(json!({"role":"assistant","content":text}));
                     }
                     for call in calls {
-                        input.push(json!({"type":"function_call","call_id":call.id,"name":call.name,"arguments":call.arguments.to_string()}));
+                        let mut item = json!({"type":"function_call","call_id":call.id,"name":call.name,"arguments":call.arguments.to_string()});
+                        // Portable history has no native namespace metadata after a route change.
+                        if model.is_chatgpt() {
+                            item["namespace"] = "bee".into();
+                        }
+                        input.push(item);
                     }
                 }
             }
@@ -61,6 +69,11 @@ pub(super) fn request(model: &Model, messages: &[Message], tools: &[Tool]) -> Re
         }
     }
     let mut body = json!({"model":model.model,"input":input,"stream":true,"store":false,"max_output_tokens":model.profile.max_output_tokens(),"include":["reasoning.encrypted_content"]});
+    if model.is_chatgpt() {
+        body.as_object_mut()
+            .expect("request object")
+            .remove("max_output_tokens");
+    }
     if !model.instructions.is_empty() {
         body["instructions"] = model.instructions.clone().into();
     }
@@ -68,6 +81,9 @@ pub(super) fn request(model: &Model, messages: &[Message], tools: &[Tool]) -> Re
         // Responses defaults strictness differently from Chat; explicitly opt
         // out so the same caller-owned JSON schema retains its meaning.
         body["tools"] = tools.iter().map(|tool| json!({"type":"function","name":tool.name,"description":tool.description,"parameters":tool.parameters,"strict":false})).collect();
+        if model.is_chatgpt() {
+            body["tools"] = json!([{"type":"namespace","name":"bee","description":"Bee client-side tools","tools":body["tools"].clone()}]);
+        }
     }
     Ok(body)
 }
@@ -83,6 +99,7 @@ struct Item {
 
 #[derive(Default)]
 struct Parser {
+    chatgpt: bool,
     items: BTreeMap<u64, Item>,
     streamed: String,
     result: Option<Step>,
@@ -100,6 +117,9 @@ impl Parser {
         }
         let value: Value = serde_json::from_str(data).map_err(|_| Error::Malformed)?;
         if event.is_none() {
+            if self.chatgpt {
+                return Err(Error::Malformed);
+            }
             return self.complete(&value, false, text);
         }
         let kind = string(&value["type"])?;
@@ -245,6 +265,9 @@ impl Parser {
         streaming: bool,
         text: &mut (dyn FnMut(&str) + Send),
     ) -> Result<(), Error> {
+        if self.chatgpt && response["status"] != "completed" {
+            return Err(Error::Malformed);
+        }
         let mut stop = match response["status"].as_str() {
             Some("completed") => Stop::End,
             Some("incomplete") => match response["incomplete_details"]["reason"].as_str() {
@@ -301,11 +324,16 @@ impl Parser {
                         }
                     }
                 }
-                Some("function_call") => calls.push(call(
-                    &item["call_id"],
-                    &item["name"],
-                    string(&item["arguments"])?,
-                )?),
+                Some("function_call") => {
+                    if self.chatgpt && item["namespace"] != "bee" {
+                        return Err(Error::Unsupported("Responses tool namespace"));
+                    }
+                    calls.push(call(
+                        &item["call_id"],
+                        &item["name"],
+                        string(&item["arguments"])?,
+                    )?);
+                }
                 Some("reasoning") => {
                     // A reasoning item with no replayable encrypted state cannot
                     // safely continue in stateless mode after tools or prompts.
@@ -346,5 +374,138 @@ impl Parser {
             },
         });
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn model() -> Model {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let path = crate::config::project_config_path(&project);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "[providers.subscription]\npreset='chatgpt'\nmodel='account-model'\ncontext_window=10000\nmax_output_tokens=2000").unwrap();
+        let config =
+            crate::config::Config::load(&crate::config::Environment::default(), &project).unwrap();
+        let providers = crate::provider::Providers::from_config(&config).unwrap();
+        Model::new(
+            providers.get("subscription").unwrap().clone(),
+            "account-model".into(),
+            None,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn chatgpt_reserves_output_locally_without_sending_forbidden_fields() {
+        let model = model();
+        let messages = [Message::User("hello".into())];
+        let tools = [Tool {
+            name: "read".into(),
+            description: "Read a file".into(),
+            parameters: json!({"type":"object"}),
+        }];
+        let body = request(&model, &messages, &tools).unwrap();
+        assert!(body.get("max_output_tokens").is_none());
+        assert!(body.get("previous_response_id").is_none());
+        assert_eq!(body["store"], false);
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["tools"][0]["type"], "namespace");
+        assert_eq!(body["tools"][0]["name"], "bee");
+        assert_eq!(body["tools"][0]["tools"][0]["name"], "read");
+        assert_eq!(
+            model.context(&messages, &tools).unwrap().reserved_output,
+            2000
+        );
+    }
+
+    #[test]
+    fn namespaced_calls_keep_executor_names_and_native_continuation() {
+        let item = json!({"type":"function_call","namespace":"bee","name":"read","call_id":"call-1","arguments":"{}"});
+        let response = json!({"status":"completed","output":[item.clone()]});
+        let mut parser = Parser {
+            chatgpt: true,
+            ..Parser::default()
+        };
+        parser.complete(&response, false, &mut |_| {}).unwrap();
+        let message = parser.result.unwrap().message;
+        let Message::Assistant { calls, .. } = &message else {
+            panic!("assistant expected")
+        };
+        assert_eq!(calls[0].name, "read");
+        assert_eq!(calls[0].id, "call-1");
+        let portable = Message::Assistant {
+            text: String::new(),
+            calls: calls.clone(),
+            native: None,
+        };
+        let replay = request(
+            &model(),
+            &[
+                Message::User("question".into()),
+                message,
+                Message::Tool {
+                    id: "call-1".into(),
+                    is_error: false,
+                    output: "content".into(),
+                },
+            ],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(replay["input"][1], item);
+        assert_eq!(
+            request(&model(), &[portable], &[]).unwrap()["input"][0]["namespace"],
+            "bee"
+        );
+        let mut invalid = response;
+        invalid["output"][0]["namespace"] = "another-client".into();
+        assert!(
+            Parser {
+                chatgpt: true,
+                ..Parser::default()
+            }
+            .complete(&invalid, false, &mut |_| {})
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn chatgpt_requires_completed_streams_and_retains_safe_usage_failure_guidance() {
+        let mut parser = Parser {
+            chatgpt: true,
+            ..Parser::default()
+        };
+        assert!(
+            parser
+                .event(
+                    None,
+                    &json!({"status":"completed","output":[]}).to_string(),
+                    &mut |_| {}
+                )
+                .is_err()
+        );
+        let incomplete = json!({"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[]}});
+        assert!(
+            parser
+                .event(
+                    Some("response.incomplete"),
+                    &incomplete.to_string(),
+                    &mut |_| {}
+                )
+                .is_err()
+        );
+        let failed = json!({"type":"response.failed","response":{"error":{"code":"subscription_sharing_usage_limit_exceeded","message":"secret-do-not-show"}}});
+        let error = parser
+            .event(Some("response.failed"), &failed.to_string(), &mut |_| {})
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("https://chatgpt.com/settings/usage")
+        );
+        assert!(!format!("{error:?} {error}").contains("secret-do-not-show"));
     }
 }

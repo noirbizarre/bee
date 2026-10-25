@@ -403,6 +403,84 @@ async fn endpoint_lists_preserve_base_paths_authentication_and_account_isolation
     assert!(service.snapshot().endpoints["test"].models.is_empty());
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn chatgpt_models_keep_visible_server_order_and_names_out_of_the_public_cache() {
+    use bee::auth::{Audience, Credential, CredentialStore, FileStore, Secret};
+    let root = tempfile::tempdir().unwrap();
+    let env = Environment::new(None, Some(root.path().into()), None);
+    let store = FileStore::from_environment(&env).unwrap();
+    // Let the store create its private directory/file before installing an OAuth fixture.
+    store
+        .put(
+            Audience::Provider("test"),
+            &Credential::new(Secret::new("fixture")),
+        )
+        .unwrap();
+    std::fs::write(store.path(),json!({"version":2,"providers":{"test":{"secret":"account-access-secret","expires_at":bee::auth::unix_now()+3600,"oauth":{"issuer":"https://auth.openai.com","client_id":"issued-client","subject":"account","refresh_token":"refresh-secret","id_token":"id-secret","scopes":["chatgpt.tokens.use.direct"]}}}}).to_string()).unwrap();
+    let profile = support::configured_providers("[providers.test]\npreset='chatgpt'")
+        .get("test")
+        .unwrap()
+        .clone();
+    let (cache, clock) = defaults();
+    let http = Arc::new(FakeHttp::new(vec![Ok(json!({"models":[
+        {"slug":"z-model","display_name":"Preferred model","visibility":"list"},
+        {"slug":"hidden-model","display_name":"Hidden","visibility":"hide"},
+        {"slug":"a-model","display_name":"Other model","visibility":"list"}
+    ]})
+    .to_string()
+    .into_bytes())]));
+    let service = service(Settings::default(), http.clone(), cache.clone(), clock);
+    let listing = service.list_endpoint(&profile, &env).await.unwrap();
+    assert_eq!(listing.models, ["z-model", "a-model"]);
+    let snapshot = service.snapshot();
+    assert_eq!(
+        snapshot.info(&profile, "a-model").facts["display_name"].value,
+        "Other model"
+    );
+    assert!(
+        snapshot
+            .info(&profile, "z-model")
+            .sources
+            .contains(&"endpoint")
+    );
+    assert!(snapshot.info(&profile, "hidden-model").sources.is_empty());
+    assert!(cache.bytes.lock().unwrap().is_none());
+    let requests = http.requests.lock().unwrap();
+    assert_eq!(requests[0].0, "https://api.openai.com/v1/models");
+    assert_eq!(
+        requests[0].1["authorization"],
+        "Bearer account-access-secret"
+    );
+}
+
+#[test]
+fn account_display_names_override_public_labels_but_not_explicit_configuration() {
+    let profile = profile("");
+    let mut snapshot = models::Snapshot {
+        providers: models::parse(&catalog("unknown")).unwrap().into(),
+        ..Default::default()
+    };
+    snapshot.endpoints.insert(
+        profile.name().into(),
+        models::EndpointListing {
+            models: vec!["known".into()],
+            display_names: [("known".into(), "Account label".into())].into(),
+            fetched_at: 123,
+            error: None,
+        },
+    );
+    let info = snapshot.info(&profile, "known");
+    assert_eq!(info.facts["display_name"].value, "Account label");
+    assert_eq!(info.facts["display_name"].source, "endpoint");
+    assert_eq!(info.facts["display_name"].fetched_at, Some(123));
+    let explicit = support::configured_providers("[providers.test]\nprotocols={openai-chat={}}\ncatalog_provider='new-provider'\nmodel_metadata={known={display_name='Configured label'}}").get("test").unwrap().clone();
+    assert_eq!(
+        snapshot.info(&explicit, "known").facts["display_name"].value,
+        "Configured label"
+    );
+}
+
 #[tokio::test]
 async fn endpoint_model_ids_do_not_enter_another_profiles_suggestions_or_the_public_cache() {
     let (cache, clock) = defaults();
@@ -492,6 +570,7 @@ async fn maximum_endpoint_listings_project_without_quadratic_membership_scans() 
         snapshot.endpoints.insert(
             profile.name().to_owned(),
             models::EndpointListing {
+                display_names: Default::default(),
                 models: (0..100_000)
                     .map(|index| format!("account/model-{index:06}"))
                     .collect(),

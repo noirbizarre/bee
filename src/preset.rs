@@ -19,9 +19,8 @@ use crate::provider::normalize_base_url;
 /// The catalogue Bee ships.
 const BUILTIN: &str = include_str!("../data/presets.toml");
 
-/// The one flow kind Bee implements: authorization code with PKCE, whose
-/// exchange returns a credential directly. A flow with refresh tokens or a
-/// device code is another kind, and another piece of Rust.
+/// Configurable authorization-code/PKCE exchange returning an API key. ChatGPT
+/// has a dedicated mechanism because registration, identity and renewal differ.
 const KIND_PKCE_KEY: &str = "pkce-key";
 
 const FLOW_KEYS: &[&str] = &[
@@ -101,6 +100,7 @@ pub(crate) struct ExchangeNames {
 /// Built from a `login_flows.<name>` table. Running it is `login`'s.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoginSpec {
+    pub(crate) chatgpt: bool,
     pub(crate) name: String,
     pub(crate) authorize_url: String,
     pub(crate) exchange_url: String,
@@ -111,6 +111,11 @@ pub struct LoginSpec {
 }
 
 impl LoginSpec {
+    /// Whether this is OpenAI's dedicated public-client OAuth mechanism.
+    #[must_use]
+    pub fn is_chatgpt(&self) -> bool {
+        self.chatgpt
+    }
     /// The flow's name, as `login` refers to it.
     #[must_use]
     pub fn name(&self) -> &str {
@@ -142,13 +147,38 @@ impl LoginSpec {
     ///
     /// A [`SpecError`] naming the key at fault.
     pub fn from_table(name: &str, table: &Table) -> SpecResult<Self> {
+        if table.get("kind").and_then(Value::as_str) == Some("chatgpt") {
+            only_keys(table, &["kind"], "")?;
+            // This mechanism's trust boundary is fixed, not configurable URLs.
+            return Ok(Self {
+                chatgpt: true,
+                name: name.into(),
+                authorize_url: "https://auth.openai.com/api/accounts/authorize".into(),
+                exchange_url: "https://auth.openai.com/api/accounts/oauth/token".into(),
+                headless: false,
+                help: None,
+                authorize: AuthorizeNames {
+                    callback: String::new(),
+                    challenge: String::new(),
+                    challenge_method: String::new(),
+                    state: String::new(),
+                    extra: Vec::new(),
+                },
+                exchange: ExchangeNames {
+                    code: String::new(),
+                    verifier: String::new(),
+                    challenge_method: String::new(),
+                    response_key: String::new(),
+                },
+            });
+        }
         only_keys(table, FLOW_KEYS, "")?;
         match string(table, "kind", "kind")? {
             KIND_PKCE_KEY => {}
             _ => {
                 return Err(SpecError::invalid(
                     "kind",
-                    "`kind` must be `pkce-key`, the only login flow Bee implements",
+                    "`kind` must be `pkce-key` or `chatgpt`",
                 ));
             }
         }
@@ -224,6 +254,7 @@ impl LoginSpec {
         };
 
         Ok(Self {
+            chatgpt: false,
             name: name.to_owned(),
             authorize_url,
             exchange_url,

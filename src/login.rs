@@ -154,6 +154,7 @@ impl LoginSpec {
     /// [`Error::AuthExchangeFailed`], with advice per status. The response body
     /// is never part of it.
     pub fn exchange(&self, http: &dyn Http, code: &Code, pkce: &Pkce) -> Result<Secret> {
+        require_pkce_key(self)?;
         let body = self.exchange_body(code, pkce);
         self.exchange_result(http.post_json(&self.exchange_url, &body))
     }
@@ -408,6 +409,7 @@ pub(crate) struct AsyncSignIn {
 
 impl AsyncSignIn {
     pub async fn prepare(flow: &LoginSpec) -> Result<Self> {
+        require_pkce_key(flow)?;
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .map_err(|source| Error::AuthCallbackIo { source })?;
@@ -540,12 +542,24 @@ pub fn sign_in(
     timeout: Duration,
     present: &mut dyn FnMut(&str),
 ) -> Result<Secret> {
+    require_pkce_key(flow)?;
     let listener = CallbackListener::bind()?;
     let pkce = Pkce::generate()?;
     let state = random_token(16)?;
     present(&flow.authorization_url(&pkce, Some(&state), Some(&listener.url())));
     let code = listener.wait(&state, timeout)?;
     flow.exchange(http, &code, &pkce)
+}
+
+fn require_pkce_key(flow: &LoginSpec) -> Result<()> {
+    // OAuth token sets must not be flattened into the API-key-returning mechanism.
+    if flow.is_chatgpt() {
+        Err(crate::auth::chatgpt::failure(
+            "use the dedicated ChatGPT OAuth sign-in mechanism",
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 /// Run the flow for a machine the browser cannot call back: the provider shows

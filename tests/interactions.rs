@@ -323,6 +323,30 @@ struct Exchange {
 }
 
 impl bee::http::LoginHttp for Exchange {
+    fn post_form<'a>(
+        &'a self,
+        url: &'a str,
+        body: String,
+    ) -> futures::future::BoxFuture<'a, Result<bee::http::HttpResponse, bee::http::Unreachable>>
+    {
+        Box::pin(async move {
+            struct DropMarker(Arc<std::sync::atomic::AtomicBool>);
+            impl Drop for DropMarker {
+                fn drop(&mut self) {
+                    self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+            let _drop = DropMarker(self.dropped.clone());
+            assert_eq!(url, "https://auth.openai.com/api/accounts/oauth/token");
+            assert!(body.contains("grant_type=authorization_code"));
+            assert!(body.contains("code=CALLBACK-SECRET"));
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if let Some(gate) = &self.gate {
+                gate.notified().await;
+            }
+            Err(bee::http::Unreachable)
+        })
+    }
     fn post_json<'a>(
         &'a self,
         url: &'a str,
@@ -370,12 +394,23 @@ fn login_fixture(
 fn callback(request: &Value) -> reqwest::Url {
     let url = reqwest::Url::parse(request["url"].as_str().unwrap()).unwrap();
     let params: std::collections::BTreeMap<_, _> = url.query_pairs().into_owned().collect();
-    let mut callback = reqwest::Url::parse(&params["callback_url"]).unwrap();
+    let mut callback = reqwest::Url::parse(
+        params
+            .get("redirect_uri")
+            .or_else(|| params.get("callback_url"))
+            .unwrap(),
+    )
+    .unwrap();
     callback.set_host(Some("127.0.0.1")).unwrap();
     callback
         .query_pairs_mut()
         .append_pair("state", &params["state"])
         .append_pair("code", "CALLBACK-SECRET");
+    if params.contains_key("redirect_uri") {
+        callback
+            .query_pairs_mut()
+            .append_pair("client_id", "issued-client");
+    }
     callback
 }
 
@@ -1035,6 +1070,11 @@ async fn stopping_pending_interactions_cleans_up_before_idle_and_isolates_sessio
 #[case::expire_create("create", false, true)]
 #[case::expire_callback("callback", false, true)]
 #[case::expire_exchange("exchange", false, true)]
+#[case::chatgpt_cancel_create("chatgpt_create", false, false)]
+#[case::chatgpt_close_callback("chatgpt_callback", true, false)]
+#[case::chatgpt_cancel_exchange("chatgpt_exchange", false, false)]
+#[case::chatgpt_close_exchange("chatgpt_exchange", true, false)]
+#[case::chatgpt_expire_callback("chatgpt_callback", false, true)]
 #[tokio::test]
 async fn stopping_browser_login_drops_pending_work_before_terminal_idle(
     #[case] stage: &'static str,
@@ -1042,8 +1082,15 @@ async fn stopping_browser_login_drops_pending_work_before_terminal_idle(
     #[case] expire: bool,
 ) {
     use std::sync::atomic::Ordering;
+    let chatgpt = stage.starts_with("chatgpt_");
+    let stage = stage.strip_prefix("chatgpt_").unwrap_or(stage);
     let root = tempfile::tempdir().unwrap();
     let (profiles, env) = login_fixture(root.path(), "http://127.0.0.1:1", "");
+    let profiles = if chatgpt {
+        support::configured_providers("[providers.test]\npreset='chatgpt'\nmodel='account-model'")
+    } else {
+        profiles
+    };
     let store = env.credentials_path().unwrap();
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1132,6 +1179,8 @@ async fn stopping_browser_login_drops_pending_work_before_terminal_idle(
                     .unwrap()
                     .unwrap();
             let mut held = Some(responder);
+            assert!(!request.to_string().contains("id_token"));
+            assert!(!request.to_string().contains("STORED-SECRET"));
             if stage != "create" {
                 held.take()
                     .unwrap()
@@ -1182,7 +1231,17 @@ async fn stopping_browser_login_drops_pending_work_before_terminal_idle(
                 .await?;
             assert!(updates.try_recv().is_err());
             assert!(completions.try_recv().is_err());
-            assert!(!store.exists());
+            if chatgpt {
+                use bee::auth::CredentialStore;
+                assert!(
+                    bee::auth::FileStore::new(&store)
+                        .get(bee::auth::Audience::Provider("test"))
+                        .unwrap()
+                        .is_none()
+                );
+            } else {
+                assert!(!store.exists());
+            }
             assert!(reqwest::get(callback(&request)).await.is_err());
             if expire {
                 connection
@@ -1204,7 +1263,17 @@ async fn stopping_browser_login_drops_pending_work_before_terminal_idle(
                     Some(v2::StopReason::Error(_))
                 ));
                 assert!(completions.try_recv().is_err());
-                assert!(!store.exists());
+                if chatgpt {
+                    use bee::auth::CredentialStore;
+                    assert!(
+                        bee::auth::FileStore::new(&store)
+                            .get(bee::auth::Audience::Provider("test"))
+                            .unwrap()
+                            .is_none()
+                    );
+                } else {
+                    assert!(!store.exists());
+                }
             }
             Ok(())
         },

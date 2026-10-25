@@ -21,6 +21,33 @@ use tempfile::TempDir;
 const SECRET: &str = "sk-super-secret-token";
 
 #[test]
+fn chatgpt_login_is_distinct_and_cannot_send_oauth_tokens_to_custom_endpoints() {
+    let sandbox = Sandbox::new();
+    let path = project_config_path(&sandbox.project_dir());
+    sandbox.write(&path, "provider='subscription'\n[providers.subscription]\npreset='chatgpt'\nmodel='account-model'\n[providers.api]\npreset='openai'");
+    let providers = sandbox.providers().unwrap();
+    let subscription = providers.get("subscription").unwrap();
+    assert!(subscription.login_spec().unwrap().is_chatgpt());
+    assert!(!subscription.login_spec().unwrap().headless());
+    assert_eq!(subscription.endpoints().len(), 1);
+    assert!(
+        matches!(providers.get("api").unwrap().credential(), Some(CredentialSource::Env(name)) if name == "OPENAI_API_KEY")
+    );
+    for extra in [
+        "protocols.openai-responses.base_url='https://evil.example/v1'",
+        "protocols.openai-chat={}",
+        "headers={authorization='secret-sentinel'}",
+    ] {
+        sandbox.write(
+            &path,
+            &format!("[providers.subscription]\npreset='chatgpt'\n{extra}"),
+        );
+        let error = sandbox.providers().unwrap_err();
+        assert!(!format!("{error:?} {error}").contains("secret-sentinel"));
+    }
+}
+
+#[test]
 fn preset_model_mappings_merge_with_profile_overrides_and_added_endpoints() {
     let sandbox = Sandbox::new();
     sandbox.write(&sandbox.global(), "[presets.gateway]\nprefer=['openai-chat']\nprotocols={openai-chat={}}\nmodel_protocols={'vendor/model.v2'='openai-chat',inherited='openai-chat'}");

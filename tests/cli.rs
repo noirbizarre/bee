@@ -454,6 +454,26 @@ fn a_browser_sign_in_needs_a_login_flow_on_the_profile() {
 }
 
 #[test]
+fn chatgpt_profiles_reject_api_token_and_paste_code_login_without_echoing_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join(".config/bee.toml");
+    std::fs::create_dir_all(project.parent().unwrap()).unwrap();
+    std::fs::write(project, "[providers.subscription]\npreset='chatgpt'").unwrap();
+    for flag in ["--with-token", "--paste-code"] {
+        isolated(dir.path())
+            .args(["auth", "login", "subscription", flag])
+            .write_stdin(format!("{SECRET}\n"))
+            .assert()
+            .failure()
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::contains("bee::auth::chatgpt"))
+            .stderr(predicate::str::contains("browser authorization"))
+            .stderr(predicate::str::contains(SECRET).not());
+    }
+    assert!(!dir.path().join("data/bee/credentials.json").exists());
+}
+
+#[test]
 fn an_unknown_profile_lists_the_defined_ones() {
     let dir = configured();
 

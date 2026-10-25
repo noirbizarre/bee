@@ -774,6 +774,15 @@ impl Reader<'_> {
             Some(value) => self.headers(&format!("{key}.headers"), value)?,
         };
 
+        if login.as_ref().is_some_and(|flow| flow.is_chatgpt())
+            && (endpoints.len() != 1
+                || endpoints[0].protocol() != Protocol::OpenAiResponses
+                || endpoints[0].base_url() != "https://api.openai.com/v1"
+                || !headers.is_empty())
+        {
+            return Err(self.invalid(&key, "ChatGPT OAuth requires the public OpenAI Responses endpoint without custom headers"));
+        }
+
         Ok(Profile {
             name: name.to_owned(),
             endpoints,

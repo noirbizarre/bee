@@ -610,6 +610,19 @@ pub enum Error {
         profile: String,
     },
 
+    /// A fixed, secret-free OAuth failure with recovery guidance.
+    #[error("ChatGPT authorization failed: {reason}")]
+    #[diagnostic(
+        code(bee::auth::chatgpt),
+        help(
+            "Retry `bee auth login <profile>`; manage access at https://chatgpt.com/settings/usage"
+        )
+    )]
+    ChatGpt {
+        /// A static classification, never provider response text.
+        reason: &'static str,
+    },
+
     /// The profile reads its credential from somewhere Bee does not write.
     #[error("provider profile `{profile}` does not use the credential store")]
     #[diagnostic(

@@ -101,8 +101,6 @@ impl InferenceHttp {
             .map_err(transport_error)?;
         match response.status().as_u16() {
             200..=299 => {}
-            401 | 403 => return Err(Error::Authentication),
-            429 => return Err(Error::RateLimit),
             status => {
                 // Error bodies can contain credentials or prompts; inspect a bounded
                 // prefix privately and retain the status when classification is unknown.
@@ -121,7 +119,11 @@ impl InferenceHttp {
                         return Err(error);
                     }
                 }
-                return Err(Error::Http(status));
+                return Err(match status {
+                    401 | 403 => Error::Authentication,
+                    429 => Error::RateLimit,
+                    _ => Error::Http(status),
+                });
             }
         }
         let streaming = response
@@ -258,6 +260,21 @@ pub struct Unreachable;
 
 /// Async sign-in transport, injectable without blocking an ACP dispatch loop.
 pub trait LoginHttp: Send + Sync {
+    /// OAuth public clients exchange form bodies; default keeps existing fakes compatible.
+    fn post_form<'a>(
+        &'a self,
+        _url: &'a str,
+        _body: String,
+    ) -> futures::future::BoxFuture<'a, Result<HttpResponse, Unreachable>> {
+        Box::pin(async { Err(Unreachable) })
+    }
+    /// Trusted OIDC discovery and signing keys, without credentials or redirects.
+    fn get<'a>(
+        &'a self,
+        _url: &'a str,
+    ) -> futures::future::BoxFuture<'a, Result<HttpResponse, Unreachable>> {
+        Box::pin(async { Err(Unreachable) })
+    }
     /// Exchange a credential-bearing JSON body without retaining it in diagnostics.
     fn post_json<'a>(
         &'a self,
@@ -270,6 +287,27 @@ pub trait LoginHttp: Send + Sync {
 pub struct AsyncLoginHttp;
 
 impl LoginHttp for AsyncLoginHttp {
+    fn post_form<'a>(
+        &'a self,
+        url: &'a str,
+        body: String,
+    ) -> futures::future::BoxFuture<'a, Result<HttpResponse, Unreachable>> {
+        Box::pin(async move {
+            login_response(
+                login_client(true)?
+                    .post(url)
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .body(body),
+            )
+            .await
+        })
+    }
+    fn get<'a>(
+        &'a self,
+        url: &'a str,
+    ) -> futures::future::BoxFuture<'a, Result<HttpResponse, Unreachable>> {
+        Box::pin(async move { login_response(login_client(true)?.get(url)).await })
+    }
     fn post_json<'a>(
         &'a self,
         url: &'a str,
@@ -300,14 +338,18 @@ async fn post_login(
     url: &str,
     body: String,
 ) -> Result<HttpResponse, Unreachable> {
-    let response = client
-        .post(url)
-        .header("Content-Type", "application/json")
-        .header("Accept", "application/json")
-        .body(body)
-        .send()
-        .await
-        .map_err(|_| Unreachable)?;
+    login_response(
+        client
+            .post(url)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json")
+            .body(body),
+    )
+    .await
+}
+
+async fn login_response(request: reqwest::RequestBuilder) -> Result<HttpResponse, Unreachable> {
+    let response = request.send().await.map_err(|_| Unreachable)?;
     let status = response.status().as_u16();
     let mut stream = response.bytes_stream();
     let mut bytes = Vec::new();
