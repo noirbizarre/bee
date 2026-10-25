@@ -450,19 +450,20 @@ async fn unsupported_or_incomplete_endpoint_listings_do_not_claim_complete_visib
 #[test]
 fn xdg_cache_roots_are_absolute_and_missing_home_allows_memory_only_operation() {
     assert_eq!(Environment::default().model_cache_file(), None);
-    let env = Environment::new(None, Some("/home/example".into()), None)
+    // Windows requires a drive-qualified absolute root and uses native separators.
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let cache = root.path().join("cache");
+    let env = Environment::new(None, Some(home.clone()), None)
         .with_xdg_cache_home(Some("relative".into()));
     assert_eq!(
-        env.model_cache_file().unwrap().to_str().unwrap(),
-        "/home/example/.cache/bee/models.dev.json"
+        env.model_cache_file(),
+        Some(home.join(".cache").join("bee").join("models.dev.json"))
     );
     assert_eq!(
-        env.with_xdg_cache_home(Some("/cache".into()))
-            .model_cache_file()
-            .unwrap()
-            .to_str()
-            .unwrap(),
-        "/cache/bee/models.dev.json"
+        env.with_xdg_cache_home(Some(cache.clone()))
+            .model_cache_file(),
+        Some(cache.join("bee").join("models.dev.json"))
     );
 }
 
