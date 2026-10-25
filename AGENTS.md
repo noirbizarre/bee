@@ -17,7 +17,7 @@ Bee serves ACPv2 over stdio and implements the baseline session lifecycle
 (new, list, resume, close, prompt, cancel) with streaming Chat Completions, Responses
 and Anthropic Messages inference. Successful context is retained in memory, with explicit model-aware
 context windows, approximate token accounting and transactional oldest-whole-turn truncation; failed/cancelled/refused
-turns are excluded, and ACP replay remains unsupported. The SDK-free bounded
+turns are excluded. No ACP history is retained for replay; start resume synchronizes current state. The SDK-free bounded
 loop supports configurable turn limits and injected tool executors; production ACP
 registers the native bash, read, glob, grep, list, write and edit tools with session-relative execution contexts.
 Client-hosted MCP tools are discovered per prompt and invoked through ACP's MCP transport, with session-scoped

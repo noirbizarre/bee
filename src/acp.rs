@@ -501,12 +501,12 @@ where
                 async move |request: v2::ResumeSessionRequest,
                             responder: Responder<v2::ResumeSessionResponse>,
                             connection: V2ConnectionTo<Client>| {
-                    // Model context is retained, but not ACP update events. The
-                    // protocol requires rejecting a cursor rather than resuming
-                    // without the replay the client asked for.
-                    if request.replay_from.is_some() {
+                    // Start replays all retained ACP history, which may be empty:
+                    // model context is separate from retained protocol updates.
+                    // Unknown cursors must fail before changing session state.
+                    if !matches!(request.replay_from, None | Some(v2::ReplayFrom::Start(_))) {
                         return responder.respond_with_error(invalid_params(
-                            "`replayFrom` is not supported: Bee does not retain ACP update history",
+                            "unsupported `replayFrom` cursor: omit it or use {\"type\":\"start\"}",
                         ));
                     }
                     let id = request.session_id.to_string();

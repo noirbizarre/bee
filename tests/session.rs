@@ -428,20 +428,57 @@ async fn resuming_with_another_cwd_is_rejected() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn resuming_with_a_replay_cursor_is_rejected_rather_than_replayed_empty() {
-    run(async |connection, _updates| {
+async fn resuming_from_start_synchronizes_state_without_replaying_history() {
+    run(async |connection, mut updates| {
         let cwd = dir("a");
         let session = new_session(&connection, cwd.clone()).await?;
-        let mut request = v2::ResumeSessionRequest::new(session, cwd);
+        prompt(&connection, &session, "previous turn").await?;
+        until_idle(&mut updates).await;
+        let mut request = v2::ResumeSessionRequest::new(session.clone(), cwd);
         request.replay_from = Some(v2::ReplayFrom::Start(v2::ReplayFromStart::new()));
 
+        connection.send_request(request).block_task().await?;
+        let snapshot = next(&mut updates).await;
+        assert_eq!(snapshot.session_id, session);
+        assert!(matches!(
+            snapshot.update,
+            v2::SessionUpdate::StateUpdate(v2::StateUpdate::Idle(_))
+        ));
+        // The next turn's exact updates detect historical or extra snapshots.
+        prompt(&connection, &session, "next turn").await?;
+        assert_eq!(until_idle(&mut updates).await.len(), 4);
+        Ok(())
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn unsupported_replay_cursors_do_not_reopen_closed_sessions() {
+    run(async |connection, mut updates| {
+        let cwd = dir("a");
+        let session = new_session(&connection, cwd.clone()).await?;
+        connection
+            .send_request(v2::CloseSessionRequest::new(session.clone()))
+            .block_task()
+            .await?;
+        let mut request = v2::ResumeSessionRequest::new(session.clone(), cwd);
+        request.replay_from =
+            Some(serde_json::from_value(serde_json::json!({"type":"future_cursor"})).unwrap());
         let error = connection
-            .send_request(request)
+            .send_request(request.clone())
             .block_task()
             .await
-            .expect_err("Bee does not retain ACP updates to replay");
-
+            .expect_err("unknown cursors are rejected");
         assert_eq!(error.code, ErrorCode::InvalidParams);
+        assert!(prompt(&connection, &session, "still closed").await.is_err());
+        request.replay_from = Some(v2::ReplayFrom::Start(v2::ReplayFromStart::new()));
+        connection.send_request(request).block_task().await?;
+        assert!(matches!(
+            next(&mut updates).await.update,
+            v2::SessionUpdate::StateUpdate(v2::StateUpdate::Idle(_))
+        ));
+        prompt(&connection, &session, "recovered").await?;
+        assert_eq!(until_idle(&mut updates).await.len(), 4);
         Ok(())
     })
     .await;
