@@ -27,6 +27,9 @@ mod interactions;
 mod mcp;
 mod plans;
 
+#[cfg(all(test, unix))]
+mod oauth_tests;
+
 /// The turn-owned plan operation added to every ACP runtime's model catalog.
 ///
 /// Exposed for hosts estimating context budgets; execution requires an active
@@ -109,6 +112,8 @@ fn session_gate(gates: &Gates, id: &str) -> Arc<RequestGate> {
 
 /// Immutable execution policy and complete native catalog for one connection.
 pub struct Runtime {
+    #[cfg(test)]
+    inference_http: Option<crate::http::InferenceHttp>,
     instructions: Option<crate::instructions::Sources>,
     limits: crate::agent::Limits,
     tools: crate::tool::Registry,
@@ -123,6 +128,8 @@ impl Runtime {
     /// Supply a complete catalog, which may be empty or extended by the caller.
     pub fn new(limits: crate::agent::Limits, tools: crate::tool::Registry) -> Self {
         Self {
+            #[cfg(test)]
+            inference_http: None,
             limits,
             tools,
             instructions: None,
@@ -362,6 +369,10 @@ async fn inference(reply: Reply, runtime: Arc<Runtime>) -> std::result::Result<(
         .with_selection(selection);
     if let Some(session) = session {
         model = model.with_chatgpt_session(session);
+    }
+    #[cfg(test)]
+    if let Some(http) = &runtime.inference_http {
+        model = model.with_test_http(http.clone());
     }
     let guidance = if let Some(sources) = &runtime.instructions {
         Some(

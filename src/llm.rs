@@ -200,6 +200,11 @@ pub struct Model {
 }
 
 impl Model {
+    #[cfg(test)]
+    pub(crate) fn with_test_http(mut self, http: crate::http::InferenceHttp) -> Self {
+        self.http = http;
+        self
+    }
     /// Construct a model without a vendor registry or catalog lookup.
     pub fn new(profile: Profile, model: String, credential: Option<Secret>) -> Result<Self, Error> {
         let selection = crate::models::Snapshot::default().resolve(&profile, &model);
