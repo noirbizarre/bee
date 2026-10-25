@@ -25,6 +25,16 @@ use crate::{Error, Result};
 
 mod interactions;
 mod mcp;
+mod plans;
+
+/// The turn-owned plan operation added to every ACP runtime's model catalog.
+///
+/// Exposed for hosts estimating context budgets; execution requires an active
+/// ACP turn and is supplied by the boundary rather than the native registry.
+#[must_use]
+pub fn plan_tool() -> crate::llm::Tool {
+    plans::definition()
+}
 
 // Retain the busy barrier until aborted futures have actually been dropped and
 // their terminal update sent. Session cancellation alone only requests abort.
@@ -207,6 +217,7 @@ pub struct Reply {
     token: u64,
     input: Option<crate::session::InferenceInput>,
     completed: Arc<Mutex<Option<crate::agent::Outcome>>>,
+    plan: Arc<Mutex<Option<crate::plan::Entries>>>,
     mcp: Arc<Mutex<mcp::Bindings>>,
     servers: Vec<mcp::Server>,
     interactions: Arc<Mutex<interactions::State>>,
@@ -349,10 +360,10 @@ async fn inference(reply: Reply, runtime: Arc<Runtime>) -> std::result::Result<(
     if runtime
         .tools
         .definitions()
-        .any(|tool| tool.name == "ask_user")
+        .any(|tool| matches!(tool.name.as_str(), "ask_user" | "update_plan"))
     {
         return Err(TurnFailure::new(
-            "ask_user is reserved for ACP user input; rename the custom tool",
+            "ask_user and update_plan are reserved ACP tools; rename the custom tool",
         ));
     }
     let native = interactions::Native {
@@ -818,7 +829,12 @@ where
                             if matches!(request.replay_from, Some(v2::ReplayFrom::Start(_))) {
                                 let replay_connection = updates.clone();
                                 let replay_id = request.session_id.clone();
-                                if let Err(error) = handle.replay(replay_budget, move |message| replay_message(&replay_connection, &replay_id, message)).await {
+                                let plan_connection = updates.clone();
+                                let plan_id = request.session_id.clone();
+                                if let Err(error) = handle.replay_with_plans(replay_budget, move |message| replay_message(&replay_connection, &replay_id, message), move |turn, plan| {
+                                    send_update(&plan_connection, &plan_id, plans::update(turn, plan))
+                                        .map_err(|_| crate::history::Error { path: "<session plan>".into(), reason: "cannot restore execution plan", help: "reconnect and resume the session" })
+                                }).await {
                                     return responder.respond_with_error(history_error(error));
                                 }
                             }
@@ -849,6 +865,14 @@ where
                         // Always replace, including an empty list: old routes are not authorization.
                         lock(&mcp).sessions.insert(id.clone(), servers);
                         if matches!(request.replay_from, Some(v2::ReplayFrom::Start(_))) {
+                            let plan_bytes = sessions.plans(&id).try_fold(0usize, |bytes, (_, plan)| {
+                                bytes.checked_add(crate::history::plan_replay_bytes(plan)?).ok_or(crate::history::Error {
+                                    path: "<session plan>".into(), reason: "plan replay exceeds the byte budget", help: "increase the history replay byte budget",
+                                })
+                            });
+                            if let Err(error) = plan_bytes.and_then(|bytes| replay_budget.reserve(bytes)) {
+                                return responder.respond_with_error(history_error(error));
+                            }
                             if let Err(error) = replay_budget.reserve_messages(sessions.transcript(&id)) {
                                 return responder.respond_with_error(history_error(error));
                             }
@@ -856,6 +880,9 @@ where
                                 if let Err(error) = replay_message(&connection, &request.session_id, message.clone()) {
                                     return responder.respond_with_error(history_error(error));
                                 }
+                            }
+                            for (turn, plan) in sessions.plans(&id) {
+                                send_update(&connection, &request.session_id, plans::update(turn, plan.clone()))?;
                             }
                         }
                         // The session keeps what the client chose before it
@@ -1108,6 +1135,7 @@ where
                         token: turn.token,
                         input,
                         completed: Arc::new(Mutex::new(None)),
+                        plan: Arc::new(Mutex::new(None)),
                         mcp: Arc::clone(&mcp),
                         servers,
                         interactions: Arc::clone(&interactions),
@@ -1288,6 +1316,7 @@ where
     let session_id = reply.session_id.clone();
     let token = reply.token;
     let completed = Arc::clone(&reply.completed);
+    let plan = Arc::clone(&reply.plan);
     let protocol = reply.input.as_ref().map(|input| input.selection.protocol);
     let interactions = Arc::clone(&reply.interactions);
     let history = lock(&sessions).history(&id);
@@ -1364,6 +1393,13 @@ where
     let publish = move || {
         let mut sessions = lock(&sessions);
         lock(&interactions).waiting.remove(&id);
+        if let Some(plan) = lock(&plan).as_mut()
+            && plan.cancel_unfinished()
+        {
+            // Finalization retains authority after cancellation revoked model output.
+            sessions.record_plan(&id, token, plan.clone());
+            let _ = send_update(&connection, &session_id, plans::update(token, plan.clone()));
+        }
         if let Some(outcome) = outcome
             && outcome.stop != crate::llm::Stop::Refusal
             && matches!(

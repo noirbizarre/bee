@@ -66,6 +66,10 @@ The [native tool contract](tools.md) provides typed schema validation, registrat
 Normal ACP sessions advertise and execute the shipped `bash`, `read`, `glob`, `grep`, `list`, `write`, and `edit` tools
 through this
 same interface.
+The boundary also supplies [`update_plan`](tools.md#execution-plans) to publish
+structured turn plans across all three provider protocols. Its definition and
+correlated call/results count toward model context and normal turn limits;
+`acp::plan_tool()` exposes its definition for host-side budget estimates.
 The ACP boundary requests client permission before Bash execution and adds `ask_user`
 when form elicitation is negotiated. Missing/expired stored credentials can initiate
 URL-based browser login before the first model request. See

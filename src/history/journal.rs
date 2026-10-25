@@ -13,7 +13,7 @@ use super::{Message, Result, Snapshot, error, open_options, open_private_file};
 // A corrupt/malicious line must not allocate the size of the entire journal.
 // This bounds one record, not transcript length or the number of sessions.
 pub(super) const MAX_RECORD_BYTES: usize = 64 * 1024 * 1024;
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -35,6 +35,10 @@ pub(super) enum Event {
     AssistantDelta {
         turn: u64,
         text: String,
+    },
+    PlanUpdated {
+        turn: u64,
+        plan: crate::plan::Entries,
     },
     TurnFinished {
         turn: u64,
@@ -121,7 +125,9 @@ pub(super) fn encode(seq: u64, event: &Event, path: &Path) -> Result<Vec<u8>> {
 fn decode(line: &[u8], seq: u64, path: &Path) -> Result<Event> {
     let record: Record =
         serde_json::from_slice(line).map_err(|_| error(path, "invalid complete journal record"))?;
-    if record.version != VERSION {
+    // Existing journals remain readable; older binaries reject new records by
+    // version instead of interpreting an extended event contract as v1.
+    if !matches!(record.version, 1 | VERSION) {
         return Err(error(
             path,
             "unsupported session history version; use a compatible Bee version",
@@ -132,7 +138,15 @@ fn decode(line: &[u8], seq: u64, path: &Path) -> Result<Event> {
     {
         return Err(error(path, "journal sequence or checksum is invalid"));
     }
-    serde_json::from_str(record.event.get()).map_err(|_| error(path, "invalid journal event"))
+    let event = serde_json::from_str(record.event.get())
+        .map_err(|_| error(path, "invalid journal event"))?;
+    if record.version == 1 && matches!(event, Event::PlanUpdated { .. }) {
+        return Err(error(
+            path,
+            "execution plans require session history version 2",
+        ));
+    }
+    Ok(event)
 }
 
 /// A reader accepts only complete, checksummed, sequential records. A final
@@ -185,6 +199,7 @@ pub(super) struct Projection {
     pub(super) active: Option<u64>,
     pub(super) transcript_bytes: usize,
     pub(super) created: u64,
+    pub(super) plans: std::collections::BTreeMap<u64, crate::plan::Entries>,
 }
 
 fn portable(messages: &mut [crate::llm::Message]) {
@@ -215,6 +230,7 @@ impl Projection {
             snapshot,
             active: None,
             transcript_bytes: 0,
+            plans: Default::default(),
             created,
         })
     }
@@ -258,6 +274,12 @@ impl Projection {
                     .checked_add(text.len())
                     .ok_or_else(invalid)?;
             }
+            Event::PlanUpdated { turn, plan } => {
+                if self.active != Some(*turn) || !plan.valid() {
+                    return Err(invalid());
+                }
+                self.plans.insert(*turn, plan.clone());
+            }
             Event::TurnFinished {
                 turn,
                 outcome,
@@ -291,6 +313,11 @@ impl Projection {
                         .instructions
                         .apply(context.instructions.clone());
                     self.snapshot.protocol = context.protocol;
+                }
+                if let Some(plan) = self.plans.get_mut(turn) {
+                    // The terminal record atomically closes context and plan state,
+                    // including interrupted recovery; no second append can be lost.
+                    plan.cancel_unfinished();
                 }
                 self.active = None;
             }
@@ -627,5 +654,73 @@ impl Journal {
             })?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod compatibility_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_headers_accept_new_plan_records_without_rewriting_the_old_prefix() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("history");
+        // Windows files inherit their parent's ACL; a generic temp directory
+        // does not provide the user-only permissions required by journal opens.
+        super::super::private_directory(&directory).unwrap();
+        let path = directory.join("session.jsonl");
+        let event = serde_json::value::to_raw_value(&Event::SessionCreated {
+            id: "saved".into(),
+            created: 1,
+            snapshot: Snapshot {
+                cwd: root.path().into(),
+                turns: 0,
+                provider: None,
+                model: None,
+                protocol: None,
+                messages: vec![],
+                instructions: Default::default(),
+            },
+        })
+        .unwrap();
+        // Construct the actual v1 framing/checksum, not a v2 record whose version
+        // was edited without updating its integrity check.
+        let record = Record {
+            version: 1,
+            seq: 0,
+            checksum: checksum(1, 0, event.get()),
+            event,
+        };
+        let mut prefix = serde_json::to_vec(&record).unwrap();
+        prefix.push(b'\n');
+        let mut file = open_private_file(&path, true, true).unwrap();
+        file.write_all(&prefix).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        let mut journal = Journal::open(&path, "saved").unwrap();
+        journal
+            .append(Event::TurnAccepted {
+                turn: 1,
+                content: serde_json::json!([]),
+            })
+            .unwrap();
+        let plan = serde_json::from_value(serde_json::json!({"entries":[{"content":"Work","priority":"medium","status":"pending"}]})).unwrap();
+        journal
+            .append(Event::PlanUpdated { turn: 1, plan })
+            .unwrap();
+        journal
+            .append(Event::TurnFinished {
+                turn: 1,
+                outcome: Outcome::Cancelled,
+                context: None,
+            })
+            .unwrap();
+        drop(journal);
+        assert!(std::fs::read(&path).unwrap().starts_with(&prefix));
+        let journal = Journal::open(&path, "saved").unwrap();
+        assert_eq!(
+            journal.projection.plans[&1].entries[0].status,
+            crate::plan::Status::Cancelled
+        );
     }
 }

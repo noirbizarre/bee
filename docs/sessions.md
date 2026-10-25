@@ -100,7 +100,9 @@ and publication are serialized with live session state and text updates.
    that message's prior content; subsequent live chunks append. Repeated start replay preserves IDs and
    order and does not duplicate stored messages. No nonstandard replay marker is required: the resume
    request/response brackets restoration.
-6. Consume the current `state_update`, which follows replay and precedes the resume response. Then continue
+6. Apply retained `plan_update` snapshots by `planId`, replacing the entire ordered entry list.
+   These follow message replay and precede the current state. Empty lists are meaningful snapshots.
+7. Consume the current `state_update`, which follows replay and precedes the resume response. Then continue
    the session normally. The response alone does not imply idle.
 
 Omitting `replayFrom`, or passing null, synchronizes current state **without replay**. Only the start cursor
@@ -124,10 +126,33 @@ messages while leaving their visible transcript intact. Successful native tool-c
 committed guidance snapshots survive restart. Provider/model selection survives; provider configuration and
 credentials are resolved from current configuration when inference next runs.
 
-Replay only sends historical user/assistant messages. It does not execute tools, query providers, request
+Replay sends historical user/assistant messages and latest execution-plan snapshots.
+It does not execute tools, query providers, request
 permissions, reopen login flows or restore previous MCP authority. Tool calls/results retained for model
 continuation are data, not executable restoration instructions. Existing live behavior does not emit ACP
 tool-lifecycle updates, so restoration does not invent historical tool events.
+
+## Execution-plan retention
+
+An observed turn plan is visible session history, separate from successful model
+context. Latest snapshots survive close/resume, failed or cancelled turns,
+whole-turn context eviction and production restarts. Embedded memory sessions
+retain them only for the lifetime of that runtime. Start replay emits one latest
+snapshot per observed turn in turn order, including explicitly empty plans;
+omitted/null replay cursors do not resend plans. Replay budgets include plans.
+
+Live revisions follow durable journal commits. Terminal records atomically
+cancel unfinished entries alongside turn completion, regardless of stop reason;
+an interrupted turn receives the same reconciliation during recovery. No plan
+is emitted for a turn that never explicitly created one. Failures are conveyed
+through the existing stop reason, since ACP has no standard failed entry status.
+If terminal persistence fails, Bee still cancels unfinished client-visible
+entries before error idle; reconnect recovery reconciles the last durable plan.
+
+New journal records use version 2; Bee can read existing version-1 records and
+append version-2 records to those sessions. Older Bee binaries cannot read the
+new records and report unsupported history versions. Plans are stored in the
+existing private journal, with no additional sidecar or executable replay data.
 
 ## Interruptions and unavailable history
 

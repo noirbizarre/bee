@@ -52,7 +52,10 @@ async fn unsuccessful_truncation_preserves_prior_context_across_close_and_resume
     )
     .unwrap();
     let window = model
-        .context(&[bee::llm::Message::User(first.clone())], &[])
+        .context(
+            &[bee::llm::Message::User(first.clone())],
+            &[bee::acp::plan_tool()],
+        )
         .unwrap()
         .estimated_input
         + 420;
@@ -935,7 +938,16 @@ async fn acp_executes_shipped_tools_in_the_session_directory_and_retains_results
         .collect();
     assert_eq!(
         names,
-        ["bash", "edit", "glob", "grep", "list", "read", "write"]
+        [
+            "bash",
+            "edit",
+            "glob",
+            "grep",
+            "list",
+            "read",
+            "update_plan",
+            "write"
+        ]
     );
     for id in ["a", "b"] {
         let body = server.request().body.to_string();

@@ -30,6 +30,19 @@ The session capability includes the baseline lifecycle methods. It does not cont
 separate flags for each method. The SDK selects v2 even when asked for v1; that
 negotiation behavior does **not** mean Bee implements the v1 lifecycle.
 
+Itemized plans use the baseline `session/update` path; the pinned v2 schema has
+no separate plan capability flag. Bee emits the standard full-replacement form:
+
+```json
+{"sessionId":"example","update":{"sessionUpdate":"plan_update","plan":{"type":"items","planId":"plan-1",
+ "entries":[{"content":"Inspect","priority":"medium","status":"in_progress"}]}}}
+```
+
+`planId` is stable within the session; entries have no standard IDs. All entries
+and their order replace the previous snapshot. Plans are distinct from ordinary
+assistant messages, tool calls/results, and Hive-specific `_hive_activity` events.
+See [execution plans](tools.md#execution-plans) for empty-plan and terminal rules.
+
 ## Automated coverage
 
 Paths below are relative to the repository root.
@@ -39,6 +52,8 @@ Paths below are relative to the repository root.
 | Initialization, identity, version negotiation, exact capabilities | `tests/acp.rs`, `tests/stdio.rs`, `tests/e2e.rs` |
 | Session new/list/close/resume, cwd checks, invalid IDs and settings | `tests/session.rs`, `tests/selection.rs`, `tests/stdio.rs` |
 | Prompt acceptance, echoed message IDs, running/text/terminal ordering | `tests/session.rs`, `tests/e2e.rs` |
+| Itemized plans, full replacement, statuses, cancellation/failure, memory/durable replay | `tests/plans.rs`, across all three inference protocols |
+| Exact serialized plan notifications, process restart and interrupted recovery without reexecution | `tests/stdio.rs`; storage faults and replay budgets in history unit tests |
 | Streaming before the provider completes | Gated SSE response in `tests/e2e.rs`; provider adapter suites |
 | Active resume reports running/requires_action, idle resume reports idle | `tests/cancel.rs`, `tests/session.rs`, `tests/interactions.rs` |
 | Cancel and direct close during model inference, recovery, no failed history | `tests/stdio.rs`, `tests/inference.rs` |
@@ -59,6 +74,19 @@ Paths below are relative to the repository root.
 
 Browser-login success, concurrency and cancellation scenarios in `tests/interactions.rs`
 are Unix-only; the CI platforms do not all execute the same login matrix.
+
+### Hive verification handoff
+
+Bee's plan tests consume only native ACP `PlanUpdate` messages, with no special
+parsing. The subprocess case
+`standard_plan_messages_survive_process_restart_without_reexecuting_model_work`
+provides a deterministic real-Bee producer and validates the exact wire payload.
+A real Hive gateway integration test remains a Hive-side verification step:
+launch Bee with a local provider returning `update_plan` calls, observe initial
+and reordered/status-revised snapshots under the same `planId`, and verify the
+gateway replaces the native plan and restores its terminal snapshot on start
+resume. Consume `session/update` directly; do not parse assistant text or
+`_hive_activity`. Bee's test suite does not claim to execute the Hive gateway.
 
 The native subprocess workflow discovers files with glob/list, reads a discovered
 file, writes content derived from that read, makes a targeted edit, reads it back,
