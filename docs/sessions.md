@@ -11,6 +11,8 @@ If neither a state root nor home is available,
 startup fails explicitly. Configuration and disposable model caches are separate from this state.
 
 Each opaque session ID has a private directory containing `session.jsonl` and an `owner.lock` file.
+Creation publishes a synchronized temporary journal by atomic file rename while keeping the directory and ownership
+handle in place. Incomplete creations without a published `session.jsonl` do not appear in `session/list`.
 Unix directories use mode 0700; journal and lock files use mode 0600. Windows directories use protected,
 owner-only DACLs inherited by files. Existing unsafe permissions are refused.
 History is not encrypted at rest: it contains prompts, assistant answers,

@@ -113,12 +113,12 @@ fn the_state_root_is_injected_and_obeys_xdg_empty_and_relative_rules() {
 #[tokio::test]
 async fn incomplete_creations_are_not_published_to_the_session_listing() {
     let (_root, store, id, handle) = create().await;
-    std::fs::create_dir(
-        store
-            .root
-            .join("sessions/.pending-bee-session-unacknowledged"),
-    )
-    .unwrap();
+    let pending = store
+        .directory("bee-session-00000000000000000000000000000000")
+        .unwrap();
+    create_directory(&pending).unwrap();
+    let staging = pending.join(".session.jsonl.pending");
+    std::io::Write::write_all(&mut open_private_file(&staging, true, true).unwrap(), b"{").unwrap();
     assert_eq!(store.list().await.unwrap()[0].id, id);
     assert_eq!(
         handle.0.path,

@@ -47,7 +47,8 @@ unbounded notification queues and no delivery acknowledgement. Omitted replay re
 
 Restore no MCP authorization, permission or elicitation state. Close detaches after cleanup and persistence;
 it does not delete history. No automatic expiry initially. Private storage uses Unix modes or protected
-owner-only Windows DACLs. Directory publication is synchronized or uses Windows write-through rename.
+owner-only Windows DACLs. Journal publication uses a synchronized/write-through file rename inside a stable
+session directory, so its ownership handle remains open throughout creation on Windows as well.
 
 Keep any future query index or checkpoint rebuildable from the journal. SQLite may be useful later as a
 derived metadata/history index, following the hybrid separation used by Codex; it is not a dependency today.

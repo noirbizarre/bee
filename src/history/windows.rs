@@ -211,7 +211,7 @@ pub(super) fn check_private(path: &Path, directory: bool) -> io::Result<()> {
     Ok(())
 }
 
-pub(super) fn publish_directory(staging: &Path, published: &Path) -> io::Result<()> {
+pub(super) fn publish_file(staging: &Path, published: &Path) -> io::Result<()> {
     let staging = wide(staging)?;
     let published = wide(published)?;
     // SAFETY: both paths are terminated and live throughout the call. Omitting

@@ -242,14 +242,16 @@ impl Store {
                     .collect::<String>()
             );
             let directory = store.directory(&id)?;
-            let staging = store.root.join("sessions").join(format!(".pending-{id}"));
-            create_directory(&staging)
-                .map_err(|_| error(&staging, "cannot create session directory"))?;
-            let handle = match open_session(&staging, &id, Some(snapshot), Some(directory)) {
+            create_directory(&directory)
+                .map_err(|_| error(&directory, "cannot create session directory"))?;
+            let handle = match open_session(&directory, &id, Some(snapshot)) {
                 Ok(handle) => handle,
                 Err(failure) => {
-                    // Only this creation populated the unpublished directory.
-                    let _ = std::fs::remove_dir_all(&staging);
+                    // Never remove an identity once its complete journal became
+                    // visible: another client could already have discovered it.
+                    if !directory.join("session.jsonl").exists() {
+                        let _ = std::fs::remove_dir_all(&directory);
+                    }
                     return Err(failure);
                 }
             };
@@ -261,7 +263,7 @@ impl Store {
     pub(crate) async fn attach(&self, id: &str) -> Result<(Snapshot, Handle, bool)> {
         let directory = self.directory(id)?;
         let id = id.to_owned();
-        blocking(move || open_session(&directory, &id, None, None))
+        blocking(move || open_session(&directory, &id, None))
             .await?
             .load()
             .await
@@ -286,6 +288,14 @@ impl Store {
                 let directory = store.directory(&id)?;
                 check_private(&directory, true)?;
                 let path = directory.join("session.jsonl");
+                // Directory creation and its private ownership lock precede the
+                // atomic publication of the complete journal. Ignore only a
+                // missing file; unreadable/invalid published journals still fail.
+                match std::fs::symlink_metadata(&path) {
+                    Ok(_) => {}
+                    Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(_) => return Err(error(&path, "cannot inspect session journal")),
+                }
                 let mut reader = journal::Reader::open(&path, u64::MAX)?;
                 // Listing reads immutable header metadata only. It neither
                 // scans long transcripts nor repairs a live writer's tail.
@@ -442,9 +452,9 @@ fn sync_directory(path: &Path) -> Result<()> {
         .map_err(|_| error(path, "cannot synchronize session directory"))
 }
 
-fn publish_directory(staging: &Path, published: &Path) -> std::io::Result<()> {
+fn publish_file(staging: &Path, published: &Path) -> std::io::Result<()> {
     #[cfg(windows)]
-    return windows::publish_directory(staging, published);
+    return windows::publish_file(staging, published);
     #[cfg(not(windows))]
     std::fs::rename(staging, published)
 }
@@ -481,12 +491,7 @@ impl std::fmt::Debug for Handle {
     }
 }
 
-fn open_session(
-    directory: &Path,
-    id: &str,
-    snapshot: Option<Snapshot>,
-    publish: Option<PathBuf>,
-) -> Result<Handle> {
+fn open_session(directory: &Path, id: &str, snapshot: Option<Snapshot>) -> Result<Handle> {
     check_private(directory, true)?;
     let lock_path = directory.join("owner.lock");
     let owner = open_options()
@@ -502,27 +507,23 @@ fn open_session(
         reason: "session is owned by another Bee connection",
         help: "close it in that client or wait for that Bee process to exit, then resume",
     })?;
-    let mut path = directory.join("session.jsonl");
-    let mut journal = if let Some(snapshot) = snapshot {
-        let journal = Journal::create(&path, id, snapshot)?;
-        sync_directory(directory)?;
-        journal
-    } else {
-        Journal::open(&path, id)?
-    };
-    if let Some(published) = publish {
-        // Close the writer before publication on Windows, keeping the stable OS
-        // ownership handle open across rename so no second writer can attach.
+    let path = directory.join("session.jsonl");
+    if let Some(snapshot) = snapshot {
+        let staging = directory.join(".session.jsonl.pending");
+        let journal = Journal::create(&staging, id, snapshot)?;
         drop(journal);
-        if published.exists() {
-            return Err(error(&published, "session identity already exists"));
+        if path.exists() {
+            return Err(error(&path, "session identity already exists"));
         }
-        publish_directory(directory, &published)
-            .map_err(|_| error(&published, "cannot publish session identity"))?;
-        sync_directory(published.parent().expect("session catalog parent"))?;
-        path = published.join("session.jsonl");
-        journal = Journal::open(&path, id)?;
+        // Windows cannot rename the directory containing our open ownership
+        // handle. Publishing a closed journal file within that stable directory
+        // preserves both atomic visibility and uninterrupted exclusive ownership.
+        publish_file(&staging, &path)
+            .map_err(|_| error(&path, "cannot publish session identity"))?;
+        sync_directory(directory)?;
+        sync_directory(directory.parent().expect("session catalog parent"))?;
     }
+    let mut journal = Journal::open(&path, id)?;
     let (sender, receiver) = mpsc::channel::<Job>();
     let worker = Arc::new(Worker {
         sender,
