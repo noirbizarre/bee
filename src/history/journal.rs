@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::{Message, Result, Snapshot, error, open_private_file};
+use super::{Message, Result, Snapshot, error, open_options, open_private_file};
 
 // A corrupt/malicious line must not allocate the size of the entire journal.
 // This bounds one record, not transcript length or the number of sessions.
@@ -552,8 +552,16 @@ impl Journal {
             self.unchanged_file(size)?;
             // Only an incomplete final line is discardable. Complete malformed,
             // checksummed or out-of-sequence records already failed during open.
-            self.file
+            // Windows append-only handles omit FILE_WRITE_DATA, which set_len
+            // requires. Keep the normal writer append-only and repair through a
+            // separate writable handle while the same OS ownership lock is held.
+            let repair = open_options()
+                .write(true)
+                .open(&self.path)
+                .map_err(|_| error(&self.path, "cannot open interrupted journal for repair"))?;
+            repair
                 .set_len(self.offset)
+                .and_then(|()| repair.sync_all())
                 .map_err(|_| error(&self.path, "cannot repair incomplete journal tail"))?;
             self.sync()?;
             self.tail = false;
