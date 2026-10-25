@@ -21,6 +21,7 @@ pub mod http;
 pub mod instructions;
 pub mod llm;
 pub mod login;
+pub mod models;
 pub mod preset;
 pub mod provider;
 pub mod session;
@@ -57,10 +58,17 @@ pub fn run() -> Result<()> {
     // launch, not surface as a connection error on the first prompt (ADR-007).
     let providers = provider::Providers::from_config(&config)?;
     let tools = tool::builtins_with_bash(tool::bash::Settings::from_config(&config)?)?;
-    let runtime_options =
-        acp::Runtime::new(agent::Limits::from_config(&config)?, tools).with_instructions(
-            instructions::Sources::from_config(&config, &environment, &project_dir)?,
-        );
+    let discovery = std::sync::Arc::new(models::Service::production(
+        models::Settings::from_config(&config)?,
+        &environment,
+    ));
+    let runtime_options = acp::Runtime::new(agent::Limits::from_config(&config)?, tools)
+        .with_instructions(instructions::Sources::from_config(
+            &config,
+            &environment,
+            &project_dir,
+        )?)
+        .with_discovery(discovery);
 
     // Async model sockets and timers need a reactor even while ACP is idle.
     let runtime = tokio::runtime::Builder::new_current_thread()

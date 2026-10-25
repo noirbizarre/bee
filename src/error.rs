@@ -17,6 +17,29 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, Error, Diagnostic)]
 #[non_exhaustive]
 pub enum Error {
+    /// Discovery is optional for inference but explicit discovery commands can fail.
+    #[error(transparent)]
+    #[diagnostic(
+        code(bee::models::discovery),
+        help(
+            "check connectivity and catalog settings, retry `bee models refresh`, or configure model IDs manually"
+        )
+    )]
+    Models(#[from] crate::models::Error),
+    /// Catalog configuration is validated without retaining configuration values.
+    #[error("catalog configuration in `{path}` {reason}")]
+    #[diagnostic(
+        code(bee::models::setting),
+        help(
+            "use [catalog] enabled/refresh booleans and a positive refresh_interval_secs integer"
+        )
+    )]
+    CatalogSetting {
+        /// File supplying the setting.
+        path: String,
+        /// Static classification of the problem.
+        reason: &'static str,
+    },
     /// Invalid skill discovery configuration, without configuration values.
     #[error("skills configuration in `{path}` {reason}")]
     #[diagnostic(

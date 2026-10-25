@@ -67,6 +67,9 @@ See [turn execution limits](inference.md#turn-execution-limits) for boundary beh
 
 ### Providers and models
 
+Optional [model discovery](models.md) enriches ACP selectors and `bee models` with Models.dev metadata and separately
+enabled endpoint listings. Catalog refresh is automatic and nonblocking; configured model IDs always work independently.
+
 A provider is a named connection profile, separate from the protocols it speaks and from the model:
 
 ```toml
@@ -91,7 +94,8 @@ options = { max_tokens_field = "max_completion_tokens" }   # settings only this 
 
 A provider can speak several protocols, each at its own URL and with its own options. Several protocols need `prefer`,
 which orders them, most preferred first; Bee does not guess among them. An optional `model_protocols` table maps exact
-model IDs to configured protocols. Unmapped IDs use the first endpoint in preference order.
+model IDs to configured protocols. Unmapped IDs use the first endpoint in preference order, unless optional
+[catalog protocol hints](models.md#optional-protocol-hints-and-context-budgets) are explicitly enabled.
 
 ```toml
 [providers.gateway]
@@ -117,7 +121,8 @@ entry replaces the same model ID while retaining other entries. An empty table (
 inherited mappings. See [ADR-013](adr/013-per-model-protocol-selection.md).
 
 `context_window` and entries of `model_context_windows` are positive 32-bit token capacities. Exact model entries win
-over the profile fallback; otherwise capacity is unknown. The model map merges per key across layers and presets,
+over the profile fallback; otherwise capacity is unknown unless catalog context windows are explicitly enabled.
+The model map merges per key across layers and presets,
 without clearing inherited entries for an empty table. Before each request, Bee estimates input, reserves the effective
 output maximum and drops oldest complete turns when needed. The active turn and its tool pairs remain intact.
 Configured sessions report labeled estimates and notices when older context is removed. See

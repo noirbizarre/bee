@@ -3,6 +3,7 @@
 ## Status
 
 Accepted. Extends ADR-010 and replaces the preferred-only routing rule in ADR-012.
+Extended by [ADR-018](018-optional-model-discovery.md) for explicitly enabled catalog hints.
 
 ## Context
 

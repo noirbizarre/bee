@@ -23,7 +23,7 @@ fn subprocess_with_path(root: &tempfile::TempDir, url: &str, path: Option<&str>)
     std::fs::write(
         &config,
         support::native_bash_config(&format!(
-            "[providers.test]\nmodel='test'\n[providers.test.protocols.openai-chat]\nbase_url='{url}'"
+            "[catalog]\nenabled=false\n[providers.test]\nmodel='test'\n[providers.test.protocols.openai-chat]\nbase_url='{url}'"
         )),
     )
     .unwrap();
@@ -52,6 +52,7 @@ fn subprocess_with_path(root: &tempfile::TempDir, url: &str, path: Option<&str>)
             ])
             .env("HOME", root.path().to_str().unwrap())
             .env("XDG_CONFIG_HOME", root.path().join("xdg").to_str().unwrap())
+            .env("XDG_CACHE_HOME", root.path().join("cache").to_str().unwrap())
             .env("BEE_CONFIG", config.to_str().unwrap());
     if let Some(path) = path {
         // Restrict only the child; parallel tests retain their normal environment.

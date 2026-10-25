@@ -1,7 +1,8 @@
 # Inference and smoke tests
 
 Bee implements text and function-calling Chat Completions, Responses and Anthropic Messages.
-A profile's exact `model_protocols` mapping wins, otherwise its preferred protocol is used; failures never trigger
+A profile's exact `model_protocols` mapping wins, followed by explicitly enabled catalog hints, then its preferred
+protocol; failures never trigger
 protocol fallback. Any opaque
 model ID is accepted without a catalog lookup, but the endpoint must support that model and the selected protocol.
 
@@ -55,7 +56,7 @@ These turn budgets are separate from per-request timeouts, token limits and resp
 
 Successful conversation context is retained within the ACP connection, including close/resume. Cancelled, failed and
 refused turns may already have visible text but are excluded from future context. Changing provider/model preserves
-portable text and drops protocol-specific continuation. Explicit context windows bound retained history as described
+portable text and drops protocol-specific continuation. Explicit or opted-in catalog context windows bound history as described
 below. This does not retain ACP update history or persist context to disk; see the
 [resume cursor policy](compatibility.md#unsupported-and-deferred-behavior).
 
@@ -85,13 +86,17 @@ Unsupported block types are rejected before the turn starts. Successful history 
 function calls, their correlated results and any protocol-native continuation. Output-limited answers are retained;
 failed, cancelled, refused and context-exhausted turns are not.
 
-Context capacity is explicit configuration, never inferred from a model name or a catalog:
+Context capacity is explicit configuration by default, never inferred from a model name:
 
 ```toml
 [providers.work]
 context_window = 32768
 model_context_windows = { "small-model" = 8192 }
 ```
+
+An explicitly enabled [catalog context window](models.md#optional-protocol-hints-and-context-budgets) can supply a
+fallback below both explicit settings. Catalog budgets and protocol hints freeze at prompt acceptance; stale validated
+cache remains usable with visible provenance. Neither a download nor an endpoint listing is required before inference.
 
 Both settings accept positive 32-bit integers, including in presets. An exact, case-sensitive model entry overrides
 the profile fallback. Quote model IDs containing TOML punctuation. The map merges per model across configuration
@@ -102,7 +107,7 @@ model selected in that profile, so configure it appropriately for those models.
 Before **every model request**, including requests following tool execution, Bee requires:
 
 ```text
-estimated input tokens + reserved output tokens <= configured context window
+estimated input tokens + reserved output tokens <= effective context window
 ```
 
 Input is estimated from the UTF-8 byte lengths of compact JSON for the selected protocol's conversation and tool
@@ -126,10 +131,11 @@ message history. Close/resume retains the remaining context within the connectio
 
 ### Usage and overflow reporting
 
-After a successful commit with a configured capacity, ACP receives `usage_update` before terminal idle. `used` is
+After a successful commit with an effective capacity, ACP receives `usage_update` before terminal idle. `used` is
 the estimate for retained context including tool definitions and the final answer, excluding future output reservation;
-`size` is the configured window. `_meta["bee.dev/context"]` labels `estimated = true`, the method
-`utf8-json-bytes/3+256`, and `reservedOutput`. A final answer can change the estimate beyond the preflight budget;
+`size` is the effective window. `_meta["bee.dev/context"]` labels `estimated = true`, the method
+`utf8-json-bytes/3+256`, `reservedOutput`, and the enforced `window` fact's source/confidence/freshness.
+A final answer can change the estimate beyond the preflight budget;
 the next request is checked again. If turns were dropped, an informational notice reports their count. These are
 live context reports, not replayed messages, billing totals or generated summaries. Unsuccessful attempts emit no
 committed-context report or truncation notice.

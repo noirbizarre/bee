@@ -17,11 +17,12 @@ fn main() -> ExitCode {
     let verbose = args.verbose > 0 || std::env::var_os("RUST_BACKTRACE").is_some();
     install_miette_hook(verbose);
 
-    // Without a subcommand a client launched Bee: serve ACPv2. `auth` is the
-    // only thing a person runs by hand, and it never speaks the protocol.
+    // Without a subcommand a client launched Bee: serve ACPv2. Human-facing
+    // commands print only on their separate execution paths.
     let result = match args.command {
         None => bee::run(),
         Some(Command::Auth(command)) => commands::run_auth(command),
+        Some(Command::Models(command)) => commands::models::run(command),
     };
 
     match result {

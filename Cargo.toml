@@ -114,7 +114,7 @@ tokio = { version = "1", features = ["rt", "net", "time", "sync", "macros", "pro
 # Native tools expose cooperative cancellation as well as future-drop cancellation.
 tokio-util = { version = "0.7", features = ["rt"] }
 # Typed native inputs advertise the same schema that is enforced at dispatch.
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 schemars = "1"
 # Schemas are local code, not a reason to fetch URLs or read referenced files.
 jsonschema = { version = "0.60", default-features = false }

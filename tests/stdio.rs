@@ -37,12 +37,17 @@ impl Agent {
         // developer's real configuration (or a malformed one) cannot change
         // what these tests observe. Keep it alive until the child is reaped.
         let isolated = tempfile::tempdir().expect("a temp directory");
+        // Production refresh is automatic, but transport tests must stay offline.
+        let global = isolated.path().join("xdg/bee/config.toml");
+        std::fs::create_dir_all(global.parent().unwrap()).unwrap();
+        std::fs::write(global, "[catalog]\nenabled=false\n").unwrap();
         let path = bee::config::project_config_path(isolated.path());
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, support::native_bash_config(config)).unwrap();
         let mut child = Command::new(env!("CARGO_BIN_EXE_bee"))
             .env("HOME", isolated.path())
             .env("XDG_CONFIG_HOME", isolated.path().join("xdg"))
+            .env("XDG_CACHE_HOME", isolated.path().join("cache"))
             .env_remove("BEE_CONFIG")
             .current_dir(isolated.path())
             .stdin(Stdio::piped())

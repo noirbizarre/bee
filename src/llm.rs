@@ -191,17 +191,20 @@ pub struct Model {
     model: String,
     credential: Option<Secret>,
     http: crate::http::InferenceHttp,
+    selection: crate::models::Selection,
 }
 
 impl Model {
     /// Construct a model without a vendor registry or catalog lookup.
     pub fn new(profile: Profile, model: String, credential: Option<Secret>) -> Result<Self, Error> {
+        let selection = crate::models::Snapshot::default().resolve(&profile, &model);
         Ok(Self {
             instructions: String::new(),
             http: crate::http::InferenceHttp::new()?,
             profile,
             model,
             credential,
+            selection,
         })
     }
 
@@ -222,6 +225,11 @@ impl Model {
 }
 
 impl Model {
+    /// Use an already-resolved immutable route and budget without any catalog I/O.
+    pub(crate) fn with_selection(mut self, selection: crate::models::Selection) -> Self {
+        self.selection = selection;
+        self
+    }
     /// Additional persistent instructions, kept outside evictable user-led turns.
     pub fn with_instructions(mut self, instructions: String) -> Self {
         self.instructions = instructions;
@@ -239,58 +247,80 @@ impl Model {
             Protocol::OpenAiResponses => responses::request(self, messages, tools)?,
             Protocol::AnthropicMessages => anthropic::request(self, messages, tools)?,
         };
-        Ok(crate::context::estimate(
-            &body,
-            self.profile.context_window(&self.model),
-        ))
+        let mut report = crate::context::estimate(&body, self.selection.window);
+        report.window_fact = self.selection.window_fact.clone();
+        Ok(report)
     }
 
     fn endpoint(&self) -> &crate::provider::Endpoint {
-        self.profile.endpoint_for_model(&self.model)
+        self.profile
+            .endpoint(self.selection.protocol)
+            .expect("resolved configured protocol")
     }
 
     pub(crate) fn headers(
         &self,
         version: Option<&str>,
     ) -> Result<reqwest::header::HeaderMap, Error> {
-        use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-        let mut headers = HeaderMap::new();
-        headers.insert("content-type", HeaderValue::from_static("application/json"));
-        headers.insert(
-            "accept",
-            HeaderValue::from_static("text/event-stream, application/json"),
-        );
-        if let Some(version) = version {
-            headers.insert(
-                "anthropic-version",
-                HeaderValue::from_str(version).map_err(|_| Error::Headers)?,
-            );
-        }
-        if let Some(secret) = &self.credential {
-            let (name, value) = crate::auth::header_for(self.endpoint().protocol(), secret);
-            let mut value = HeaderValue::from_str(value.expose()).map_err(|_| Error::Headers)?;
-            value.set_sensitive(true);
-            headers.insert(
-                HeaderName::from_bytes(name.as_bytes()).map_err(|_| Error::Headers)?,
-                value,
-            );
-        }
-        for (name, value) in self.profile.headers() {
-            let name = HeaderName::from_bytes(name.as_bytes()).map_err(|_| Error::Headers)?;
-            if headers.contains_key(&name)
-                || matches!(
-                    name.as_str(),
-                    "host" | "content-length" | "transfer-encoding"
-                )
-            {
-                return Err(Error::Headers);
-            }
-            let mut value = HeaderValue::from_str(value).map_err(|_| Error::Headers)?;
-            value.set_sensitive(true);
-            headers.insert(name, value);
-        }
-        Ok(headers)
+        request_headers(
+            &self.profile,
+            self.endpoint().protocol(),
+            self.credential.as_ref(),
+            version,
+            true,
+        )
     }
+}
+
+/// Shared auth rules prevent endpoint discovery from silently presenting a key differently.
+pub(crate) fn request_headers(
+    profile: &Profile,
+    protocol: Protocol,
+    credential: Option<&Secret>,
+    version: Option<&str>,
+    streaming: bool,
+) -> Result<reqwest::header::HeaderMap, Error> {
+    use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+    let mut headers = HeaderMap::new();
+    headers.insert("content-type", HeaderValue::from_static("application/json"));
+    headers.insert(
+        "accept",
+        HeaderValue::from_static(if streaming {
+            "text/event-stream, application/json"
+        } else {
+            "application/json"
+        }),
+    );
+    if let Some(version) = version {
+        headers.insert(
+            "anthropic-version",
+            HeaderValue::from_str(version).map_err(|_| Error::Headers)?,
+        );
+    }
+    if let Some(secret) = credential {
+        let (name, value) = crate::auth::header_for(protocol, secret);
+        let mut value = HeaderValue::from_str(value.expose()).map_err(|_| Error::Headers)?;
+        value.set_sensitive(true);
+        headers.insert(
+            HeaderName::from_bytes(name.as_bytes()).map_err(|_| Error::Headers)?,
+            value,
+        );
+    }
+    for (name, value) in profile.headers() {
+        let name = HeaderName::from_bytes(name.as_bytes()).map_err(|_| Error::Headers)?;
+        if headers.contains_key(&name)
+            || matches!(
+                name.as_str(),
+                "host" | "content-length" | "transfer-encoding"
+            )
+        {
+            return Err(Error::Headers);
+        }
+        let mut value = HeaderValue::from_str(value).map_err(|_| Error::Headers)?;
+        value.set_sensitive(true);
+        headers.insert(name, value);
+    }
+    Ok(headers)
 }
 
 /// Inspect only recognized classifications; upstream text never escapes this seam.

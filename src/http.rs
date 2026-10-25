@@ -12,6 +12,54 @@ use serde_json::Value;
 
 use crate::llm::Error;
 
+/// Bounded, redirect-free GET transport for optional model discovery.
+pub struct DiscoveryHttp;
+
+impl crate::models::Http for DiscoveryHttp {
+    fn get<'a>(
+        &'a self,
+        url: &'a str,
+        headers: reqwest::header::HeaderMap,
+        limit: usize,
+    ) -> futures::future::BoxFuture<'a, Result<Vec<u8>, crate::models::Error>> {
+        Box::pin(async move {
+            use crate::models::Error;
+            let client = reqwest::Client::builder()
+                // Listing headers can be credentials even on a same-origin redirect.
+                .redirect(reqwest::redirect::Policy::none())
+                .retry(reqwest::retry::never())
+                .build()
+                .map_err(|_| Error::Transport)?;
+            let response = client
+                .get(url)
+                .headers(headers)
+                .timeout(Duration::from_secs(15))
+                .send()
+                .await
+                .map_err(|_| Error::Transport)?;
+            if !response.status().is_success() {
+                return Err(Error::Rejected);
+            }
+            if response
+                .content_length()
+                .is_some_and(|size| size > limit as u64)
+            {
+                return Err(Error::Limit);
+            }
+            let mut stream = response.bytes_stream();
+            let mut bytes = Vec::new();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.map_err(|_| Error::Transport)?;
+                if bytes.len().saturating_add(chunk.len()) > limit {
+                    return Err(Error::Limit);
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            Ok(bytes)
+        })
+    }
+}
+
 /// Maximum size of one wire event or assembled tool argument.
 pub(crate) const MAX_EVENT: usize = 1024 * 1024;
 const MAX_RESPONSE: usize = 16 * MAX_EVENT;

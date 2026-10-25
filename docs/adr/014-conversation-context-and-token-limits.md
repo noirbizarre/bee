@@ -6,6 +6,8 @@ Accepted. Extends ADR-012's transactional in-memory context with optional token 
 
 ## Context
 
+The explicit-only capacity policy is extended by [ADR-018](018-optional-model-discovery.md) for opted-in catalog windows.
+
 Successful turns already retain normalized user messages, assistant steps, tool pairs and native continuation.
 Unbounded accumulation eventually exceeds a model's capacity. Models are opaque IDs, providers may be private
 gateways, and protocol selection can change with the model; a guessed global capacity would be misleading.
