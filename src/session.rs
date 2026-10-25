@@ -19,8 +19,13 @@ use crate::provider::{Providers, check_model_id};
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum SessionError {
-    /// The id names no session this connection created.
-    #[error("unknown session `{0}`; create one with `session/new` first")]
+    /// Restoration/storage failures are never interpreted as a fresh session.
+    #[error(transparent)]
+    History(#[from] crate::history::Error),
+    /// The id names no session currently attached to this connection.
+    #[error(
+        "unknown or detached session `{0}`; use `session/list` and `session/resume`, or create one with `session/new`"
+    )]
     Unknown(String),
 
     /// The session was closed.
@@ -147,6 +152,9 @@ pub(crate) struct InferenceInput {
 
 #[derive(Debug)]
 struct Session {
+    durable: Option<crate::history::Handle>,
+    transcript: Vec<crate::history::Message>,
+    finalizing: bool,
     protocol: Option<crate::provider::Protocol>,
     instructions: crate::instructions::State,
     cwd: PathBuf,
@@ -181,10 +189,10 @@ impl std::fmt::Debug for ActiveTurn {
     }
 }
 
-/// Every session one connection has created.
+/// The session runtime state attached to one connection.
 ///
-/// One per connection: nothing here is shared between connections, so two
-/// clients cannot observe or disturb each other's sessions.
+/// Durable discovery and ownership live in the injected history store. Runtime
+/// cancellation and execution authority are never shared between connections.
 #[derive(Debug, Default)]
 pub struct Sessions {
     created: u64,
@@ -400,6 +408,9 @@ impl Sessions {
         self.by_id.insert(
             id.clone(),
             Session {
+                durable: None,
+                transcript: Vec::new(),
+                finalizing: false,
                 protocol: None,
                 instructions: crate::instructions::State::default(),
                 cwd: cwd.into(),
@@ -465,6 +476,14 @@ impl Sessions {
     /// already took it, and has reported (or will report) its terminal state:
     /// reporting another would give the client two.
     pub fn finish_turn(&mut self, id: &str, token: u64) -> bool {
+        if let Some(session) = self.by_id.get_mut(id)
+            && session
+                .active
+                .as_ref()
+                .is_none_or(|active| active.token == token)
+        {
+            session.finalizing = false;
+        }
         if !self.is_current(id, token) {
             return false;
         }
@@ -482,6 +501,7 @@ impl Sessions {
     pub fn cancel(&mut self, id: &str) -> bool {
         self.by_id
             .get_mut(id)
+            .filter(|session| !session.finalizing)
             .and_then(|session| session.active.take())
             .map(|active| (active.cancel)())
             .is_some()
@@ -554,6 +574,127 @@ impl Sessions {
         } else {
             Err(SessionError::Closed(id.to_owned()))
         }
+    }
+
+    pub(crate) fn accepts_output(&self, id: &str, token: u64) -> bool {
+        self.is_current(id, token)
+            && self
+                .by_id
+                .get(id)
+                .is_some_and(|session| !session.finalizing)
+    }
+
+    pub(crate) fn history(&self, id: &str) -> Option<crate::history::Handle> {
+        self.by_id
+            .get(id)
+            .and_then(|session| session.durable.clone())
+    }
+
+    pub(crate) fn snapshot(&self, id: &str) -> Option<crate::history::Snapshot> {
+        self.by_id.get(id).map(|session| crate::history::Snapshot {
+            cwd: session.cwd.clone(),
+            turns: session.turns,
+            provider: session.provider.clone(),
+            model: session.model.clone(),
+            protocol: session.protocol,
+            messages: session.history.clone(),
+            instructions: session.instructions.clone(),
+        })
+    }
+
+    pub(crate) fn restore(
+        &mut self,
+        id: String,
+        snapshot: crate::history::Snapshot,
+        handle: crate::history::Handle,
+    ) {
+        self.created += 1;
+        self.by_id.insert(
+            id,
+            Session {
+                durable: Some(handle),
+                transcript: Vec::new(),
+                finalizing: false,
+                cwd: snapshot.cwd,
+                turns: snapshot.turns,
+                provider: snapshot.provider,
+                model: snapshot.model,
+                protocol: snapshot.protocol,
+                history: snapshot.messages,
+                instructions: snapshot.instructions,
+                created: self.created,
+                open: true,
+                active: None,
+            },
+        );
+    }
+
+    pub(crate) fn detach(&mut self, id: &str) {
+        if let Some(session) = self.by_id.get_mut(id) {
+            // Retain a closed tombstone for idempotent close, but no stale
+            // context or writer that could overwrite a later owner's state.
+            session.durable = None;
+            session.history.clear();
+            session.instructions = Default::default();
+        }
+    }
+
+    pub(crate) fn rollback(&mut self, id: &str, snapshot: crate::history::Snapshot) {
+        if let Some(session) = self.by_id.get_mut(id) {
+            session.provider = snapshot.provider;
+            session.model = snapshot.model;
+            session.history = snapshot.messages;
+            session.protocol = snapshot.protocol;
+            session.instructions = snapshot.instructions;
+        }
+    }
+
+    pub(crate) fn finalize(&mut self, id: &str, token: u64) -> bool {
+        let current = self.is_current(id, token);
+        if let Some(session) = self.by_id.get_mut(id) {
+            session.finalizing = true;
+        }
+        current
+    }
+
+    pub(crate) fn record_user(&mut self, id: &str, message_id: String, content: serde_json::Value) {
+        if let Some(session) = self.by_id.get_mut(id)
+            && session.durable.is_none()
+        {
+            session.transcript.push(crate::history::Message {
+                id: message_id,
+                user: true,
+                content,
+            });
+        }
+    }
+
+    pub(crate) fn record_text(&mut self, id: &str, message_id: &str, text: &str) {
+        if let Some(session) = self.by_id.get_mut(id) {
+            if let Some(message) = session
+                .transcript
+                .last_mut()
+                .filter(|message| message.id == message_id)
+            {
+                if let Some(content) = message.content[0]["text"].as_str() {
+                    message.content[0]["text"] =
+                        serde_json::Value::String(format!("{content}{text}"));
+                }
+            } else {
+                session.transcript.push(crate::history::Message {
+                    id: message_id.into(),
+                    user: false,
+                    content: serde_json::json!([{"type":"text","text":text}]),
+                });
+            }
+        }
+    }
+
+    pub(crate) fn transcript(&self, id: &str) -> &[crate::history::Message] {
+        self.by_id
+            .get(id)
+            .map(|session| session.transcript.as_slice())
+            .unwrap_or(&[])
     }
 }
 

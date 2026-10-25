@@ -53,6 +53,7 @@ fn subprocess_with_path(root: &tempfile::TempDir, url: &str, path: Option<&str>)
             .env("HOME", root.path().to_str().unwrap())
             .env("XDG_CONFIG_HOME", root.path().join("xdg").to_str().unwrap())
             .env("XDG_CACHE_HOME", root.path().join("cache").to_str().unwrap())
+            .env("XDG_STATE_HOME", root.path().join("state").to_str().unwrap())
             .env("BEE_CONFIG", config.to_str().unwrap());
     if let Some(path) = path {
         // Restrict only the child; parallel tests retain their normal environment.

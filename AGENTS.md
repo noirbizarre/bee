@@ -15,9 +15,11 @@ framework or a provider abstraction ahead of a concrete need.
 
 Bee serves ACPv2 over stdio and implements the baseline session lifecycle
 (new, list, resume, close, prompt, cancel) with streaming Chat Completions, Responses
-and Anthropic Messages inference. Successful context is retained in memory, with explicit model-aware
+and Anthropic Messages inference. Production sessions and successful context are durable, with explicit model-aware
 context windows, approximate token accounting and transactional oldest-whole-turn truncation; failed/cancelled/refused
-turns are excluded. No ACP history is retained for replay; start resume synchronizes current state. The SDK-free bounded
+turns are excluded from model context. Separate visible history retains unsuccessful partials; start resume replays
+full message upserts before current state. Private per-session JSONL journals and exclusive OS locks preserve identity
+across restarts without replaying execution. Embedded runtimes default to isolated memory storage. The SDK-free bounded
 loop supports configurable turn limits and injected tool executors; production ACP
 registers the native bash, read, glob, grep, list, write and edit tools with session-relative execution contexts.
 Client-hosted MCP tools are discovered per prompt and invoked through ACP's MCP transport, with session-scoped
@@ -62,6 +64,7 @@ src/
 ├── acp/mcp.rs  session-scoped client MCP discovery, routing and composite execution
 ├── acp/interactions.rs client-owned Bash authorization, form input and URL login correlation
 ├── session.rs  session state, free of the SDK
+├── history.rs  private durable sessions, ordered JSONL journals and successful-context projections, free of the SDK
 ├── config.rs   layered XDG configuration (ADR-006), free of the SDK
 ├── provider.rs provider profiles from the configuration (ADR-007), free of the SDK
 ├── auth.rs     credential sources, the 0600 store and secret handling (ADR-008), free of the SDK

@@ -944,6 +944,12 @@ async fn stopping_pending_interactions_cleans_up_before_idle_and_isolates_sessio
                     request.replay_from = Some(v2::ReplayFrom::Start(v2::ReplayFromStart::new()));
                 }
                 connection.send_request(request).block_task().await?;
+                if start {
+                    assert!(matches!(
+                        updates.recv().await.unwrap().update,
+                        v2::SessionUpdate::UserMessage(_)
+                    ));
+                }
                 assert!(matches!(
                     updates.recv().await.unwrap().update,
                     v2::SessionUpdate::StateUpdate(v2::StateUpdate::RequiresAction(_))

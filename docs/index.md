@@ -14,8 +14,9 @@ serves ACPv2 over stdio, so a client can start it, complete the `initialize` han
 prompts. Bee advertises the baseline session lifecycle (`session/new`, `list`, `resume`, `close`, `prompt`, `cancel`).
 
 **Chat Completions, Responses and Anthropic Messages inference are implemented.** Selected profiles receive prompts and
-stream answers over ACP. Cancellation and close interrupt pending inference. Successful context is retained in memory,
-across close/resume. No ACP history is retained for replay; start resume synchronizes current state.
+stream answers over ACP. Cancellation and close interrupt pending inference. Production sessions retain successful
+context across close/resume and process restart. Start resume replays the separate visible transcript before current
+state. See [session history](sessions.md) for storage, retention and client restoration.
 Cancelled, failed and refused turns do not enter model context.
 Prompts accept text and resource links, represented as references without fetching their contents.
 

@@ -101,15 +101,21 @@ async fn unsuccessful_truncation_preserves_prior_context_across_close_and_resume
                             .await?;
                         let mut request =
                             v2::ResumeSessionRequest::new(session.clone(), cwd.clone());
-                        // Empty ACP replay must not discard committed model context.
+                        // Visible transcript replay must not promote the failed
+                        // turn into successful inference context.
                         request.replay_from =
                             Some(v2::ReplayFrom::Start(v2::ReplayFromStart::new()));
                         connection.send_request(request).block_task().await?;
-                        // Resume's idle snapshot is not a completed prompt.
-                        assert!(matches!(
-                            updates.recv().await.unwrap().update,
-                            v2::SessionUpdate::StateUpdate(v2::StateUpdate::Idle(_))
-                        ));
+                        let mut users = 0;
+                        loop {
+                            match updates.recv().await.unwrap().update {
+                                v2::SessionUpdate::UserMessage(_) => users += 1,
+                                v2::SessionUpdate::AgentMessage(_) => {}
+                                v2::SessionUpdate::StateUpdate(v2::StateUpdate::Idle(_)) => break,
+                                other => panic!("unexpected replay update: {other:?}"),
+                            }
+                        }
+                        assert_eq!(users, 2);
                     }
                     connection
                         .send_request(v2::PromptRequest::new(session.clone(), vec![prompt.into()]))

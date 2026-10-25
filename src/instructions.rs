@@ -168,10 +168,53 @@ impl Sources {
 }
 
 /// Committed semantic guidance, independent of evictable conversation messages.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct State {
     scopes: BTreeMap<PathBuf, String>,
     active: BTreeMap<PathBuf, String>,
+}
+
+/// Journal only changed guidance; unchanged AGENTS/skill payloads must not be
+/// duplicated on disk after every successful turn.
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+pub(crate) struct Changes {
+    scopes: BTreeMap<PathBuf, Option<String>>,
+    active: BTreeMap<PathBuf, Option<String>>,
+}
+
+impl State {
+    pub(crate) fn changes_from(&self, previous: &Self) -> Changes {
+        fn changed(
+            current: &BTreeMap<PathBuf, String>,
+            previous: &BTreeMap<PathBuf, String>,
+        ) -> BTreeMap<PathBuf, Option<String>> {
+            current
+                .keys()
+                .chain(previous.keys())
+                .filter(|path| current.get(*path) != previous.get(*path))
+                .map(|path| (path.clone(), current.get(path).cloned()))
+                .collect()
+        }
+        Changes {
+            scopes: changed(&self.scopes, &previous.scopes),
+            active: changed(&self.active, &previous.active),
+        }
+    }
+
+    pub(crate) fn apply(&mut self, changes: Changes) {
+        for (target, changes) in [
+            (&mut self.scopes, changes.scopes),
+            (&mut self.active, changes.active),
+        ] {
+            for (path, content) in changes {
+                if let Some(content) = content {
+                    target.insert(path, content);
+                } else {
+                    target.remove(&path);
+                }
+            }
+        }
+    }
 }
 
 impl std::fmt::Debug for State {

@@ -121,10 +121,12 @@ The TCK verdict was **CONFORMANT**. Requirement totals (distinct from test count
 | Informational | 10 | 0 | 7 |
 
 The previously failing `ACP-RESUME-202/206/209` now pass: Bee accepts the standard
-start cursor, replays zero retained ACP conversation updates, and sends a schema-valid
+start cursor and sends a schema-valid
 current-state snapshot before responding. Unknown and malformed cursors still fail
 with `-32602` (`ACP-RESUME-207/208`). Retained-message identity is skipped because
-Bee retains no ACP conversation updates; this is permitted by the draft.
+that revision retained no ACP conversation updates; this was permitted by the draft.
+This recorded run predates durable history. Bee now retains visible messages and replays
+them as full upserts; real-process restart and repeated-replay tests cover that contract.
 
 Skipped tests include unadvertised authentication/content/session extensions and
 interaction/tool-update paths this fixture does not produce. In particular, the TCK
@@ -143,12 +145,22 @@ protocols and scoped guidance; `tests/e2e.rs` searches through the real stdio bi
 with an empty executable search path and verifies retained correlated results.
 See the [search contract and dependency licenses](tools.md#built-in-content-search).
 
+## Session restoration
+
+Production sessions persist by default. `session/list` discovers existing IDs after restart;
+`session/resume` with `replayFrom: {"type":"start"}` sends retained user/agent message upserts
+through `session/update`, followed by current state before the response. Omitted/null replay
+requests only current state. Replay never reexecutes tools. One connection owns each session;
+competing resumes fail explicitly. See [session history](sessions.md) for the storage and retention contract.
+
+The pinned v2 schema has no separate durability/replay capability flag. Bee continues advertising
+only its implemented MCP transport and baseline lifecycle, without v1 `loadSession` flags.
+
 ## Unsupported and deferred behavior
 
-- **ACP history retention:** model context survives close/resume in memory, but no ACP
-  conversation updates are retained for replay. Omitted/null `replayFrom` and
-  `{"type":"start"}` all resume with only the current-state snapshot. Unsupported
-  cursor types and malformed values return invalid params; no replay capability is invented.
+- **Replay cursors:** only omitted/null and `{"type":"start"}` are supported. Other cursor
+  types and malformed values return invalid params. History from older memory-only Bee processes
+  cannot be recovered after those processes exit. Missing/corrupt history fails explicitly.
 - **MCP interaction:** client-hosted MCP denials are ordinary tool errors; they are not
   ACP permission outcomes. MCP `input_required` and task continuations are rejected.
   Only client-hosted ACP MCP attachments are advertised, not direct stdio/HTTP MCP servers.

@@ -33,6 +33,10 @@ impl Agent {
     }
 
     fn configured(config: &str) -> Self {
+        Self::configured_with_state(config, None)
+    }
+
+    fn configured_with_state(config: &str, state: Option<&std::path::Path>) -> Self {
         // An empty directory as home, config home and working directory, so a
         // developer's real configuration (or a malformed one) cannot change
         // what these tests observe. Keep it alive until the child is reaped.
@@ -48,6 +52,10 @@ impl Agent {
             .env("HOME", isolated.path())
             .env("XDG_CONFIG_HOME", isolated.path().join("xdg"))
             .env("XDG_CACHE_HOME", isolated.path().join("cache"))
+            .env(
+                "XDG_STATE_HOME",
+                state.map_or_else(|| isolated.path().join("state"), std::path::Path::to_owned),
+            )
             .env_remove("BEE_CONFIG")
             .current_dir(isolated.path())
             .stdin(Stdio::piped())
@@ -126,6 +134,39 @@ impl Agent {
         self.recv()
     }
 
+    fn until_idle(&self) -> Vec<Value> {
+        let mut messages = Vec::new();
+        loop {
+            let message = self.recv();
+            let done = message["params"]["update"]["state"] == "idle";
+            messages.push(message);
+            if done {
+                return messages;
+            }
+        }
+    }
+
+    fn resume(&mut self, session: &Value, cwd: &std::path::Path, replay: bool) -> Vec<Value> {
+        let mut params = json!({"sessionId":session,"cwd":cwd});
+        if replay {
+            params["replayFrom"] = json!({"type":"start"});
+        }
+        self.send(&json!({"jsonrpc":"2.0","id":90,"method":"session/resume","params":params}));
+        let mut messages: Vec<Value> = Vec::new();
+        loop {
+            let message = self.recv();
+            if message["id"] == 90 {
+                assert!(message.get("result").is_some(), "{message}");
+                assert_eq!(
+                    messages.last().unwrap()["params"]["update"]["state"],
+                    "idle"
+                );
+                return messages;
+            }
+            messages.push(message);
+        }
+    }
+
     /// Close stdin, as a client does to say it is done, and wait for exit.
     fn finish(mut self) -> (std::process::ExitStatus, String) {
         drop(self.stdin.take());
@@ -156,6 +197,383 @@ impl Drop for Agent {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+#[test]
+fn a_new_process_restores_native_identity_transcript_selection_and_tool_context_without_reexecution()
+ {
+    let root = tempfile::tempdir().unwrap();
+    let state = root.path().join("state");
+    let server = support::Server::start(vec![
+        support::Response::json(
+            json!({"choices":[{"index":0,"message":{"tool_calls":[{"id":"saved-write","type":"function","function":{"name":"write","arguments":"{\"path\":\"sentinel\",\"content\":\"original\"}"}}]},"finish_reason":"tool_calls"}]}),
+        ),
+        support::Response::json(support::chat_text("durable answer")),
+        support::Response::json(support::chat_text("continued")),
+    ]);
+    let config = format!(
+        "[providers.test]\nmodel='test'\nprotocols={{openai-chat={{base_url='{}'}}}}",
+        server.url
+    );
+    let mut first = Agent::configured_with_state(&config, Some(&state));
+    first.initialize(1);
+    first
+        .send(&json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":root.path()}}));
+    let session = first.recv()["result"]["sessionId"].clone();
+    first.send(&json!({"jsonrpc":"2.0","id":3,"method":"session/set_config_option","params":{"sessionId":session,"configId":"model","type":"id","value":"custom-model"}}));
+    let selected = first.recv();
+    assert!(selected.get("result").is_some(), "{selected}");
+    let prompt = json!([{"type":"text","text":"remember this"},{"type":"resource_link","uri":"file:///reference","name":"reference"}]);
+    first.send(&json!({"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"sessionId":session,"prompt":prompt}}));
+    let first_turn = first.until_idle();
+    assert_eq!(first_turn[0]["result"]["messageId"], "user-1");
+    assert_eq!(
+        first_turn.last().unwrap()["params"]["update"]["stopReason"],
+        "end_turn"
+    );
+    server.request();
+    server.request();
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("sentinel")).unwrap(),
+        "original"
+    );
+    let (status, stderr) = first.finish();
+    assert!(status.success(), "{stderr}");
+    // If replay reexecutes the historical write it will overwrite this value.
+    std::fs::write(root.path().join("sentinel"), "changed after execution").unwrap();
+
+    let mut second = Agent::configured_with_state(&config, Some(&state));
+    second.initialize(1);
+    second.send(
+        &json!({"jsonrpc":"2.0","id":2,"method":"session/list","params":{"cwd":root.path()}}),
+    );
+    assert_eq!(second.recv()["result"]["sessions"][0]["sessionId"], session);
+    let replay = second.resume(&session, root.path(), true);
+    assert_eq!(replay.len(), 3);
+    assert_eq!(replay[0]["params"]["update"]["messageId"], "user-1");
+    assert_eq!(replay[0]["params"]["update"]["content"], prompt);
+    assert_eq!(replay[1]["params"]["update"]["messageId"], "agent-1");
+    assert_eq!(
+        replay[1]["params"]["update"]["content"][0]["text"],
+        "durable answer"
+    );
+    assert_eq!(second.resume(&session, root.path(), true), replay);
+    assert_eq!(second.resume(&session, root.path(), false).len(), 1);
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("sentinel")).unwrap(),
+        "changed after execution"
+    );
+    server.assert_no_more_requests();
+
+    second.send(&json!({"jsonrpc":"2.0","id":5,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"text","text":"continue"}]}}));
+    let continued = second.until_idle();
+    assert_eq!(continued[0]["result"]["messageId"], "user-2");
+    let request = server.request();
+    assert_eq!(request.body["model"], "custom-model");
+    let history = request.body["messages"].to_string();
+    assert!(history.contains("durable answer"));
+    assert!(history.contains("saved-write"));
+    assert!(history.contains("remember this"));
+    assert!(second.finish().0.success());
+}
+
+#[test]
+fn competing_processes_can_list_but_cannot_attach_until_the_owner_closes() {
+    let root = tempfile::tempdir().unwrap();
+    let state = root.path().join("state");
+    let mut first = Agent::configured_with_state("", Some(&state));
+    first.initialize(1);
+    first
+        .send(&json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":root.path()}}));
+    let session = first.recv()["result"]["sessionId"].clone();
+    let mut second = Agent::configured_with_state("", Some(&state));
+    second.initialize(1);
+    second.send(&json!({"jsonrpc":"2.0","id":2,"method":"session/list","params":{}}));
+    assert_eq!(second.recv()["result"]["sessions"][0]["sessionId"], session);
+    second.send(&json!({"jsonrpc":"2.0","id":3,"method":"session/resume","params":{"sessionId":session,"cwd":root.path()}}));
+    let rejected = second.recv();
+    assert!(
+        rejected["error"]["data"]
+            .as_str()
+            .unwrap()
+            .contains("owned by another")
+    );
+    // A conflict for one ID cannot stall a different session.
+    second
+        .send(&json!({"jsonrpc":"2.0","id":4,"method":"session/new","params":{"cwd":root.path()}}));
+    assert_ne!(second.recv()["result"]["sessionId"], session);
+    first.send(
+        &json!({"jsonrpc":"2.0","id":5,"method":"session/close","params":{"sessionId":session}}),
+    );
+    assert!(first.recv().get("result").is_some());
+    first.send(
+        &json!({"jsonrpc":"2.0","id":6,"method":"session/close","params":{"sessionId":session}}),
+    );
+    assert!(
+        first.recv().get("result").is_some(),
+        "closing a detached durable session is idempotent"
+    );
+    assert_eq!(second.resume(&session, root.path(), true).len(), 1);
+    assert!(first.finish().0.success());
+    assert!(second.finish().0.success());
+}
+
+#[test]
+fn storage_failure_after_acceptance_emits_one_error_idle_and_preserves_committed_context() {
+    let root = tempfile::tempdir().unwrap();
+    let state = root.path().join("state");
+    let (blocked, release) =
+        support::Response::json(support::chat_text("uncommitted secret answer")).gated();
+    let server = support::Server::start(vec![
+        support::Response::json(support::chat_text("committed answer")),
+        blocked,
+        support::Response::json(support::chat_text("recovered")),
+    ]);
+    let config = format!(
+        "[providers.test]\nmodel='test'\nprotocols={{openai-chat={{base_url='{}'}}}}",
+        server.url
+    );
+    let mut agent = Agent::configured_with_state(&config, Some(&state));
+    agent.initialize(1);
+    agent
+        .send(&json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":root.path()}}));
+    let session = agent.recv()["result"]["sessionId"].clone();
+    agent.send(&json!({"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"text","text":"committed user"}]}}));
+    agent.until_idle();
+    server.request();
+    let path = state
+        .join("bee/sessions")
+        .join(session.as_str().unwrap())
+        .join("session.jsonl");
+    agent.send(&json!({"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"text","text":"failed user"}]}}));
+    server.request();
+    // Remove the owned path only after durable acceptance, before the gated
+    // provider can emit text. The production writer must refuse to acknowledge
+    // output into an unlinked/replaced journal, even though its FD is still open.
+    let saved = root.path().join("private-storage-error.jsonl");
+    std::fs::rename(&path, &saved).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    release.send(()).unwrap();
+    let failed = agent.until_idle();
+    assert_eq!(failed[0]["result"]["messageId"], "user-2");
+    assert_eq!(
+        failed.last().unwrap()["params"]["update"]["stopReason"],
+        "error"
+    );
+    assert!(
+        !serde_json::to_string(&failed)
+            .unwrap()
+            .contains("private-storage-error")
+    );
+    assert!(
+        !serde_json::to_string(&failed)
+            .unwrap()
+            .contains("uncommitted secret")
+    );
+    agent.send(&json!({"jsonrpc":"2.0","id":5,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"text","text":"still poisoned"}]}}));
+    assert!(agent.recv().get("error").is_some());
+    agent.send(
+        &json!({"jsonrpc":"2.0","id":6,"method":"session/close","params":{"sessionId":session}}),
+    );
+    assert_eq!(
+        agent.recv()["id"],
+        6,
+        "no duplicate terminal idle may follow the failure"
+    );
+    std::fs::remove_dir(&path).unwrap();
+    std::fs::rename(saved, &path).unwrap();
+    let replay = agent.resume(&session, root.path(), true);
+    assert!(
+        serde_json::to_string(&replay)
+            .unwrap()
+            .contains("failed user")
+    );
+    agent.send(&json!({"jsonrpc":"2.0","id":7,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"text","text":"continue"}]}}));
+    let resumed = agent.until_idle();
+    assert_eq!(resumed[0]["result"]["messageId"], "user-3");
+    let context = server.request().body["messages"].to_string();
+    assert!(context.contains("committed answer"));
+    assert!(!context.contains("failed user"));
+    assert!(!context.contains("uncommitted secret"));
+    assert!(agent.finish().0.success());
+}
+
+#[test]
+fn repeated_replay_is_bounded_without_deleting_history_or_preventing_state_only_resume() {
+    let server = support::Server::start(vec![support::Response::json(support::chat_text(
+        "retained answer",
+    ))]);
+    let config = format!(
+        "[history]\nreplay_max_bytes=2048\n[providers.test]\nmodel='test'\nprotocols={{openai-chat={{base_url='{}'}}}}",
+        server.url
+    );
+    let mut agent = Agent::configured(&config);
+    agent.initialize(1);
+    let cwd = agent._isolated.path().to_owned();
+    agent.send(&json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":cwd}}));
+    let session = agent.recv()["result"]["sessionId"].clone();
+    agent.send(&json!({"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"text","text":"retained user"}]}}));
+    agent.until_idle();
+    server.request();
+    assert_eq!(agent.resume(&session, &cwd, true).len(), 3);
+    agent.send(&json!({"jsonrpc":"2.0","id":4,"method":"session/resume","params":{"sessionId":session,"cwd":cwd,"replayFrom":{"type":"start"}}}));
+    let rejected = agent.recv();
+    assert_eq!(
+        rejected["id"], 4,
+        "budget refusal must precede any partial history"
+    );
+    assert!(
+        rejected["error"]["data"]
+            .as_str()
+            .unwrap()
+            .contains("byte budget")
+    );
+    assert_eq!(agent.resume(&session, &cwd, false).len(), 1);
+    agent.send(&json!({"jsonrpc":"2.0","id":5,"method":"session/list","params":{}}));
+    assert_eq!(agent.recv()["result"]["sessions"][0]["sessionId"], session);
+    server.assert_no_more_requests();
+    assert!(agent.finish().0.success());
+}
+
+#[test]
+fn a_resume_response_releases_its_request_gate_before_the_next_request() {
+    let mut agent = Agent::spawn();
+    agent.initialize(1);
+    let cwd = agent._isolated.path().to_owned();
+    agent.send(&json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":cwd}}));
+    let session = agent.recv()["result"]["sessionId"].clone();
+    // Each response is a readiness barrier, even when the worker publishes it
+    // before the async resume continuation gets another turn on the reactor.
+    for index in 0..200 {
+        assert_eq!(agent.resume(&session, &cwd, index % 2 == 0).len(), 1);
+    }
+    assert!(agent.finish().0.success());
+}
+
+#[rstest::rstest]
+#[case::cancelled("cancel")]
+#[case::interrupted("kill")]
+#[case::failed("failure")]
+#[case::refused("refusal")]
+fn unsuccessful_partial_answers_survive_restart_without_entering_inference_context(
+    #[case] stop: &str,
+) {
+    let root = tempfile::tempdir().unwrap();
+    let state = root.path().join("state");
+    let first = format!(
+        "data: {}\n\n",
+        json!({"choices":[{"index":0,"delta":{"content":"visible partial"},"finish_reason":null}]})
+    );
+    let end = if stop == "refusal" {
+        format!(
+            "data: {}\n\ndata: [DONE]\n\n",
+            json!({"choices":[{"index":0,"delta":{},"finish_reason":"content_filter"}]})
+        )
+    } else {
+        "data: malformed\n\n".into()
+    };
+    let (partial, release) =
+        support::Response::sse(format!("{first}{end}")).gated_after(first.len());
+    let server = support::Server::start(vec![
+        support::Response::json(support::chat_text("successful context")),
+        partial,
+        support::Response::json(support::chat_text("recovered")),
+    ]);
+    let config = format!(
+        "[providers.test]\nmodel='test'\nprotocols={{openai-chat={{base_url='{}'}}}}",
+        server.url
+    );
+    let mut agent = Agent::configured_with_state(&config, Some(&state));
+    agent.initialize(1);
+    agent
+        .send(&json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":root.path()}}));
+    let session = agent.recv()["result"]["sessionId"].clone();
+    agent.send(&json!({"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"text","text":"keep this"}]}}));
+    agent.until_idle();
+    server.request();
+    agent.send(&json!({"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"text","text":"unsuccessful user"}]}}));
+    loop {
+        let message = agent.recv();
+        if message["params"]["update"]["sessionUpdate"] == "agent_message_chunk" {
+            break;
+        }
+    }
+    server.request();
+    // Replay during live streaming is serialized with durable output and leaves
+    // the active turn running; it must never restart inference.
+    agent.send(&json!({"jsonrpc":"2.0","id":6,"method":"session/resume","params":{"sessionId":session,"cwd":root.path(),"replayFrom":{"type":"start"}}}));
+    let mut live_replay = Vec::new();
+    loop {
+        let message = agent.recv();
+        if message["id"] == 6 {
+            break;
+        }
+        live_replay.push(message);
+    }
+    assert_eq!(
+        live_replay[3]["params"]["update"]["content"][0]["text"],
+        "visible partial"
+    );
+    assert_eq!(
+        live_replay.last().unwrap()["params"]["update"]["state"],
+        "running"
+    );
+    match stop {
+        "kill" => {
+            agent.child.kill().unwrap();
+            agent.child.wait().unwrap();
+        }
+        "cancel" => {
+            agent.send(
+                &json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":session}}),
+            );
+            assert_eq!(
+                agent.until_idle().last().unwrap()["params"]["update"]["stopReason"],
+                "cancelled"
+            );
+        }
+        _ => {
+            release.send(()).unwrap();
+            assert_eq!(
+                agent.until_idle().last().unwrap()["params"]["update"]["stopReason"],
+                if stop == "refusal" {
+                    "refusal"
+                } else {
+                    "error"
+                }
+            );
+        }
+    }
+    if !matches!(stop, "failure" | "refusal") {
+        let _ = release.send(());
+    }
+    if stop == "kill" {
+        drop(agent);
+    } else {
+        assert!(agent.finish().0.success());
+    }
+
+    let mut restored = Agent::configured_with_state(&config, Some(&state));
+    restored.initialize(1);
+    let replay = restored.resume(&session, root.path(), true);
+    let messages: Vec<_> = replay
+        .iter()
+        .filter(|message| message["params"]["update"]["sessionUpdate"] != "notice")
+        .collect();
+    assert_eq!(messages.len(), 5);
+    assert_eq!(messages[2]["params"]["update"]["messageId"], "user-2");
+    assert_eq!(
+        messages[3]["params"]["update"]["content"][0]["text"],
+        "visible partial"
+    );
+    restored.send(&json!({"jsonrpc":"2.0","id":5,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"text","text":"next"}]}}));
+    let next = restored.until_idle();
+    assert_eq!(next[0]["result"]["messageId"], "user-3");
+    let context = server.request().body["messages"].to_string();
+    assert!(context.contains("successful context"));
+    assert!(!context.contains("unsuccessful user"));
+    assert!(!context.contains("visible partial"));
+    assert!(restored.finish().0.success());
 }
 
 #[rstest::rstest]
@@ -294,6 +712,14 @@ fn resume_cursors_preserve_wire_order_and_reject_invalid_requests_without_reopen
             params["replayFrom"] = cursor;
         }
         agent.send(&json!({"jsonrpc":"2.0","id":7,"method":"session/resume","params":params}));
+        if params["replayFrom"]["type"] == "start" {
+            let user = agent.recv();
+            assert_eq!(user["params"]["update"]["sessionUpdate"], "user_message");
+            assert_eq!(user["params"]["update"]["messageId"], "user-1");
+            let answer = agent.recv();
+            assert_eq!(answer["params"]["update"]["sessionUpdate"], "agent_message");
+            assert_eq!(answer["params"]["update"]["messageId"], "agent-1");
+        }
         let snapshot = agent.recv();
         assert_eq!(snapshot["method"], "session/update");
         assert_eq!(snapshot["params"]["sessionId"], session);
@@ -301,7 +727,7 @@ fn resume_cursors_preserve_wire_order_and_reject_invalid_requests_without_reopen
         let resumed = agent.recv();
         assert_eq!(
             resumed["id"], 7,
-            "only the current snapshot precedes the response"
+            "replay and the current snapshot precede the response"
         );
         assert!(resumed.get("result").is_some());
         // An ordered request detects any trailing history or duplicate snapshot.

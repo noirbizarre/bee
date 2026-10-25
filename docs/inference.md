@@ -54,11 +54,11 @@ execution because no model request remains to consume its results. Over-budget b
 Unknown settings, invalid types and nonpositive budgets fail at startup; layers override each setting independently.
 These turn budgets are separate from per-request timeouts, token limits and response-size bounds.
 
-Successful conversation context is retained within the ACP connection, including close/resume. Cancelled, failed and
-refused turns may already have visible text but are excluded from future context. Changing provider/model preserves
-portable text and drops protocol-specific continuation. Explicit or opted-in catalog context windows bound history as described
-below. This does not retain ACP update history or persist context to disk; see the
-[resume cursor policy](compatibility.md#unsupported-and-deferred-behavior).
+Successful conversation context is durably retained across close/resume and production process restarts. Cancelled,
+failed and refused turns may already have visible text but are excluded from future context. Changing provider/model
+preserves portable text and drops protocol-specific continuation. Explicit or opted-in catalog context windows bound
+history as described below. A separate visible transcript retains accepted user messages and assistant partials,
+even from unsuccessful turns, independently of context eviction. See [session history and replay](sessions.md).
 
 The SDK-free `agent::run` accepts tool definitions and an injected `Executor`, with correlated call/result history.
 The [native tool contract](tools.md) provides typed schema validation, registration, bounded results, and

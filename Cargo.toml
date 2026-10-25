@@ -129,6 +129,8 @@ yaml_serde = "0.10"
 unicode-normalization = "0.1"
 # Same-directory staging provides complete-content publication and cleanup on drop.
 tempfile = "3"
+# OS locks release session ownership even when a stdio child is killed.
+fs2 = "0.4"
 
 # Layered configuration (ADR-006). Only the generic `Table`/`Value` types are
 # used, which sit behind the `serde` feature; `display` (serialization) is not
@@ -149,11 +151,17 @@ getrandom = "0.4"
 # The credential store file and the OpenRouter exchange are JSON. Read by hand
 # over `Value`, never derived: serde's error text quotes the offending value, and
 # this file is where keys live (the reason `provider.rs` avoids it for TOML).
-serde_json = "1"
+# Raw payload bytes keep journal checksums stable across serializer upgrades.
+serde_json = { version = "1", features = ["raw_value"] }
 
 [target.'cfg(unix)'.dependencies]
 # Safe process-group signaling keeps cancellation cleanup synchronous on drop.
 nix = { version = "0.30", default-features = false, features = ["signal", "process"] }
+
+[target.'cfg(windows)'.dependencies]
+# Atomic owner-only directory creation and ACL inspection preserve private
+# history on Windows rather than disabling the production session lifecycle.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
 
 [dev-dependencies]
 # Human interaction deadlines are tested without waiting five real minutes.
