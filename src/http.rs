@@ -67,7 +67,11 @@ type EventSink<'a> = dyn FnMut(Option<&str>, &str) -> Result<(), Error> + Send +
 
 /// Async inference transport. No debug implementation can expose its requests.
 #[derive(Clone)]
-pub(crate) struct InferenceHttp(reqwest::Client);
+pub(crate) struct InferenceHttp {
+    client: reqwest::Client,
+    #[cfg(test)]
+    test_route: Option<String>,
+}
 
 impl InferenceHttp {
     pub(crate) fn new() -> Result<Self, Error> {
@@ -77,8 +81,19 @@ impl InferenceHttp {
             // Even protocol-level retries must not duplicate billable/tool work.
             .retry(reqwest::retry::never())
             .build()
-            .map(Self)
+            .map(|client| Self {
+                client,
+                #[cfg(test)]
+                test_route: None,
+            })
             .map_err(|_| Error::Transport)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_routed(route: String) -> Self {
+        let mut transport = Self::new().expect("test client");
+        transport.test_route = Some(route);
+        transport
     }
 
     pub(crate) async fn post(
@@ -90,8 +105,19 @@ impl InferenceHttp {
         protocol: crate::provider::Protocol,
         event: &mut EventSink<'_>,
     ) -> Result<(), Error> {
+        #[cfg(test)]
+        let routed;
+        #[cfg(test)]
+        let url = if let Some(route) = &self.test_route {
+            // Exercise the real wire adapter while keeping production's fixed OAuth audience.
+            assert_eq!(url, "https://api.openai.com/v1/responses");
+            routed = format!("{route}/responses");
+            routed.as_str()
+        } else {
+            url
+        };
         let response = self
-            .0
+            .client
             .post(url)
             .headers(headers)
             .json(&body)
@@ -101,8 +127,6 @@ impl InferenceHttp {
             .map_err(transport_error)?;
         match response.status().as_u16() {
             200..=299 => {}
-            401 | 403 => return Err(Error::Authentication),
-            429 => return Err(Error::RateLimit),
             status => {
                 // Error bodies can contain credentials or prompts; inspect a bounded
                 // prefix privately and retain the status when classification is unknown.
@@ -121,7 +145,11 @@ impl InferenceHttp {
                         return Err(error);
                     }
                 }
-                return Err(Error::Http(status));
+                return Err(match status {
+                    401 | 403 => Error::Authentication,
+                    429 => Error::RateLimit,
+                    _ => Error::Http(status),
+                });
             }
         }
         let streaming = response
@@ -258,6 +286,21 @@ pub struct Unreachable;
 
 /// Async sign-in transport, injectable without blocking an ACP dispatch loop.
 pub trait LoginHttp: Send + Sync {
+    /// OAuth public clients exchange form bodies; default keeps existing fakes compatible.
+    fn post_form<'a>(
+        &'a self,
+        _url: &'a str,
+        _body: String,
+    ) -> futures::future::BoxFuture<'a, Result<HttpResponse, Unreachable>> {
+        Box::pin(async { Err(Unreachable) })
+    }
+    /// Trusted OIDC discovery and signing keys, without credentials or redirects.
+    fn get<'a>(
+        &'a self,
+        _url: &'a str,
+    ) -> futures::future::BoxFuture<'a, Result<HttpResponse, Unreachable>> {
+        Box::pin(async { Err(Unreachable) })
+    }
     /// Exchange a credential-bearing JSON body without retaining it in diagnostics.
     fn post_json<'a>(
         &'a self,
@@ -270,6 +313,19 @@ pub trait LoginHttp: Send + Sync {
 pub struct AsyncLoginHttp;
 
 impl LoginHttp for AsyncLoginHttp {
+    fn post_form<'a>(
+        &'a self,
+        url: &'a str,
+        body: String,
+    ) -> futures::future::BoxFuture<'a, Result<HttpResponse, Unreachable>> {
+        Box::pin(async move { post_login_form(&login_client(true)?, url, body).await })
+    }
+    fn get<'a>(
+        &'a self,
+        url: &'a str,
+    ) -> futures::future::BoxFuture<'a, Result<HttpResponse, Unreachable>> {
+        Box::pin(async move { login_response(login_client(true)?.get(url)).await })
+    }
     fn post_json<'a>(
         &'a self,
         url: &'a str,
@@ -300,14 +356,32 @@ async fn post_login(
     url: &str,
     body: String,
 ) -> Result<HttpResponse, Unreachable> {
-    let response = client
-        .post(url)
-        .header("Content-Type", "application/json")
-        .header("Accept", "application/json")
-        .body(body)
-        .send()
-        .await
-        .map_err(|_| Unreachable)?;
+    login_response(
+        client
+            .post(url)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json")
+            .body(body),
+    )
+    .await
+}
+
+async fn post_login_form(
+    client: &reqwest::Client,
+    url: &str,
+    body: String,
+) -> Result<HttpResponse, Unreachable> {
+    login_response(
+        client
+            .post(url)
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .body(body),
+    )
+    .await
+}
+
+async fn login_response(request: reqwest::RequestBuilder) -> Result<HttpResponse, Unreachable> {
+    let response = request.send().await.map_err(|_| Unreachable)?;
     let status = response.status().as_u16();
     let mut stream = response.bytes_stream();
     let mut bytes = Vec::new();
@@ -433,11 +507,64 @@ mod tests {
             AsyncLoginHttp.post_json(&url, "{}".into()).await,
             Err(Unreachable)
         );
+        assert_eq!(
+            AsyncLoginHttp.post_form(&url, "code=secret".into()).await,
+            Err(Unreachable)
+        );
+        assert_eq!(
+            LoginHttp::get(&AsyncLoginHttp, &url).await,
+            Err(Unreachable)
+        );
         assert!(
             tokio::time::timeout(Duration::from_millis(20), listener.accept())
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn oauth_forms_and_oidc_gets_preserve_wire_methods_and_do_not_follow_redirects() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for method in ["form", "get"] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/oauth", listener.local_addr().unwrap());
+            let body = "code=a%2Bb%26c&client_id=issued-client";
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut head = Vec::new();
+                while !head.ends_with(b"\r\n\r\n") {
+                    head.push(socket.read_u8().await.unwrap());
+                }
+                let head = String::from_utf8(head).unwrap();
+                let length = head
+                    .lines()
+                    .find_map(|line| {
+                        line.split_once(':')
+                            .filter(|(key, _)| key.eq_ignore_ascii_case("content-length"))
+                            .map(|(_, v)| v.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap_or(0);
+                let mut received = vec![0; length];
+                socket.read_exact(&mut received).await.unwrap();
+                if method == "form" {
+                    assert!(head.starts_with("POST /oauth "));
+                    assert!(head.contains("content-type: application/x-www-form-urlencoded"));
+                    assert_eq!(received, body.as_bytes());
+                } else {
+                    assert!(head.starts_with("GET /oauth "));
+                    assert!(received.is_empty());
+                }
+                socket.write_all(b"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:1/must-not-follow\r\nContent-Length: 0\r\n\r\n").await.unwrap();
+            });
+            let client = login_client(false).unwrap();
+            let response = if method == "form" {
+                post_login_form(&client, &url, body.into()).await
+            } else {
+                login_response(client.get(&url)).await
+            };
+            assert_eq!(response.unwrap().status, 302);
+            server.await.unwrap();
+        }
     }
 
     #[tokio::test]

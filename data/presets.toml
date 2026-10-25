@@ -61,6 +61,17 @@ credential = { env = "OPENAI_API_KEY" }
 
 [presets.openai.protocols.openai-chat]
 
+# Subscription-backed public Responses access is a separate OAuth audience.
+[login_flows.chatgpt]
+kind = "chatgpt"
+
+[presets.chatgpt]
+credential = { store = true, login = "chatgpt" }
+discover_models = true
+
+[presets.chatgpt.protocols.openai-responses]
+base_url = "https://api.openai.com/v1"
+
 [presets.anthropic]
 catalog_provider = "anthropic"
 credential = { env = "ANTHROPIC_API_KEY" }

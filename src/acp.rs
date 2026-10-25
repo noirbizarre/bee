@@ -27,6 +27,9 @@ mod interactions;
 mod mcp;
 mod plans;
 
+#[cfg(all(test, unix))]
+mod oauth_tests;
+
 /// The turn-owned plan operation added to every ACP runtime's model catalog.
 ///
 /// Exposed for hosts estimating context budgets; execution requires an active
@@ -109,6 +112,8 @@ fn session_gate(gates: &Gates, id: &str) -> Arc<RequestGate> {
 
 /// Immutable execution policy and complete native catalog for one connection.
 pub struct Runtime {
+    #[cfg(test)]
+    inference_http: Option<crate::http::InferenceHttp>,
     instructions: Option<crate::instructions::Sources>,
     limits: crate::agent::Limits,
     tools: crate::tool::Registry,
@@ -123,6 +128,8 @@ impl Runtime {
     /// Supply a complete catalog, which may be empty or extended by the caller.
     pub fn new(limits: crate::agent::Limits, tools: crate::tool::Registry) -> Self {
         Self {
+            #[cfg(test)]
+            inference_http: None,
             limits,
             tools,
             instructions: None,
@@ -304,7 +311,17 @@ async fn inference(reply: Reply, runtime: Arc<Runtime>) -> std::result::Result<(
         // resolve never touches the store for an environment/no-auth profile.
         crate::auth::FileStore::new("")
     };
-    let credential = match crate::auth::resolve(&profile, &env, &store, crate::auth::unix_now()) {
+    let chatgpt = profile
+        .login_spec()
+        .is_some_and(crate::preset::LoginSpec::is_chatgpt);
+    let resolved = if chatgpt {
+        crate::auth::chatgpt::resolve(&store, profile.name(), runtime.login_http.as_ref())
+            .await
+            .map(Some)
+    } else {
+        crate::auth::resolve(&profile, &env, &store, crate::auth::unix_now())
+    };
+    let credential = match resolved {
         Ok(credential) => credential,
         Err(crate::Error::AuthNotLoggedIn { .. } | crate::Error::AuthExpired { .. })
             if profile.login_spec().is_some() && lock(&reply.interactions).url =>
@@ -315,20 +332,48 @@ async fn inference(reply: Reply, runtime: Arc<Runtime>) -> std::result::Result<(
             if let Some(discovery) = &runtime.discovery {
                 discovery.invalidate_endpoint(profile.name());
             }
-            crate::auth::resolve(&profile, &env, &store, crate::auth::unix_now()).map_err(|_| {
-                TurnFailure::new("cannot resolve the stored credential; run `bee auth login`")
-            })?
+            crate::auth::resolve(&profile, &env, &store, crate::auth::unix_now()).map_err(
+                |error| {
+                    if chatgpt {
+                        return TurnFailure::new(error.to_string());
+                    }
+                    TurnFailure::new("cannot resolve the stored credential; run `bee auth login`")
+                },
+            )?
         }
+        Err(error) if chatgpt => return Err(TurnFailure::new(error.to_string())),
         Err(_) => {
             return Err(TurnFailure::new(
                 "cannot resolve the model credential; check its environment variable or run `bee auth login`",
             ));
         }
     };
+    let session = if chatgpt {
+        Some(
+            crate::auth::chatgpt::Session::new(
+                store.clone(),
+                profile.name().into(),
+                credential
+                    .as_ref()
+                    .ok_or_else(|| TurnFailure::new("missing ChatGPT credential"))?,
+                runtime.login_http.clone(),
+            )
+            .map_err(|e| TurnFailure::new(e.to_string()))?,
+        )
+    } else {
+        None
+    };
     let credential = credential.map(|value| value.secret().clone());
-    let model = crate::llm::Model::new(profile, model, credential)
+    let mut model = crate::llm::Model::new(profile, model, credential)
         .map_err(|error| TurnFailure::new(error.to_string()))?
         .with_selection(selection);
+    if let Some(session) = session {
+        model = model.with_chatgpt_session(session);
+    }
+    #[cfg(test)]
+    if let Some(http) = &runtime.inference_http {
+        model = model.with_test_http(http.clone());
+    }
     let guidance = if let Some(sources) = &runtime.instructions {
         Some(
             sources

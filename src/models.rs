@@ -279,8 +279,10 @@ pub struct Snapshot {
 /// Account-specific, in-memory endpoint enumeration.
 #[derive(Clone, Serialize)]
 pub struct EndpointListing {
-    /// Sorted, deduplicated exact IDs visible in a successful listing.
+    /// Deduplicated IDs; ChatGPT preserves the account's server ordering.
     pub models: Vec<String>,
+    /// Account display names also provide indexed membership for ordered listings.
+    pub display_names: BTreeMap<String, String>,
     /// Time observed; endpoint visibility is not a permanent guarantee.
     pub fetched_at: u64,
     /// Failure leaves no account-specific fallback after credential changes.
@@ -501,10 +503,11 @@ impl Snapshot {
             // Endpoint enumeration sorts once; scanning again for each projected
             // model would make a large account listing quadratic under ACP's lock.
             listing.error.is_none()
-                && listing
-                    .models
-                    .binary_search_by(|id| id.as_str().cmp(model))
-                    .is_ok()
+                && (listing.display_names.contains_key(model)
+                    || listing
+                        .models
+                        .binary_search_by(|id| id.as_str().cmp(model))
+                        .is_ok())
         }) {
             sources.push("endpoint");
         }
@@ -528,6 +531,17 @@ impl Snapshot {
                     self.fact(window.into(), "models.dev", "declared"),
                 );
             }
+        }
+        if let Some((listing, name)) = self
+            .endpoints
+            .get(profile.name())
+            .filter(|listing| listing.error.is_none())
+            .and_then(|listing| listing.display_names.get(model).map(|name| (listing, name)))
+        {
+            // Account labels override public metadata, but never explicit configuration.
+            let mut fact = self.fact(name.clone().into(), "endpoint", "declared");
+            fact.fetched_at = Some(listing.fetched_at);
+            facts.insert("display_name".into(), fact);
         }
         for metadata in [Some(profile.metadata()), profile.model_metadata(model)]
             .into_iter()
@@ -847,9 +861,10 @@ impl Service {
     ) -> Result<EndpointListing, Error> {
         // Clear old account visibility before resolving potentially replaced credentials.
         let epoch = self.invalidate_endpoint(profile.name());
-        let result = endpoint_models(self.http.as_ref(), profile, env).await;
+        let result = endpoint_listing(self.http.as_ref(), profile, env).await;
         let listing = EndpointListing {
-            models: result.clone().unwrap_or_default(),
+            models: result.as_ref().map(|v| v.0.clone()).unwrap_or_default(),
+            display_names: result.as_ref().map(|v| v.1.clone()).unwrap_or_default(),
             fetched_at: self.clock.now(),
             error: result.err(),
         };
@@ -876,26 +891,56 @@ pub async fn endpoint_models(
     profile: &Profile,
     env: &Environment,
 ) -> Result<Vec<String>, Error> {
+    endpoint_listing(http, profile, env).await.map(|v| v.0)
+}
+
+async fn endpoint_listing(
+    http: &dyn Http,
+    profile: &Profile,
+    env: &Environment,
+) -> Result<(Vec<String>, BTreeMap<String, String>), Error> {
+    let chatgpt = profile
+        .login_spec()
+        .is_some_and(crate::preset::LoginSpec::is_chatgpt);
+    let oauth_store = if chatgpt {
+        Some(crate::auth::FileStore::from_environment(env).map_err(|_| Error::Credentials)?)
+    } else {
+        None
+    };
+    let oauth_credential = if let Some(store) = &oauth_store {
+        Some(
+            crate::auth::chatgpt::resolve(store, profile.name(), &crate::http::AsyncLoginHttp)
+                .await
+                .map_err(|_| Error::Credentials)?,
+        )
+    } else {
+        None
+    };
     let auth_profile = profile.clone();
     let env = env.clone();
     // Credential store reads are disk work too; background listing must yield
     // even when the credential file lives on a slow filesystem.
-    let credential = tokio::task::spawn_blocking(move || {
-        let store = if matches!(
-            auth_profile.credential(),
-            Some(crate::provider::CredentialSource::Store { .. })
-        ) {
-            crate::auth::FileStore::from_environment(&env).map_err(|_| Error::Credentials)?
-        } else {
-            crate::auth::FileStore::new("")
-        };
-        crate::auth::resolve(&auth_profile, &env, &store, crate::auth::unix_now())
-            .map_err(|_| Error::Credentials)
-    })
-    .await
-    .map_err(|_| Error::Credentials)??;
+    let credential = if chatgpt {
+        oauth_credential
+    } else {
+        tokio::task::spawn_blocking(move || {
+            let store = if matches!(
+                auth_profile.credential(),
+                Some(crate::provider::CredentialSource::Store { .. })
+            ) {
+                crate::auth::FileStore::from_environment(&env).map_err(|_| Error::Credentials)?
+            } else {
+                crate::auth::FileStore::new("")
+            };
+            crate::auth::resolve(&auth_profile, &env, &store, crate::auth::unix_now())
+                .map_err(|_| Error::Credentials)
+        })
+        .await
+        .map_err(|_| Error::Credentials)??
+    };
     let mut urls = Vec::new();
     let mut ids = Vec::new();
+    let mut names = BTreeMap::new();
     for endpoint in profile.endpoints().iter().filter(|e| {
         matches!(
             e.protocol(),
@@ -923,13 +968,29 @@ pub async fn endpoint_models(
         if value["has_more"] == true || value.get("next").is_some_and(|v| !v.is_null()) {
             return Err(Error::Unsupported);
         }
-        let data = value["data"].as_array().ok_or(Error::Malformed)?;
+        let data = value[if chatgpt { "models" } else { "data" }]
+            .as_array()
+            .ok_or(Error::Malformed)?;
         if data.len() + ids.len() > 100_000 {
             return Err(Error::Limit);
         }
         for item in data {
-            let id = item["id"].as_str().ok_or(Error::Malformed)?;
+            if chatgpt && item["visibility"] != "list" {
+                continue;
+            }
+            let id = item[if chatgpt { "slug" } else { "id" }]
+                .as_str()
+                .ok_or(Error::Malformed)?;
             crate::provider::check_model_id(id).map_err(|_| Error::Malformed)?;
+            if chatgpt {
+                let name = item["display_name"]
+                    .as_str()
+                    .filter(|n| !n.is_empty() && !n.chars().any(char::is_control))
+                    .ok_or(Error::Malformed)?;
+                if names.insert(id.into(), name.into()).is_some() {
+                    continue;
+                }
+            }
             ids.push(id.to_owned());
         }
         urls.push(url);
@@ -937,7 +998,20 @@ pub async fn endpoint_models(
     if urls.is_empty() {
         return Err(Error::Unsupported);
     }
-    ids.sort();
-    ids.dedup();
-    Ok(ids)
+    if let Some(store) = oauth_store {
+        use crate::auth::CredentialStore;
+        // An external logout/replacement cannot publish a just-obsolete account list.
+        if store
+            .get(crate::auth::Audience::Provider(profile.name()))
+            .map_err(|_| Error::Credentials)?
+            != credential
+        {
+            return Err(Error::Credentials);
+        }
+    }
+    if !chatgpt {
+        ids.sort();
+        ids.dedup();
+    }
+    Ok((ids, names))
 }

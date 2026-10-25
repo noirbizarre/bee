@@ -33,6 +33,36 @@ impl Reply {
             )
         };
         let flow = profile.login_spec().ok_or_else(failed)?;
+        if flow.is_chatgpt() {
+            return tokio::time::timeout(crate::login::DEFAULT_TIMEOUT, async {
+                let login = crate::auth::chatgpt::SignIn::prepare(store, profile.name()).await.map_err(|e| super::TurnFailure::new(e.to_string()))?;
+                let id = {
+                    let mut state = lock(&self.interactions);
+                    state.next_url += 1;
+                    format!("bee-login-{}", state.next_url)
+                };
+                self.phase(true).await.map_err(|_| failed())?;
+                let request = v2::CreateElicitationRequest::new(v2::ElicitationUrlMode::new(v2::ElicitationSessionScope::new(self.session_id.clone()), id.clone(), login.url.clone()), "Continue with ChatGPT. Eligible inference uses your ChatGPT plan; manage usage at https://chatgpt.com/settings/usage");
+                let pending = {
+                    let sessions = lock(&self.sessions);
+                    if !sessions.is_current(&self.id, self.token) { return Err(failed()); }
+                    self.connection.send_request(request)
+                };
+                let response = pending.block_task().await.map_err(|_| failed())?;
+                if !matches!(response.action, v2::ElicitationAction::Accept(_)) || !self.current() { return Err(failed()); }
+                let credential = login.complete(http).await.map_err(|e| super::TurnFailure::new(e.to_string()))?;
+                self.phase(false).await.map_err(|_| failed())?;
+                login.commit_guarded(store, profile.name(), &credential, || {
+                    let sessions = lock(&self.sessions);
+                    sessions.is_current(&self.id,self.token).then_some(sessions)
+                }).await.map_err(|e| super::TurnFailure::new(e.to_string()))?;
+                // Cancellation may follow a committed credential; gate completion publication too.
+                let sessions = lock(&self.sessions);
+                if !sessions.is_current(&self.id,self.token) { return Err(failed()); }
+                self.connection.send_notification(v2::CompleteElicitationNotification::new(id)).map_err(|_| failed())?;
+                Ok(())
+            }).await.map_err(|_| failed())?;
+        }
         let attempt = async {
             let login = crate::login::AsyncSignIn::prepare(flow)
                 .await
@@ -71,16 +101,24 @@ impl Reply {
             // Serialize the short final filesystem commit across ACP connections.
             // Cancellation and commit are linearized by the session gate; network
             // work never holds either lock and a committed key is never rolled back.
-            static COMMITS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+            let _store_guard = store.lock_async().await.map_err(|_| failed())?;
             let sessions = lock(&self.sessions);
             if !sessions.is_current(&self.id, self.token) {
                 return Err(failed());
             }
-            let _commit = lock(&COMMITS);
             match crate::auth::resolve(profile, env, store, crate::auth::unix_now()) {
                 Ok(_) => {}
                 Err(crate::Error::AuthNotLoggedIn { .. } | crate::Error::AuthExpired { .. }) => {
-                    crate::auth::store_secret(profile, secret.expose(), store)
+                    if secret.expose().trim().is_empty() {
+                        return Err(failed());
+                    }
+                    store
+                        .put_locked(
+                            crate::auth::Audience::Provider(profile.name()),
+                            &crate::auth::Credential::new(crate::auth::Secret::new(
+                                secret.expose().trim(),
+                            )),
+                        )
                         .map_err(|_| failed())?;
                 }
                 // A store that became unreadable/unsafe during login is not authorization to replace it.

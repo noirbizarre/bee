@@ -32,6 +32,16 @@ pub mod tool;
 
 pub use error::{Error, Result};
 
+// Shared wire fixtures use the library's public API in unit and integration tests alike.
+#[cfg(test)]
+extern crate self as bee;
+#[cfg(test)]
+#[path = "../tests/support/chatgpt.rs"]
+mod test_chatgpt;
+#[cfg(test)]
+#[path = "../tests/support/mod.rs"]
+mod test_support;
+
 /// Run the agent over stdin and stdout until the client disconnects.
 ///
 /// Stdout is reserved for protocol traffic; nothing here may print to it.

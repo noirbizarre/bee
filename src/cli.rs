@@ -81,8 +81,8 @@ pub enum AuthCommand {
     Login(LoginArgs),
     /// Forget the credential Bee stored for a profile.
     ///
-    /// Only Bee's copy is removed; the key stays valid with the provider until
-    /// you revoke it there.
+    /// API keys stay valid with the provider until revoked there. ChatGPT
+    /// logout also attempts renewable-session revocation, retaining registration.
     Logout {
         /// The profile; the default profile if omitted.
         profile: Option<String>,

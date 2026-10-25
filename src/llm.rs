@@ -24,6 +24,10 @@ pub enum Error {
     )]
     #[diagnostic(code(bee::llm::authentication))]
     Authentication,
+    /// Safe, allowlisted ChatGPT-plan recovery guidance.
+    #[error("ChatGPT plan request failed: {0}")]
+    #[diagnostic(code(bee::llm::chatgpt))]
+    ChatGpt(&'static str),
     /// The endpoint is throttling requests.
     #[error("the model endpoint rate limited the request; wait before trying again")]
     #[diagnostic(code(bee::llm::rate_limit))]
@@ -186,6 +190,7 @@ pub struct Step {
 /// A selected endpoint and its reusable async transport.
 #[derive(Clone)]
 pub struct Model {
+    chatgpt_session: Option<crate::auth::chatgpt::Session>,
     instructions: String,
     profile: Profile,
     model: String,
@@ -195,10 +200,16 @@ pub struct Model {
 }
 
 impl Model {
+    #[cfg(test)]
+    pub(crate) fn with_test_http(mut self, http: crate::http::InferenceHttp) -> Self {
+        self.http = http;
+        self
+    }
     /// Construct a model without a vendor registry or catalog lookup.
     pub fn new(profile: Profile, model: String, credential: Option<Secret>) -> Result<Self, Error> {
         let selection = crate::models::Snapshot::default().resolve(&profile, &model);
         Ok(Self {
+            chatgpt_session: None,
             instructions: String::new(),
             http: crate::http::InferenceHttp::new()?,
             profile,
@@ -216,15 +227,48 @@ impl Model {
         text: &mut (dyn FnMut(&str) + Send),
     ) -> Result<Step, Error> {
         self.context(messages, tools)?.check()?;
-        match self.endpoint().protocol() {
-            Protocol::OpenAiChat => chat::run(self, messages, tools, text).await,
-            Protocol::OpenAiResponses => responses::run(self, messages, tools, text).await,
-            Protocol::AnthropicMessages => anthropic::run(self, messages, tools, text).await,
+        if self.chatgpt_session.is_some() && !self.is_chatgpt() {
+            return Err(Error::ChatGpt(
+                "renewable sessions require a validated ChatGPT profile",
+            ));
+        }
+        if self.is_chatgpt() && self.chatgpt_session.is_none() {
+            return Err(Error::ChatGpt(
+                "a renewable ChatGPT session is required; run `bee auth login <profile>`",
+            ));
+        }
+        let mut refreshed;
+        let model = if let Some(session) = &self.chatgpt_session {
+            refreshed = self.clone();
+            refreshed.credential = Some(session.credential().await.map_err(|_| {
+                Error::ChatGpt(
+                    "cannot renew authentication; retry later or run `bee auth login <profile>`",
+                )
+            })?);
+            &refreshed
+        } else {
+            self
+        };
+        match model.endpoint().protocol() {
+            Protocol::OpenAiChat => chat::run(model, messages, tools, text).await,
+            Protocol::OpenAiResponses => responses::run(model, messages, tools, text).await,
+            Protocol::AnthropicMessages => anthropic::run(model, messages, tools, text).await,
         }
     }
 }
 
 impl Model {
+    /// Use renewable ChatGPT credentials for each step of a long-running turn.
+    pub fn with_chatgpt_session(mut self, session: crate::auth::chatgpt::Session) -> Self {
+        self.chatgpt_session = Some(session);
+        self
+    }
+
+    pub(crate) fn is_chatgpt(&self) -> bool {
+        self.profile
+            .login_spec()
+            .is_some_and(crate::preset::LoginSpec::is_chatgpt)
+    }
     /// Use an already-resolved immutable route and budget without any catalog I/O.
     pub(crate) fn with_selection(mut self, selection: crate::models::Selection) -> Self {
         self.selection = selection;
@@ -248,6 +292,10 @@ impl Model {
             Protocol::AnthropicMessages => anthropic::request(self, messages, tools)?,
         };
         let mut report = crate::context::estimate(&body, self.selection.window);
+        // ChatGPT forbids the wire generation cap, but still needs local headroom.
+        if self.is_chatgpt() {
+            report.reserved_output = u64::from(self.profile.max_output_tokens());
+        }
         report.window_fact = self.selection.window_fact.clone();
         Ok(report)
     }
@@ -325,6 +373,40 @@ pub(crate) fn request_headers(
 
 /// Inspect only recognized classifications; upstream text never escapes this seam.
 pub(crate) fn provider_error(protocol: Protocol, error: &Value) -> Error {
+    match error["code"].as_str() {
+        Some("subscription_sharing_user_not_eligible") => {
+            return Error::ChatGpt(
+                "account/workspace is ineligible; check ChatGPT plan and workspace policy",
+            );
+        }
+        Some("subscription_sharing_usage_limit_exceeded") => {
+            return Error::ChatGpt(
+                "usage limit reached; manage usage at https://chatgpt.com/settings/usage",
+            );
+        }
+        Some(
+            "subscription_sharing_usage_unavailable" | "subscription_sharing_user_unavailable",
+        ) => return Error::ChatGpt("temporarily unavailable; retry later"),
+        Some("subscription_sharing_invalid_user") => {
+            return Error::ChatGpt(
+                "account authorization was rejected; run `bee auth login <profile>`",
+            );
+        }
+        Some("chatpass_v2_scope_not_authorized" | "chatpass_v2_invalid_authorization_context") => {
+            return Error::ChatGpt(
+                "permission is insufficient; check the selected registration and granted scopes",
+            );
+        }
+        Some(
+            "subscription_sharing_route_not_supported"
+            | "subscription_sharing_unsupported_capability",
+        ) => {
+            return Error::ChatGpt(
+                "unsupported route or capability; check the ChatGPT profile and model",
+            );
+        }
+        _ => {}
+    }
     if error["code"] == "context_length_exceeded" || error["type"] == "context_length_exceeded" {
         return Error::ContextLimit;
     }

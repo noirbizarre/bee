@@ -10,6 +10,10 @@ use miette::MietteHandlerOpts;
 mod cli;
 mod commands;
 
+#[cfg(all(test, unix))]
+#[path = "../tests/support/chatgpt.rs"]
+mod test_chatgpt;
+
 use cli::{Cli, Command};
 
 fn main() -> ExitCode {

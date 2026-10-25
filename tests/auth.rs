@@ -873,7 +873,18 @@ mod file_store {
         let entries: Vec<_> = fs::read_dir(sandbox.store_path().parent().unwrap())
             .unwrap()
             .collect();
-        assert_eq!(entries.len(), 1, "only the credential file remains");
+        assert_eq!(
+            entries.len(),
+            2,
+            "only credentials and their stable lock remain"
+        );
+        assert!(entries.into_iter().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")
+        }));
     }
 
     #[test]
@@ -934,7 +945,7 @@ mod file_store {
     #[rstest]
     #[case::not_json("this is not json")]
     #[case::wrong_top_level("[]")]
-    #[case::wrong_version(r#"{"version": 2}"#)]
+    #[case::wrong_version(r#"{"version": 3}"#)]
     #[case::no_version(r#"{"providers": {}}"#)]
     #[case::unknown_key(r#"{"version": 1, "extra": 1}"#)]
     #[case::entry_not_an_object(r#"{"version": 1, "providers": {"or": "sk-super-secret-token"}}"#)]

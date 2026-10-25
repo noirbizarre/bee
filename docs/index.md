@@ -182,6 +182,7 @@ Shipped presets, with the variable each reads its key from:
 | Preset       | Protocols, preferred first                              | Credential                        |
 | ------------ | ------------------------------------------------------- | --------------------------------- |
 | `openai`     | `openai-responses`, `openai-chat`                       | `OPENAI_API_KEY`                  |
+| `chatgpt`    | `openai-responses`                                      | stored ChatGPT OAuth tokens       |
 | `anthropic`  | `anthropic-messages`                                    | `ANTHROPIC_API_KEY`               |
 | `openrouter` | `openai-chat`, `openai-responses`                       | stored, with browser sign-in      |
 | `opencode`   | `openai-chat`, `openai-responses`, `anthropic-messages` | `OPENCODE_API_KEY` (OpenCode Zen) |
@@ -240,8 +241,66 @@ response_key = "api_key"
 
 Login flows may only be defined in the global file or the file `BEE_CONFIG` names, never in the project's
 `.config/bee.toml`: a flow chooses where the authorization code and key are sent, and a project file can come from a
-repository you only cloned. Other kinds of sign-in (refresh tokens, device codes) are not data and are not supported.
+repository you only cloned. ChatGPT uses a separate `kind = "chatgpt"` mechanism with fixed trusted endpoints;
+its OAuth registration, identity verification and token renewal are not configurable PKCE-key exchanges.
+Device-code sign-in is unsupported.
 See [ADR-009](adr/009-provider-presets-and-login-flows.md).
+
+### Use your ChatGPT plan
+
+The `chatgpt` preset implements OpenAI's official
+[open-source/local application flow](https://developers.openai.com/siwc/token-sharing-open-source).
+It uses your eligible ChatGPT account/workspace plan or credits for supported Responses requests.
+Eligibility depends on OpenAI's current account, workspace, region and policy requirements;
+successful identity sign-in alone does not grant inference permission. This documented integration covers
+open-source, locally hosted applications. Paid or remotely hosted offerings require OpenAI's
+[separate approval path](https://openai.com/form/sign-in-with-chatgpt-interest/).
+Use is subject to the applicable [OpenAI terms and policies](https://openai.com/policies).
+
+Configure a named profile in your Bee configuration:
+
+```toml
+provider = "personal"
+
+[providers.personal]
+preset = "chatgpt"
+# Select an available model after login, or configure its exact slug here.
+```
+
+```sh
+bee auth login personal
+bee auth status personal
+bee models list personal --endpoint
+```
+
+Login displays **Continue with ChatGPT**, opens the browser, and receives authorization at a temporary
+`http://127.0.0.1:<port>/auth/callback` listener. `--no-browser` prints the authorization URL for you to open locally.
+The callback must reach the Bee host; on a remote machine arrange secure loopback forwarding.
+`--with-token` and `--paste-code` are not supported for this profile.
+Authorize ChatGPT-plan usage when prompted, then use the account-specific model listing or your ACP client's model
+picker to select an available model slug. A declined plan permission is retained as a signed-in, inference-disabled
+registration; explicitly repeat `bee auth login personal` to request permission again.
+
+Named profiles are distinct account/workspace labels. Add another profile using `preset = "chatgpt"` for another
+registration; email alone does not identify a workspace. Reauthorization of an existing profile must match its
+verified account and issued client ID. Bee reuses registration and host identity across restarts and logout.
+The Bee data directory defines one host installation; give copied installations or self-hosted VMs distinct host
+identities by starting with a fresh Bee data directory and signing in there.
+
+Tokens live in Bee's existing private credential store, with atomic writes and cross-process serialized renewal.
+Bee renews near expiry before inference steps and model discovery, including after restart. If refresh is revoked,
+expired, or interrupted after server-side rotation, sign in again. Temporary failures preserve stored credentials.
+OAuth tokens, codes and PKCE verifiers are excluded from diagnostics and ACP events; authorization URLs omit ID-token
+hints. Bee does not read Codex's credential files.
+
+`bee auth logout personal` attempts remote refresh-token revocation and clears local tokens, retaining the account/client
+mapping for later sign-in. If revocation cannot be confirmed, Bee says so; disconnect the app in ChatGPT settings.
+[Manage usage and access](https://chatgpt.com/settings/usage), including account-wide and app-specific limits.
+
+The existing `openai` preset still uses `OPENAI_API_KEY` and separate API billing. OpenRouter's browser flow still
+returns an API key. Bee never silently changes from ChatGPT-plan usage to API-key billing.
+See [ChatGPT inference limitations](inference.md#chatgpt-plan-requests) and
+[ADR-020](adr/020-chatgpt-plan-authentication.md).
 
 ### ACP browser sign-in
 
@@ -262,8 +321,7 @@ The whole attempt has a five-minute deadline; credential exchange also has a
 turn without inference. Session cancel/close drops pending requests, listener and
 exchange before terminal idle; late responses cannot store a credential. A credential
 already committed before cancellation remains stored. Final store commits are
-serialized within the process and preserve other providers; the existing store
-contract does not coordinate concurrent writers in separate processes.
+serialized across processes using a stable sibling lock and preserve other providers.
 
 The browser must be able to reach the Bee host's loopback callback. URL capability
 does not imply that a remote client shares that host; use `bee auth login` on the
@@ -274,7 +332,7 @@ guidance. A provider's inference 401/403 does not automatically retry login or i
 ### Commands
 
 ```bash
-bee auth login [PROFILE]                 # browser sign-in, for profiles with `login = "openrouter"`
+bee auth login [PROFILE]                 # browser sign-in for OpenRouter or ChatGPT profiles
 bee auth login [PROFILE] --paste-code    # no callback: open the URL anywhere, paste the code it shows (SSH, containers)
 bee auth login [PROFILE] --with-token    # read an API token from standard input
 bee auth logout [PROFILE]                # forget Bee's stored copy
@@ -290,9 +348,9 @@ These are different things and Bee keeps them apart:
 
 - **Browser sign-in** is a provider's own flow, and what it returns differs by provider. OpenRouter's authorization-code
   flow with PKCE returns an **API key**, not an OAuth access token: Bee stores it and sends it as a bearer token. The
-  key does not expire and cannot be refreshed, so a rejected key is fixed by signing in again. OpenRouter is the only
-  provider with a browser flow today.
-- **API tokens** are pasted (`--with-token`) or read from a variable. Every provider supports them, and they are the
+  key does not expire and cannot be refreshed, so a rejected key is fixed by signing in again. ChatGPT's separate flow
+  returns renewable OAuth tokens tied to a verified account/workspace registration.
+- **API tokens** are pasted (`--with-token`) or read from a variable. API-key profiles support them, and they are the
   only option for providers with no browser flow.
 - **Cloudflare** (Workers AI, AI Gateway) uses a *scoped API token* from the environment or the store. Bee does not
   read or reuse Wrangler's browser-login token: it belongs to Wrangler and is not interchangeable with an API token's
@@ -308,8 +366,9 @@ These are different things and Bee keeps them apart:
 
 `bee auth login` stores credentials in `$XDG_DATA_HOME/bee/credentials.json` (or `~/.local/share/bee/credentials.json`),
 created with mode `0600` in a `0700` directory and replaced atomically. Bee refuses to read the file if other users can
-access it, and tells you to `chmod 600` it. `bee auth logout` removes Bee's copy only: the key stays valid with the
-provider until you revoke it there. Credentials, authorization codes, PKCE verifiers and response bodies never appear
+access it, and tells you to `chmod 600` it. For API keys, `bee auth logout` removes Bee's copy only: the key stays valid
+with the provider until you revoke it there. ChatGPT logout also attempts renewable-session revocation and retains its
+registration/host metadata. Credentials, authorization codes, PKCE verifiers and response bodies never appear
 in diagnostics or debug output. See [ADR-008](adr/008-provider-authentication.md).
 
 OpenRouter example:

@@ -148,6 +148,8 @@ sha2 = "0.11"
 base64 = "0.23"
 # The operating system's CSPRNG, for the PKCE verifier and `state`.
 getrandom = "0.4"
+# Verify OIDC identity with a maintained implementation, never decoded claims alone.
+jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 # The credential store file and the OpenRouter exchange are JSON. Read by hand
 # over `Value`, never derived: serde's error text quotes the offending value, and
 # this file is where keys live (the reason `provider.rs` avoids it for TOML).
@@ -164,6 +166,8 @@ nix = { version = "0.30", default-features = false, features = ["signal", "proce
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
 
 [dev-dependencies]
+# Generate signed test ID tokens against a fixture-owned JWKS.
+rsa = { version = "0.9", features = ["pem"] }
 # Human interaction deadlines are tested without waiting five real minutes.
 tokio = { version = "1", features = ["test-util"] }
 # Exercise the official client against a subprocess without adding process

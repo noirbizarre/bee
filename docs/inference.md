@@ -38,6 +38,26 @@ Streams must have a valid terminal lifecycle. Truncated streams are errors, not 
 event/tool argument is limited to 1 MiB and each response to 16 MiB. Tools execute sequentially with no automatic retry
 after side effects.
 
+## ChatGPT plan requests
+
+The `chatgpt` preset uses the public `POST https://api.openai.com/v1/responses` endpoint with a renewable OAuth bearer
+token. It sends full client-managed history, `store: false`, `stream: true`, encrypted reasoning continuation, and
+function tools grouped in the `bee` namespace. Client-hosted MCP tools remain client-executed function tools.
+Only `response.completed` establishes success; late usage-limit failures and incomplete/interrupted streams fail the
+turn even when partial text was visible.
+
+OpenAI's current preview forbids `max_output_tokens` on this route. Bee omits it but retains the configured value as a
+local context reservation; **it is not a server-enforced generation cap for ChatGPT-plan requests**.
+Bee's step/tool/response-size limits still apply. Other unsupported preview fields, hosted tools and persistent
+`previous_response_id` continuation are not sent. Custom endpoints, additional protocols and custom headers cannot be
+combined with this OAuth mechanism. See the current
+[provider limitations](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations).
+
+Eligibility, permission and usage errors stop the request without protocol or billing fallback.
+Usage-limit recovery links to [ChatGPT usage settings](https://chatgpt.com/settings/usage).
+Tokens are refreshed before each model step; protocol, model and context selection remain frozen for the turn.
+See [setup and logout](index.md#use-your-chatgpt-plan).
+
 ## Turn execution limits
 
 The layered configuration accepts positive integer budgets, with these defaults:

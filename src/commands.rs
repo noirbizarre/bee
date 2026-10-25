@@ -28,6 +28,7 @@ pub struct Context<'a> {
     pub providers: &'a Providers,
     pub store: &'a dyn CredentialStore,
     pub http: &'a dyn Http,
+    pub login_http: &'a dyn bee::http::LoginHttp,
     /// How long to wait for the browser.
     pub timeout: Duration,
     /// Try to open a URL in a browser. Best effort.
@@ -62,6 +63,7 @@ pub fn run_auth(command: AuthCommand) -> Result<()> {
             providers: &providers,
             store: &store,
             http: &http,
+            login_http: &bee::http::AsyncLoginHttp,
             timeout: login::DEFAULT_TIMEOUT,
             open: &open_browser,
             interactive,
@@ -104,6 +106,40 @@ fn login(args: &LoginArgs, context: &mut Context<'_>) -> Result<()> {
     // would waste the user's time and then throw the key away.
     auth::require_store(profile)?;
     let name = profile.name();
+
+    if profile
+        .login_spec()
+        .is_some_and(bee::preset::LoginSpec::is_chatgpt)
+    {
+        if args.with_token || args.paste_code {
+            return Err(Error::ChatGpt {
+                reason: "ChatGPT requires browser authorization with a loopback callback",
+            });
+        }
+        let store = context
+            .store
+            .file_store()
+            .ok_or(Error::AuthStoreUnsupported)?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|_| Error::ChatGpt {
+                reason: "cannot start sign-in runtime",
+            })?;
+        return runtime.block_on(async {
+            tokio::time::timeout(context.timeout, async {
+                let login = auth::chatgpt::SignIn::prepare(store, name).await?;
+                writeln!(context.err, "Continue with ChatGPT for `{name}`:\n\n  {}\n\nWaiting for browser authorization...", login.url).map_err(write_error)?;
+                if !args.no_browser { (context.open)(&login.url); }
+                let credential = login.complete(context.login_http).await?;
+                login.commit(store, name, &credential).await?;
+                if credential.chatgpt_plan_enabled() == Some(false) {
+                    return writeln!(context.err, "Signed in to ChatGPT for `{name}`, but ChatGPT plan use is disabled. Repeat `bee auth login {name}` to grant permission before inference.").map_err(write_error);
+                }
+                writeln!(context.err, "Signed in to ChatGPT for `{name}`. Eligible inference uses your ChatGPT plan. Manage usage: https://chatgpt.com/settings/usage").map_err(write_error)
+            }).await.map_err(|_| Error::ChatGpt { reason: "browser sign-in timed out; retry login" })?
+        });
+    }
 
     if args.with_token {
         if context.interactive {
@@ -180,6 +216,27 @@ fn login(args: &LoginArgs, context: &mut Context<'_>) -> Result<()> {
 
 fn logout(name: Option<&str>, context: &mut Context<'_>) -> Result<()> {
     let profile = chosen(context.providers, name)?;
+    if profile
+        .login_spec()
+        .is_some_and(bee::preset::LoginSpec::is_chatgpt)
+    {
+        let store = context
+            .store
+            .file_store()
+            .ok_or(Error::AuthStoreUnsupported)?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|_| Error::ChatGpt {
+                reason: "cannot start logout runtime",
+            })?;
+        let confirmed = runtime.block_on(auth::chatgpt::logout(
+            store,
+            profile.name(),
+            context.login_http,
+        ))?;
+        return writeln!(context.err, "Signed out of ChatGPT for `{}`. {}", profile.name(), if confirmed { "Renewable session revoked; registration retained." } else { "Remote revocation was not confirmed; disconnect Bee in ChatGPT settings: https://chatgpt.com/settings/usage" }).map_err(write_error);
+    }
     let message = if auth::forget(profile, context.store)? {
         format!(
             "Removed the stored credential for `{}`. It stays valid with the provider until you revoke it there.",
@@ -231,6 +288,12 @@ fn status(name: Option<&str>, context: &mut Context<'_>) -> Result<()> {
                     StoreState::LoggedIn => "stored credential present",
                     StoreState::NotLoggedIn => "no stored credential; run `bee auth login`",
                     StoreState::Expired => "stored credential expired; run `bee auth login`",
+                    StoreState::PlanDisabled => {
+                        "signed in; ChatGPT plan use disabled; repeat `bee auth login` to enable"
+                    }
+                    StoreState::Refreshable => {
+                        "ChatGPT access token expired; will renew on next request"
+                    }
                     _ => "stored credential in an unknown state",
                 };
                 let how = match login {
@@ -342,6 +405,7 @@ mod tests {
                     providers: &self.providers,
                     store,
                     http: &KeyGiver,
+                    login_http: &bee::http::AsyncLoginHttp,
                     timeout: Duration::from_secs(5),
                     open,
                     interactive: false,
@@ -431,6 +495,7 @@ mod tests {
                 providers: &fixture.providers,
                 store,
                 http: &KeyGiver,
+                login_http: &bee::http::AsyncLoginHttp,
                 timeout: Duration::from_millis(100),
                 open: &open,
                 interactive: false,
@@ -477,5 +542,86 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(stored.secret().expose(), "my-token");
+    }
+
+    #[cfg(unix)]
+    #[rstest::rstest]
+    #[case::enabled(true)]
+    #[case::identity_only(false)]
+    fn chatgpt_cli_login_status_and_logout_preserve_identity_without_printing_tokens(
+        #[case] plan: bool,
+    ) {
+        use std::sync::atomic::Ordering;
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.toml");
+        std::fs::write(&path, "[providers.account]\npreset='chatgpt'").unwrap();
+        let env = Environment::new(None, Some(root.path().into()), Some(path));
+        let providers = Providers::from_config(&Config::load(&env, root.path()).unwrap()).unwrap();
+        let store = FileStore::from_environment(&env).unwrap();
+        let oauth = crate::test_chatgpt::OAuth::new();
+        if !plan {
+            *oauth.scopes.lock().unwrap() = "openid profile".into();
+        }
+        let open = |url: &str| oauth.browser(url);
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let mut input: &[u8] = b"";
+        {
+            let mut context = Context {
+                env: &env,
+                providers: &providers,
+                store: &store,
+                http: &KeyGiver,
+                login_http: &oauth,
+                timeout: Duration::from_secs(10),
+                open: &open,
+                interactive: false,
+                out: &mut out,
+                err: &mut err,
+                input: &mut input,
+            };
+            execute(AuthCommand::Login(args(false, false, false)), &mut context).unwrap();
+            execute(AuthCommand::Status { profile: None }, &mut context).unwrap();
+            assert_eq!(
+                store
+                    .get(Audience::Provider("account"))
+                    .unwrap()
+                    .unwrap()
+                    .chatgpt_plan_enabled(),
+                Some(plan)
+            );
+            // Both confirmed and unconfirmed revocation must remove local tokens.
+            if !plan {
+                oauth.revoke_status.store(503, Ordering::SeqCst);
+            }
+            execute(AuthCommand::Logout { profile: None }, &mut context).unwrap();
+            execute(AuthCommand::Status { profile: None }, &mut context).unwrap();
+        }
+        let output = String::from_utf8(out).unwrap();
+        let diagnostics = String::from_utf8(err).unwrap();
+        assert!(output.contains(if plan {
+            "stored credential present"
+        } else {
+            "ChatGPT plan use disabled"
+        }));
+        assert!(output.contains("no stored credential"));
+        assert!(diagnostics.contains(if plan {
+            "Eligible inference uses your ChatGPT plan"
+        } else {
+            "ChatGPT plan use is disabled"
+        }));
+        assert!(diagnostics.contains(if plan {
+            "Renewable session revoked"
+        } else {
+            "Remote revocation was not confirmed"
+        }));
+        for secret in [
+            crate::test_chatgpt::ACCESS,
+            "fixture-refresh-secret",
+            "fixture-authorization-secret",
+        ] {
+            assert!(!format!("{output}{diagnostics}").contains(secret));
+        }
+        let record = store.get(Audience::Provider("account")).unwrap().unwrap();
+        assert!(record.secret().expose().is_empty());
     }
 }

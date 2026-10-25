@@ -7,7 +7,7 @@
 //! - [`Secret`]: a string that cannot be printed by accident.
 //! - [`CredentialStore`] and [`FileStore`]: where `bee auth login` keeps what
 //!   it obtains, in a private file.
-//! - [`resolve`]: from a profile to the secret its requests carry.
+//! - [`resolve`]: fixed-credential lookup; [`chatgpt`] owns renewable sessions.
 //! - [`header_for`]: how a protocol presents that secret.
 //!
 //! Authentication is configured apart from the protocol and the models: a
@@ -30,6 +30,8 @@ use serde_json::{Map, Value};
 use crate::config::Environment;
 use crate::error::{Error, Result};
 use crate::provider::{CredentialSource, Profile, Protocol, Providers};
+
+pub mod chatgpt;
 
 /// The version of the credential file's layout.
 const STORE_VERSION: u64 = 1;
@@ -68,6 +70,7 @@ pub struct Credential {
     secret: Secret,
     /// Seconds since the Unix epoch, for credentials that expire.
     expires_at: Option<u64>,
+    pub(crate) oauth: Option<chatgpt::Registration>,
 }
 
 impl Credential {
@@ -77,6 +80,7 @@ impl Credential {
         Self {
             secret,
             expires_at: None,
+            oauth: None,
         }
     }
 
@@ -97,6 +101,12 @@ impl Credential {
     #[must_use]
     pub fn expires_at(&self) -> Option<u64> {
         self.expires_at
+    }
+
+    /// Whether a validated ChatGPT identity granted subscription-backed inference.
+    #[must_use]
+    pub fn chatgpt_plan_enabled(&self) -> Option<bool> {
+        self.oauth.as_ref().map(chatgpt::Registration::plan_enabled)
     }
 
     /// Whether it has stopped working at `now` (Unix seconds).
@@ -135,6 +145,10 @@ impl Audience<'_> {
 /// A trait so an OS keyring can be added beside the file without touching the
 /// callers (ADR-008).
 pub trait CredentialStore {
+    /// File-backed OAuth transactions require a stable OS lock across processes.
+    fn file_store(&self) -> Option<&FileStore> {
+        None
+    }
     /// The credential stored for `audience`, if any.
     ///
     /// # Errors
@@ -160,11 +174,26 @@ pub trait CredentialStore {
 /// What the credential file holds, by audience.
 #[derive(Default)]
 struct Document {
+    profile_revisions: BTreeMap<String, u64>,
+    host_id: Option<String>,
     providers: BTreeMap<String, Credential>,
     mcp_servers: BTreeMap<String, Credential>,
 }
 
 impl Document {
+    fn revision(&self, profile: &str) -> u64 {
+        self.profile_revisions.get(profile).copied().unwrap_or(0)
+    }
+
+    fn changed(&mut self, audience: Audience<'_>) {
+        if self.host_id.is_some()
+            && let Audience::Provider(profile) = audience
+        {
+            // Tombstones distinguish even an empty logout from an untouched registration.
+            self.profile_revisions
+                .insert(profile.into(), self.revision(profile).saturating_add(1));
+        }
+    }
     fn table(&self, audience: Audience<'_>) -> &BTreeMap<String, Credential> {
         match audience {
             Audience::Provider(_) => &self.providers,
@@ -180,7 +209,7 @@ impl Document {
     }
 
     fn is_empty(&self) -> bool {
-        self.providers.is_empty() && self.mcp_servers.is_empty()
+        self.host_id.is_none() && self.providers.is_empty() && self.mcp_servers.is_empty()
     }
 }
 
@@ -252,16 +281,40 @@ impl FileStore {
         let Value::Object(root) = root else {
             return Err(self.parse_error("the top level must be an object"));
         };
-        if root
-            .keys()
-            .any(|key| !matches!(key.as_str(), "version" | "providers" | "mcp_servers"))
-        {
+        if root.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "version" | "providers" | "mcp_servers" | "host_id" | "profile_revisions"
+            )
+        }) {
             return Err(self.parse_error("it has a key Bee does not write"));
         }
-        if root.get("version").and_then(Value::as_u64) != Some(STORE_VERSION) {
+        if !matches!(root.get("version").and_then(Value::as_u64), Some(1 | 2)) {
             return Err(self.parse_error("its `version` is missing or not one Bee understands"));
         }
         Ok(Document {
+            profile_revisions: match root.get("profile_revisions") {
+                None => BTreeMap::new(),
+                Some(Value::Object(revisions)) => revisions
+                    .iter()
+                    .map(|(name, value)| {
+                        value
+                            .as_u64()
+                            .map(|v| (name.clone(), v))
+                            .ok_or_else(|| self.parse_error("profile revisions must be integers"))
+                    })
+                    .collect::<Result<_>>()?,
+                Some(_) => return Err(self.parse_error("profile revisions must be an object")),
+            },
+            host_id: root
+                .get("host_id")
+                .map(|value| {
+                    value
+                        .as_str()
+                        .map(str::to_owned)
+                        .ok_or_else(|| self.parse_error("host identity must be text"))
+                })
+                .transpose()?,
             providers: self.entries(&root, "providers")?,
             mcp_servers: self.entries(&root, "mcp_servers")?,
         })
@@ -285,14 +338,20 @@ impl FileStore {
             };
             if entry
                 .keys()
-                .any(|key| !matches!(key.as_str(), "secret" | "expires_at"))
+                .any(|key| !matches!(key.as_str(), "secret" | "expires_at" | "oauth"))
             {
                 return Err(self.parse_error(format!(
                     "an entry of `{table}` has a key Bee does not write"
                 )));
             }
+            let oauth = entry
+                .get("oauth")
+                .map(chatgpt::Registration::parse)
+                .transpose()?;
             let secret = match entry.get("secret") {
-                Some(Value::String(secret)) if !secret.is_empty() => Secret::new(secret.as_str()),
+                Some(Value::String(secret)) if !secret.is_empty() || oauth.is_some() => {
+                    Secret::new(secret.as_str())
+                }
                 _ => {
                     return Err(self.parse_error(format!(
                         "every entry of `{table}` needs a `secret` that is non-empty text"
@@ -307,7 +366,14 @@ impl FileStore {
                     ))
                 })?),
             };
-            credentials.insert(name.clone(), Credential { secret, expires_at });
+            credentials.insert(
+                name.clone(),
+                Credential {
+                    secret,
+                    expires_at,
+                    oauth,
+                },
+            );
         }
         Ok(credentials)
     }
@@ -331,13 +397,36 @@ impl FileStore {
                         if let Some(at) = credential.expires_at {
                             entry.insert("expires_at".to_owned(), Value::from(at));
                         }
+                        if let Some(oauth) = &credential.oauth {
+                            entry.insert("oauth".into(), oauth.json());
+                        }
                         (name.clone(), Value::Object(entry))
                     })
                     .collect(),
             )
         };
         let mut root = Map::new();
-        root.insert("version".to_owned(), Value::from(STORE_VERSION));
+        root.insert(
+            "version".to_owned(),
+            Value::from(
+                if document.host_id.is_some()
+                    || document.providers.values().any(|c| c.oauth.is_some())
+                {
+                    2
+                } else {
+                    STORE_VERSION
+                },
+            ),
+        );
+        if let Some(host) = &document.host_id {
+            root.insert("host_id".into(), host.clone().into());
+        }
+        if document.host_id.is_some() {
+            root.insert(
+                "profile_revisions".into(),
+                serde_json::to_value(&document.profile_revisions).expect("integer map serializes"),
+            );
+        }
         root.insert("providers".to_owned(), table(&document.providers));
         root.insert("mcp_servers".to_owned(), table(&document.mcp_servers));
         let mut bytes = serde_json::to_vec_pretty(&Value::Object(root))
@@ -348,28 +437,73 @@ impl FileStore {
 }
 
 impl CredentialStore for FileStore {
+    fn file_store(&self) -> Option<&FileStore> {
+        Some(self)
+    }
     fn get(&self, audience: Audience<'_>) -> Result<Option<Credential>> {
         Ok(self.load()?.table(audience).get(&audience.name()).cloned())
     }
 
     fn put(&self, audience: Audience<'_>, credential: &Credential) -> Result<()> {
-        let mut document = self.load()?;
-        document
-            .table_mut(audience)
-            .insert(audience.name(), credential.clone());
-        self.save(&document)
+        let _guard = self.lock()?;
+        self.put_locked(audience, credential)
     }
 
     fn remove(&self, audience: Audience<'_>) -> Result<bool> {
+        let _guard = self.lock()?;
         let mut document = self.load()?;
         let removed = document
             .table_mut(audience)
             .remove(&audience.name())
             .is_some();
-        if removed {
+        document.changed(audience);
+        if removed || document.host_id.is_some() {
             self.save(&document)?;
         }
         Ok(removed)
+    }
+}
+
+impl FileStore {
+    /// Caller holds the sibling OS lock; avoids reacquisition under ACP's session gate.
+    pub(crate) fn put_locked(&self, audience: Audience<'_>, credential: &Credential) -> Result<()> {
+        let mut document = self.load()?;
+        document
+            .table_mut(audience)
+            .insert(audience.name(), credential.clone());
+        document.changed(audience);
+        self.save(&document)
+    }
+    /// Yield during process-lock contention so ACP cancellation remains responsive.
+    pub(crate) async fn lock_async(&self) -> Result<std::fs::File> {
+        let start = std::time::Instant::now();
+        loop {
+            if let Some(guard) = self.try_lock()? {
+                return Ok(guard);
+            }
+            if start.elapsed() >= std::time::Duration::from_secs(30) {
+                return Err(chatgpt::failure("credential store is busy; retry shortly"));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+    /// Stable sibling locks survive atomic credential-file replacement.
+    pub(crate) fn try_lock(&self) -> Result<Option<std::fs::File>> {
+        let path = self.path.with_extension("lock");
+        platform::open_lock(&path)
+    }
+
+    fn lock(&self) -> Result<std::fs::File> {
+        let start = std::time::Instant::now();
+        loop {
+            if let Some(guard) = self.try_lock()? {
+                return Ok(guard);
+            }
+            if start.elapsed() > std::time::Duration::from_secs(30) {
+                return Err(chatgpt::failure("credential store is busy; retry shortly"));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 }
 
@@ -382,6 +516,39 @@ mod platform {
     use std::path::Path;
 
     use crate::error::{Error, Result};
+
+    pub fn open_lock(path: &Path) -> Result<Option<File>> {
+        let error = |source| Error::AuthStoreWrite {
+            path: path.display().to_string(),
+            source,
+        };
+        if let Some(parent) = path.parent() {
+            DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(parent)
+                .map_err(error)?;
+        }
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(path)
+            .map_err(error)?;
+        if file.metadata().map_err(error)?.mode() & 0o077 != 0 {
+            return Err(Error::AuthInsecurePermissions {
+                path: path.display().to_string(),
+                mode: "unsafe".into(),
+            });
+        }
+        match fs2::FileExt::try_lock_exclusive(&file) {
+            Ok(()) => Ok(Some(file)),
+            Err(e) if e.kind() == ErrorKind::WouldBlock => Ok(None),
+            Err(e) => Err(error(e)),
+        }
+    }
 
     /// Read `path`, which must be private to its owner. `None` if it does not
     /// exist.
@@ -405,11 +572,19 @@ mod platform {
             });
         }
         let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)
+        std::io::Read::by_ref(&mut file)
+            .take(4 * 1024 * 1024 + 1)
+            .read_to_end(&mut bytes)
             .map_err(|source| Error::AuthStoreRead {
                 path: path.display().to_string(),
                 source,
             })?;
+        if bytes.len() > 4 * 1024 * 1024 {
+            return Err(Error::AuthStoreParse {
+                path: path.display().to_string(),
+                reason: "credential file is too large".into(),
+            });
+        }
         Ok(Some(bytes))
     }
 
@@ -449,7 +624,12 @@ mod platform {
             // Flushed before the rename: a power cut must not leave the new
             // name pointing at an empty file.
             file.sync_all()?;
-            fs::rename(&temporary, path)
+            fs::rename(&temporary, path)?;
+            // The host ID and rotating refresh token must survive a directory-entry loss.
+            if let Some(parent) = path.parent() {
+                File::open(parent)?.sync_all()?;
+            }
+            Ok(())
         })();
         written.map_err(|source| {
             let _ = fs::remove_file(&temporary);
@@ -476,6 +656,10 @@ mod platform {
     use std::path::Path;
 
     use crate::error::{Error, Result};
+
+    pub fn open_lock(_path: &Path) -> Result<Option<std::fs::File>> {
+        Err(Error::AuthStoreUnsupported)
+    }
 
     pub fn read_private(_path: &Path) -> Result<Option<Vec<u8>>> {
         Err(Error::AuthStoreUnsupported)
@@ -508,9 +692,8 @@ pub fn unix_now() -> u64 {
 /// would turn a setup mistake into a confusing 401, or a request that leaks
 /// that no key was used.
 ///
-/// Nothing is refreshed: the only browser sign-in Bee has returns a key that
-/// does not expire, and a credential that stopped working is reported with the
-/// command that replaces it (ADR-008).
+/// This synchronous lookup does not refresh. Production ChatGPT requests use
+/// [`chatgpt::resolve`] before calling this fixed-credential seam (ADR-020).
 ///
 /// # Errors
 ///
@@ -537,6 +720,24 @@ pub fn resolve(
                 .ok_or_else(|| Error::AuthNotLoggedIn {
                     profile: profile.name().to_owned(),
                 })?;
+            if let Some(registration) = &credential.oauth {
+                if !profile
+                    .login_spec()
+                    .is_some_and(crate::preset::LoginSpec::is_chatgpt)
+                {
+                    return Err(chatgpt::failure(
+                        "OAuth credentials require a ChatGPT profile",
+                    ));
+                }
+                registration.check(&credential)?;
+            } else if profile
+                .login_spec()
+                .is_some_and(crate::preset::LoginSpec::is_chatgpt)
+            {
+                return Err(chatgpt::failure(
+                    "stored API keys cannot authenticate a ChatGPT profile",
+                ));
+            }
             if credential.is_expired(now) {
                 return Err(Error::AuthExpired {
                     profile: profile.name().to_owned(),
@@ -588,6 +789,10 @@ pub enum Status {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum StoreState {
+    /// Identity exists but ChatGPT-plan permission was declined.
+    PlanDisabled,
+    /// The access token can be renewed without repeating browser authorization.
+    Refreshable,
     /// A credential that works.
     LoggedIn,
     /// Nothing.
@@ -632,6 +837,9 @@ pub fn status(
             Some(CredentialSource::Store { login }) => Status::Store {
                 state: match store.get(Audience::Provider(name))? {
                     None => StoreState::NotLoggedIn,
+                    Some(credential) if credential.oauth.is_some() => {
+                        chatgpt::store_state(&credential, now)
+                    }
                     Some(credential) if credential.is_expired(now) => StoreState::Expired,
                     Some(_) => StoreState::LoggedIn,
                 },
@@ -688,6 +896,12 @@ pub fn require_store(profile: &Profile) -> Result<()> {
 /// [`Error::AuthEmptyToken`] if `secret` is blank, or a store error.
 pub fn store_secret(profile: &Profile, secret: &str, store: &dyn CredentialStore) -> Result<()> {
     require_store(profile)?;
+    if profile
+        .login_spec()
+        .is_some_and(crate::preset::LoginSpec::is_chatgpt)
+    {
+        return Err(chatgpt::failure("use browser sign-in for this profile"));
+    }
     let secret = secret.trim();
     if secret.is_empty() {
         return Err(Error::AuthEmptyToken);

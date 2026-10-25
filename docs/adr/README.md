@@ -42,3 +42,4 @@ by editing the old one. The history is the value.
 - [ADR-017](017-acp-permission-and-elicitation.md) — Keep Bash authorization, user input and browser login turn-owned
 - [ADR-018](018-optional-model-discovery.md) — Enrich selection with optional catalog and endpoint discovery
 - [ADR-019](019-durable-session-history.md) — Restore durable session identity, context and visible conversation
+- [ADR-020](020-chatgpt-plan-authentication.md) — Authenticate ChatGPT-plan requests with official local/OSS OAuth

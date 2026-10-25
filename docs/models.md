@@ -102,10 +102,16 @@ previously committed context.
 
 `discover_models = true` enables background enumeration once per minute. Bee appends `/models` to each distinct
 configured OpenAI-compatible base URL, retaining gateway paths. Existing credentials and profile headers are used;
-listing never starts browser login. Missing/expired credentials or unsupported listings do not affect inference.
+listing never starts browser login. ChatGPT OAuth credentials are renewed when necessary before listing;
+other missing/expired credentials or unsupported listings do not affect inference.
 
-Only the unpaginated OpenAI `data[].id` contract is implemented. A response advertising more pages is reported as
-unsupported rather than presented as complete. Results are sorted/deduplicated, bounded to 100000 IDs and kept in
+Ordinary OpenAI-compatible endpoints use the unpaginated `data[].id` contract. The `chatgpt` preset uses OpenAI's
+account-specific `models[]` contract, keeps `visibility = "list"` entries, and presents `display_name` labels with exact
+`slug` IDs in server order. Its automatic endpoint discovery is enabled by the preset. Account names and IDs remain
+separate from the public Models.dev cache.
+A response advertising more pages is reported as unsupported rather than presented as complete.
+Ordinary results are sorted/deduplicated; ChatGPT results are deduplicated without reordering. Both are bounded to
+100000 IDs and kept in
 memory per profile. They are cleared before each refresh and after Bee's browser login, so a failed refresh with
 replacement credentials cannot retain another account's model list. External credential changes are observed on the
 next listing refresh; visibility is an observation at the reported fetch time, not an authorization guarantee.
