@@ -664,7 +664,11 @@ mod compatibility_tests {
     #[test]
     fn legacy_headers_accept_new_plan_records_without_rewriting_the_old_prefix() {
         let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("session.jsonl");
+        let directory = root.path().join("history");
+        // Windows files inherit their parent's ACL; a generic temp directory
+        // does not provide the user-only permissions required by journal opens.
+        super::super::private_directory(&directory).unwrap();
+        let path = directory.join("session.jsonl");
         let event = serde_json::value::to_raw_value(&Event::SessionCreated {
             id: "saved".into(),
             created: 1,
