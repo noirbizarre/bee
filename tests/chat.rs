@@ -445,21 +445,28 @@ async fn streaming_text_and_usage_are_assembled_without_a_json_fallback() {
 async fn failures_are_classified_without_echoing_the_server_body() {
     for (status, expected) in [
         (401, Error::Authentication),
+        (403, Error::Authentication),
         (429, Error::RateLimit),
         (500, Error::Http(500)),
     ] {
-        let mut response = Response::json(json!({"secret":"sentinel"}));
-        response.status = status;
-        let server = Server::start(vec![response]);
-        let model = Model::new(
-            profile("openai-chat", &server.url, ""),
-            "opaque".into(),
-            None,
-        )
-        .unwrap();
-        let error = model.step(&[], &[], &mut |_| {}).await.unwrap_err();
-        assert_eq!(error, expected);
-        assert!(!format!("{error:?} {error}").contains("sentinel"));
+        for (repeats, chunked) in [(1, false), (10000, false), (10000, true)] {
+            let mut response = Response::json(json!({"secret":"sentinel".repeat(repeats)}));
+            response.status = status;
+            if chunked {
+                // Force inspection to accumulate a prefix before crossing the bound on later bytes.
+                response.pause = Some((32 * 1024, std::time::Duration::from_millis(20)));
+            }
+            let server = Server::start(vec![response]);
+            let model = Model::new(
+                profile("openai-chat", &server.url, ""),
+                "opaque".into(),
+                None,
+            )
+            .unwrap();
+            let error = model.step(&[], &[], &mut |_| {}).await.unwrap_err();
+            assert_eq!(error, expected);
+            assert!(!format!("{error:?} {error}").contains("sentinel"));
+        }
     }
 }
 
