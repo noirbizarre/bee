@@ -27,6 +27,7 @@ mod interactions;
 mod mcp;
 mod plans;
 mod presentation;
+mod scenarios;
 
 #[cfg(all(test, unix))]
 mod oauth_tests;
@@ -705,6 +706,37 @@ pub async fn serve_stdio(providers: Providers) -> Result<()> {
 /// As [`serve_with_runtime`].
 pub async fn serve_stdio_with_runtime(providers: Providers, runtime: Runtime) -> Result<()> {
     serve_with_runtime(Stdio::new(), providers, runtime).await
+}
+
+/// Serve a deterministic scenario over a real ACP transport with memory-only state.
+///
+/// # Errors
+///
+/// Returns [`Error::Connection`] if the protocol connection fails.
+pub async fn serve_scenario(
+    transport: impl ConnectTo<Agent>,
+    scenario: crate::scenario::Scenario,
+) -> Result<()> {
+    agent_with_scenario(scenario)
+        .connect_to(transport)
+        .await
+        .map_err(|error| Error::Connection {
+            reason: error.to_string(),
+        })
+}
+
+/// Serve a deterministic scenario over stdin/stdout.
+///
+/// # Errors
+///
+/// As [`serve_scenario`].
+pub async fn serve_stdio_scenario(scenario: crate::scenario::Scenario) -> Result<()> {
+    serve_scenario(Stdio::new(), scenario).await
+}
+
+/// Build a service-free scenario agent using the ordinary session handlers.
+pub fn agent_with_scenario(scenario: crate::scenario::Scenario) -> impl ConnectTo<Client> {
+    agent_with(move |reply| scenarios::run(scenario, reply))
 }
 
 /// Build the ACPv2 agent side of a connection.

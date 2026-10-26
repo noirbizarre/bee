@@ -17,6 +17,29 @@ fn the_version_flag_names_the_binary() {
 }
 
 #[test]
+fn scenario_selection_is_explicit_and_conflicts_with_human_facing_commands() {
+    bee()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--scenario"))
+        .stdout(predicate::str::contains("permission"));
+    for args in [
+        vec!["--scenario", "unknown"],
+        vec!["--scenario", "success", "auth", "status"],
+        vec!["auth", "status", "--scenario", "success"],
+        vec!["--scenario", "success", "models", "list"],
+        vec!["models", "list", "--scenario", "success"],
+    ] {
+        bee()
+            .args(args)
+            .assert()
+            .failure()
+            .stdout(predicate::str::is_empty());
+    }
+}
+
+#[test]
 fn models_commands_browse_dynamic_cached_providers_and_preserve_manual_ids_offline() {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("selected.toml");

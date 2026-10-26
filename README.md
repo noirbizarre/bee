@@ -56,6 +56,15 @@ The "Scope" and "Non-goals" sections describe the intended design, not current b
 
 ## Configuration
 
+### Deterministic test agent
+
+Launch `bee --scenario success` to use Bee as a minimal ACPv2 reference implementation and reusable deterministic
+test agent. Built-ins cover completion, plans, permissions, form input, cancellation and controlled errors, using
+the real protocol lifecycle with memory-only sessions and no LLM credentials or external services.
+See [test-agent scenarios](docs/scenarios.md) for launch examples and client integration contracts.
+
+### Production configuration
+
 Bee merges up to three TOML files, lowest precedence first: the global
 `$XDG_CONFIG_HOME/bee/config.toml` (or `~/.config/bee/config.toml`, on every platform), the file named by
 `BEE_CONFIG`, and the project's `.config/bee.toml`. Tables merge key by key, higher layers win for scalars, and arrays

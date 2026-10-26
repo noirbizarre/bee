@@ -4,6 +4,7 @@
 //! another, and keeping them apart is what lets the library be used without
 //! the CLI.
 
+use clap::builder::TypedValueParser;
 use clap::{Args, Parser, Subcommand};
 
 /// A minimal, headless Rust agent runtime implementing ACPv2.
@@ -19,6 +20,10 @@ use clap::{Args, Parser, Subcommand};
                   stdout. Stdout carries protocol traffic only; diagnostics go to stderr."
 )]
 pub struct Cli {
+    /// Serve a deterministic ACP test scenario without configuration or an LLM.
+    #[arg(long, value_parser = scenario_parser())]
+    pub scenario: Option<bee::scenario::Scenario>,
+
     /// Increase verbosity. Repeat for more.
     #[arg(short, long, global = true, action = clap::ArgAction::Count)]
     pub verbose: u8,
@@ -26,6 +31,17 @@ pub struct Cli {
     /// What to do instead of serving ACPv2.
     #[command(subcommand)]
     pub command: Option<Command>,
+}
+
+fn scenario_parser() -> impl TypedValueParser<Value = bee::scenario::Scenario> {
+    clap::builder::PossibleValuesParser::new(bee::scenario::Scenario::NAMED.map(|(name, _)| name))
+        .map(|name| {
+            bee::scenario::Scenario::NAMED
+                .into_iter()
+                .find(|(candidate, _)| *candidate == name)
+                .expect("the possible-values parser validated the name")
+                .1
+        })
 }
 
 /// What a person can ask Bee to do besides being launched by a client.
@@ -134,5 +150,17 @@ mod tests {
     #[test]
     fn the_command_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn global_verbosity_remains_available_to_human_facing_commands() {
+        for args in [
+            ["bee", "-v", "auth", "status"],
+            ["bee", "auth", "status", "-v"],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert_eq!(cli.verbose, 1);
+            assert!(matches!(cli.command, Some(Command::Auth(_))));
+        }
     }
 }

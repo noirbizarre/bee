@@ -4,7 +4,7 @@
 
 use std::process::ExitCode;
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use miette::MietteHandlerOpts;
 
 mod cli;
@@ -18,13 +18,26 @@ use cli::{Cli, Command};
 
 fn main() -> ExitCode {
     let args = Cli::parse();
+    // Clap's blanket args/subcommand conflict also rejects global verbosity;
+    // validate only the serving selector to preserve existing command syntax.
+    if args.scenario.is_some() && args.command.is_some() {
+        Cli::command()
+            .error(
+                clap::error::ErrorKind::ArgumentConflict,
+                "--scenario cannot be combined with a subcommand",
+            )
+            .exit();
+    }
     let verbose = args.verbose > 0 || std::env::var_os("RUST_BACKTRACE").is_some();
     install_miette_hook(verbose);
 
     // Without a subcommand a client launched Bee: serve ACPv2. Human-facing
     // commands print only on their separate execution paths.
     let result = match args.command {
-        None => bee::run(),
+        None => match args.scenario {
+            Some(scenario) => bee::run_scenario(scenario),
+            None => bee::run(),
+        },
         Some(Command::Auth(command)) => commands::run_auth(command),
         Some(Command::Models(command)) => commands::models::run(command),
     };
