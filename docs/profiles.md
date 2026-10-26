@@ -59,7 +59,11 @@ inference until configured. Connection references must exist, be unique and cont
 target. Unknown fields or invalid types are errors.
 
 Only member connections appear in ACP selectors, auth status and account-specific model discovery. An explicit connection
-argument to `bee auth` or `bee models list` must also be a member. Positional arguments still name connections;
+argument to `bee auth status`, `bee auth logout` or `bee models list` must also be a member. Explicit `bee auth login`
+is an onboarding exception: it can add an existing connection to the active profile and create a missing built-in
+`openrouter`, `chatgpt` or `github` connection in user configuration. If a higher-priority configuration file overrides
+the profile's membership array, add the connection to that array manually before login.
+Positional arguments still name connections;
 login/logout and model listing use the active profile's default connection when omitted. Auth status without an argument
 lists all connections in the active profile. Public Models.dev browsing remains independent of membership.
 
