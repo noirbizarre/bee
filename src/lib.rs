@@ -29,6 +29,7 @@ pub mod presentation;
 pub mod preset;
 mod profile;
 pub mod provider;
+pub mod scenario;
 pub mod selection;
 pub mod session;
 pub mod skills;
@@ -102,4 +103,24 @@ pub fn run() -> Result<()> {
             source,
         })?;
     runtime.block_on(acp::serve_stdio_with_runtime(providers, runtime_options))
+}
+
+/// Serve a deterministic scenario over stdio, with isolated in-memory sessions.
+///
+/// Configuration and persistent state are deliberately never opened: a client
+/// test must not depend on the launching developer's accounts or filesystem.
+///
+/// # Errors
+///
+/// Returns [`Error::Io`] if the runtime cannot start, or [`Error::Connection`]
+/// if the protocol connection fails.
+pub fn run_scenario(scenario: scenario::Scenario) -> Result<()> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|source| Error::Io {
+            path: "<async runtime>".into(),
+            source,
+        })?;
+    runtime.block_on(acp::serve_stdio_scenario(scenario))
 }

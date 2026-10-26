@@ -4,6 +4,8 @@
 //! under test (a clean stdout, exit codes, shutdown on EOF) belong to the
 //! process, not to the library.
 
+#[path = "support/scenarios.rs"]
+mod scenarios;
 mod support;
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -24,7 +26,7 @@ struct Agent {
     /// Raw stdout lines, in order.
     lines: Receiver<String>,
     stderr: Option<thread::JoinHandle<String>>,
-    _isolated: tempfile::TempDir,
+    _isolated: std::sync::Arc<tempfile::TempDir>,
 }
 
 impl Agent {
@@ -37,21 +39,64 @@ impl Agent {
     }
 
     fn configured_with_state(config: &str, state: Option<&std::path::Path>) -> Self {
+        Self::launch(config, state, None)
+    }
+
+    fn scenario(name: &str) -> Self {
+        Self::launch("", None, Some(name))
+    }
+
+    fn scenario_in(name: &str, isolated: std::sync::Arc<tempfile::TempDir>) -> Self {
+        Self::launch_in("", None, Some(name), isolated)
+    }
+
+    fn launch(config: &str, state: Option<&std::path::Path>, scenario: Option<&str>) -> Self {
+        Self::launch_in(
+            config,
+            state,
+            scenario,
+            std::sync::Arc::new(tempfile::tempdir().expect("a temp directory")),
+        )
+    }
+
+    fn launch_in(
+        config: &str,
+        state: Option<&std::path::Path>,
+        scenario: Option<&str>,
+        isolated: std::sync::Arc<tempfile::TempDir>,
+    ) -> Self {
         // An empty directory as home, config home and working directory, so a
         // developer's real configuration (or a malformed one) cannot change
         // what these tests observe. Keep it alive until the child is reaped.
-        let isolated = tempfile::tempdir().expect("a temp directory");
         // Production refresh is automatic, but transport tests must stay offline.
         let global = isolated.path().join("xdg/bee/config.toml");
         std::fs::create_dir_all(global.parent().unwrap()).unwrap();
-        std::fs::write(global, "[catalog]\nenabled=false\n").unwrap();
+        std::fs::write(
+            global,
+            if scenario.is_some() {
+                "invalid toml ["
+            } else {
+                "[catalog]\nenabled=false\n"
+            },
+        )
+        .unwrap();
         let path = bee::config::project_config_path(isolated.path());
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, support::native_bash_config(config)).unwrap();
-        let mut child = Command::new(env!("CARGO_BIN_EXE_bee"))
+        std::fs::write(
+            path,
+            if scenario.is_some() {
+                "invalid toml [".into()
+            } else {
+                support::native_bash_config(config)
+            },
+        )
+        .unwrap();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_bee"));
+        command
             .env("HOME", isolated.path())
             .env("XDG_CONFIG_HOME", isolated.path().join("xdg"))
             .env("XDG_CACHE_HOME", isolated.path().join("cache"))
+            .env("XDG_DATA_HOME", isolated.path().join("data"))
             .env(
                 "XDG_STATE_HOME",
                 state.map_or_else(|| isolated.path().join("state"), std::path::Path::to_owned),
@@ -61,9 +106,16 @@ impl Agent {
             .current_dir(isolated.path())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("the bee binary starts");
+            .stderr(Stdio::piped());
+        if let Some(scenario) = scenario {
+            // Poison ambient selectors too: even explicit missing configuration
+            // and profiles must be irrelevant to the deterministic launch path.
+            command
+                .args(["--scenario", scenario])
+                .env("BEE_CONFIG", isolated.path().join("missing.toml"))
+                .env("BEE_PROFILE", "missing-profile");
+        }
+        let mut child = command.spawn().expect("the bee binary starts");
 
         let stdout = child.stdout.take().expect("stdout is piped");
         let (sender, lines) = mpsc::channel();

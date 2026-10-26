@@ -82,6 +82,20 @@ are Bee behavior, not separate ACP methods. Hive's `_hive_activity` and gateway/
 
 ## Connection, negotiation and errors
 
+### Deterministic test-agent coverage
+
+`bee --scenario <name>` is a shipped, stdio-based deterministic test-agent mode using the same ACP boundary and
+session lifecycle. [The six built-ins](scenarios.md) exercise streamed text, item-plan replacement, tool-correlated
+permissions, negotiated form input, cancellation/close cleanup and controlled accepted-turn errors. Real-binary
+wire tests in `tests/support/scenarios.rs` cover ordering, response validation, replay and terminal states.
+This evidence is separate from the recorded TCK runs below.
+
+Scenario sessions are memory-only; provider/model selectors, inference, native execution, MCP discovery and browser
+login are not exercised. No configuration, credentials or external services are required. The general capability
+inventory below describes ordinary Bee unless explicitly stated otherwise.
+
+### Connection inventory
+
 Authority: [Transport][spec-transport], [Extensions][spec-extensions], and [V2][v2-schema]
 `InitializeRequest`, `InitializeResponse`, `AgentCapabilities`, `ClientCapabilities`, `ErrorCode`.
 

@@ -239,7 +239,7 @@ impl Reply {
         receive.await.unwrap_or(Err(Error::Cancelled))
     }
 
-    async fn permission(
+    pub(super) async fn permission(
         &self,
         subject: v2::RequestPermissionSubject,
         title: String,
@@ -288,7 +288,7 @@ impl Reply {
             && matches!(option.kind, v2::PermissionOptionKind::AllowOnce | v2::PermissionOptionKind::AllowAlways))))
     }
 
-    async fn ask(&self, call: &Call, limit: usize) -> Result<ToolResult, Error> {
+    pub(super) async fn ask(&self, call: &Call, limit: usize) -> Result<ToolResult, Error> {
         let question = call
             .arguments
             .get("question")
@@ -427,16 +427,8 @@ impl Native<'_> {
                         )
                     } else {
                         let description = self.inner.description(call);
-                        let update = serde_json::from_value::<v2::ToolCallUpdate>(json!({
-                            "toolCallId": self.reply.tool_id(call),
-                            "title": description.name,
-                            "kind": description.kind,
-                            "status": "pending",
-                            "locations": description.locations.iter().map(|path| json!({"path":path})).collect::<Vec<_>>(),
-                            "rawInput": crate::presentation::bounded_value(&call.arguments),
-                        })).map_err(|_| Error::Tool)?;
                         (
-                            v2::RequestPermissionSubject::from(update),
+                            self.reply.tool_permission_subject(call, &description)?,
                             format!("Run {} tool", call.name),
                         )
                     };
@@ -479,6 +471,26 @@ impl Native<'_> {
             });
         }
         definitions
+    }
+}
+
+impl Reply {
+    pub(super) fn tool_permission_subject(
+        &self,
+        call: &Call,
+        description: &crate::presentation::Description,
+    ) -> Result<v2::RequestPermissionSubject, Error> {
+        // Use the already-announced ID so clients can associate authorization
+        // with the pending card instead of inventing an unrelated operation.
+        let update = serde_json::from_value::<v2::ToolCallUpdate>(json!({
+            "toolCallId": self.tool_id(call),
+            "title": description.name,
+            "kind": description.kind,
+            "status": "pending",
+            "locations": description.locations.iter().map(|path| json!({"path":path})).collect::<Vec<_>>(),
+            "rawInput": crate::presentation::bounded_value(&call.arguments),
+        })).map_err(|_| Error::Tool)?;
+        Ok(v2::RequestPermissionSubject::from(update))
     }
 }
 

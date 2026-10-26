@@ -26,6 +26,7 @@ nav = [
   { "Session history" = "sessions.md" },
   { "Model discovery" = "models.md" },
   { "ACP / ACPv2 compatibility" = "compatibility.md" },
+  { "Test-agent scenarios" = "scenarios.md" },
   { "Instructions and skills" = "instructions.md" },
   { "About" = [
     { "Architecture Decisions" = "adr/README.md" },

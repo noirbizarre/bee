@@ -41,6 +41,11 @@ normal configuration hierarchy. See [project instructions and skills](instructio
 
 ## Configuration
 
+For client integration tests, launch `bee --scenario success` as a minimal ACPv2 reference implementation and
+deterministic test agent. [Built-in scenarios](scenarios.md) cover completion, plans, permissions, form input,
+cancellation and controlled errors with memory-only sessions and no LLM credentials or external services.
+Normal inference configuration follows below.
+
 Bee reads TOML configuration from up to three files, merged in this order, lowest precedence first:
 
 1. **Global:** `$XDG_CONFIG_HOME/bee/config.toml`, or `~/.config/bee/config.toml` when `XDG_CONFIG_HOME` is unset. The
