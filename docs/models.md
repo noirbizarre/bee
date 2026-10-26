@@ -1,8 +1,9 @@
 # Model discovery and metadata
 
-Bee keeps four things separate:
+Bee keeps these concepts separate:
 
-- A **provider profile** is a configured connection: URLs, credentials, headers and defaults.
+- A **profile** groups connection references and model preferences; see [named profiles](profiles.md).
+- A **provider connection** owns configured URLs, credentials, headers and base defaults.
 - A **protocol backend** is implemented code: Chat Completions, Responses or Anthropic Messages.
 - An **endpoint listing** is the model IDs visible through a particular configured endpoint with current credentials.
 - The **Models.dev catalog** describes publicly known providers and models. It suggests and enriches; it is not an
@@ -53,7 +54,7 @@ context_window = 32768
 model_context_windows = { "my-private-model" = 16384 }
 ```
 
-Arbitrary profile names are never matched to a catalog provider implicitly. Missing/unknown `catalog_provider` entries
+Arbitrary connection names are never matched to a catalog provider implicitly. Missing/unknown `catalog_provider` entries
 are valid and simply have no enrichment. Presets carry associations as data; they do not hard-code model lists.
 
 `metadata` and exact, case-sensitive `model_metadata` entries accept:
@@ -63,7 +64,8 @@ are valid and simply have no enrichment. Presets carry associations as data; the
 - `tool_call`, `structured_output`: optional booleans. Missing means unknown, not false.
 - `input_limit`, `output_limit`: positive 32-bit token limits, informational rather than request settings.
 
-Fields resolve independently: model override → profile default → catalog declaration → unknown. Explicit false values
+Metadata fields resolve independently: model override → connection default → catalog declaration → unknown.
+Explicit false values
 override true catalog declarations. Tables merge per key across configuration layers and presets; empty tables retain
 inherited values. Existing `model_protocols`, `context_window` and `model_context_windows` remain the canonical explicit
 routing/context settings. Catalog context/input/output limits stay distinct; output limits never silently replace
@@ -79,7 +81,7 @@ overrides describe facts; they do not add wire features or automatically suppres
 With `catalog_protocol_hints = true`, resolution is:
 
 1. Exact configured `model_protocols` mapping.
-2. Recognized catalog npm hint, only if that protocol is already configured on the profile.
+2. Recognized catalog npm hint, only if that protocol is already configured on the connection.
 3. Existing `prefer` fallback.
 
 Bee reads model `provider.npm`, falling back to provider-level `npm` only when absent. `@ai-sdk/anthropic` hints Messages;
@@ -88,7 +90,7 @@ Unsupported/unmapped packages and unconfigured targets fall back to `prefer`. `f
 Hints are approximate: one SDK can expose several APIs. Use an explicit mapping when your endpoint differs.
 Failures never trigger another protocol attempt.
 
-With `catalog_context_window = true`, capacity resolves as exact `model_context_windows` entry → profile
+With `catalog_context_window = true`, capacity resolves as exact `model_context_windows` entry → connection
 `context_window` → valid catalog context capacity → unknown. The existing approximate accounting and transactional
 oldest-whole-turn eviction apply. Input/output catalog limits remain informational. Context reports identify the
 enforced window's provenance in `_meta["bee.dev/context"].window`.
@@ -101,7 +103,7 @@ previously committed context.
 ## Endpoint-specific visibility
 
 `discover_models = true` enables background enumeration once per minute. Bee appends `/models` to each distinct
-configured OpenAI-compatible base URL, retaining gateway paths. Existing credentials and profile headers are used;
+configured OpenAI-compatible base URL, retaining gateway paths. Existing credentials and connection headers are used;
 listing never starts browser login. ChatGPT OAuth credentials are renewed when necessary before listing;
 other missing/expired credentials or unsupported listings do not affect inference.
 
@@ -112,7 +114,8 @@ separate from the public Models.dev cache.
 A response advertising more pages is reported as unsupported rather than presented as complete.
 Ordinary results are sorted/deduplicated; ChatGPT results are deduplicated without reordering. Both are bounded to
 100000 IDs and kept in
-memory per profile. They are cleared before each refresh and after Bee's browser login, so a failed refresh with
+memory per connection within the runtime's active profile. They are cleared before each refresh and after Bee's browser
+login, so a failed refresh with
 replacement credentials cannot retain another account's model list. External credential changes are observed on the
 next listing refresh; visibility is an observation at the reported fetch time, not an authorization guarantee.
 
@@ -124,7 +127,7 @@ structured output, modalities or support for every inference protocol.
 ACP model options retain configured/default IDs first, then any selected custom ID, endpoint IDs and catalog IDs,
 without duplicates. Display names are labels; the exact ID is sent to inference. Descriptions and
 `_meta["bee.dev/models"]` expose provenance/freshness. Refresh sends complete `config_option_update` options to open
-sessions without changing selections. Discovery never creates profiles or chooses a default. A profile with no
+sessions without changing selections. Discovery never creates connections or chooses a default. A connection with no
 selected/configured model keeps the existing absent-selector behavior; clients can still set any well-formed ID.
 
 ```sh
@@ -135,8 +138,9 @@ bee models list work --endpoint --json
 bee models refresh
 ```
 
-`providers` and `--catalog-provider` browse the dynamic global catalog without requiring configured profiles.
-`list [profile]` uses the default configured profile when omitted. `--endpoint` explicitly queries endpoint visibility
+`providers` and `--catalog-provider` browse the dynamic global catalog without requiring configured connections.
+`list [CONNECTION]` uses the active profile's default connection when omitted. Explicit targets must be members of the
+active profile; its model preferences override connection defaults. `--endpoint` explicitly queries endpoint visibility
 even if automatic listing is disabled, and does not require a catalog download. Ordinary queries refresh expired or
 missing catalog data when enabled, falling back visibly to stale cache. Configured IDs remain listable offline.
 

@@ -57,6 +57,7 @@ impl Agent {
                 state.map_or_else(|| isolated.path().join("state"), std::path::Path::to_owned),
             )
             .env_remove("BEE_CONFIG")
+            .env_remove("BEE_PROFILE")
             .current_dir(isolated.path())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -369,6 +370,124 @@ fn a_new_process_restores_native_identity_transcript_selection_and_tool_context_
     assert!(history.contains("durable answer"));
     assert!(history.contains("saved-write"));
     assert!(history.contains("remember this"));
+    assert!(second.finish().0.success());
+}
+
+#[test]
+fn profile_ownership_isolates_history_and_models_across_process_restarts() {
+    let root = tempfile::tempdir().unwrap();
+    let state = root.path().join("state");
+    let server = support::Server::start(vec![
+        support::Response::json(support::chat_text("work answer")),
+        support::Response::json(support::chat_text("personal answer")),
+        support::Response::json(support::chat_text("work continued")),
+    ]);
+    let shared = format!(
+        "[providers.shared]\nprotocols={{openai-chat={{base_url='{}'}}}}\nmodel='base'\n[profiles.work]\nconnections=['shared']\n[profiles.work.models.shared]\nmodel='work-model'\n[profiles.personal]\nconnections=['shared']\n[profiles.personal.models.shared]\nmodel='personal-model'\n",
+        server.url
+    );
+    let work = format!("profile='work'\n{shared}");
+    let personal = format!("profile='personal'\n{shared}");
+    let mut first = Agent::configured_with_state(&work, Some(&state));
+    first.initialize(1);
+    first
+        .send(&json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":root.path()}}));
+    let session = first.recv()["result"]["sessionId"].clone();
+    first.send(&json!({"jsonrpc":"2.0","id":3,"method":"session/set_config_option","params":{"sessionId":session,"configId":"model","type":"id","value":"saved-work-model"}}));
+    assert!(first.recv().get("result").is_some());
+    first.send(&json!({"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"text","text":"work context"}]}}));
+    first.until_idle();
+    assert_eq!(server.request().body["model"], "saved-work-model");
+    assert!(first.finish().0.success());
+    let journal = state
+        .join("bee/sessions")
+        .join(session.as_str().unwrap())
+        .join("session.jsonl");
+    // A torn tail proves that rejected attachment cannot perform recovery.
+    use std::io::Write;
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&journal)
+        .unwrap()
+        .write_all(b"{\"partial\":")
+        .unwrap();
+    let before = std::fs::read(&journal).unwrap();
+
+    let mut other = Agent::configured_with_state(&personal, Some(&state));
+    other.initialize(1);
+    other.send(&json!({"jsonrpc":"2.0","id":2,"method":"session/list","params":{}}));
+    assert_eq!(other.recv()["result"]["sessions"], json!([]));
+    for replay in [false, true] {
+        let mut params = json!({"sessionId":session,"cwd":root.path()});
+        if replay {
+            params["replayFrom"] = json!({"type":"start"});
+        }
+        other.send(&json!({"jsonrpc":"2.0","id":3,"method":"session/resume","params":params}));
+        let rejected = other.recv();
+        assert_eq!(rejected["id"], 3, "no replay or notices precede rejection");
+        assert!(
+            rejected["error"]["data"]
+                .as_str()
+                .unwrap()
+                .contains("different profile")
+        );
+        assert_eq!(std::fs::read(&journal).unwrap(), before);
+    }
+    other
+        .send(&json!({"jsonrpc":"2.0","id":4,"method":"session/new","params":{"cwd":root.path()}}));
+    let personal_session = other.recv()["result"]["sessionId"].clone();
+    other.send(&json!({"jsonrpc":"2.0","id":5,"method":"session/prompt","params":{"sessionId":personal_session,"prompt":[{"type":"text","text":"personal context"}]}}));
+    other.until_idle();
+    let request = server.request();
+    assert_eq!(request.body["model"], "personal-model");
+    assert!(
+        !request.body["messages"]
+            .to_string()
+            .contains("work context")
+    );
+
+    // The rejected resume released its lock even while the other runtime lives.
+    let mut resumed = Agent::configured_with_state(&work, Some(&state));
+    resumed.initialize(1);
+    resumed.send(&json!({"jsonrpc":"2.0","id":2,"method":"session/list","params":{}}));
+    let listed = resumed.recv();
+    assert_eq!(listed["result"]["sessions"].as_array().unwrap().len(), 1);
+    assert_eq!(listed["result"]["sessions"][0]["sessionId"], session);
+    resumed.resume(&session, root.path(), true);
+    resumed.send(&json!({"jsonrpc":"2.0","id":5,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"text","text":"continue work"}]}}));
+    resumed.until_idle();
+    assert_eq!(server.request().body["model"], "saved-work-model");
+    assert!(resumed.finish().0.success());
+    assert!(other.finish().0.success());
+}
+
+#[test]
+fn a_removed_selected_connection_cannot_fall_back_on_resume() {
+    let root = tempfile::tempdir().unwrap();
+    let state = root.path().join("state");
+    let connections = "[providers.one]\npreset='openai'\n[providers.two]\npreset='openai'\n";
+    let config = format!(
+        "profile='work'\n[profiles.work]\nconnections=['one','two']\nprovider='one'\n{connections}"
+    );
+    let mut first = Agent::configured_with_state(&config, Some(&state));
+    first.initialize(1);
+    first
+        .send(&json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":root.path()}}));
+    let session = first.recv()["result"]["sessionId"].clone();
+    first.send(&json!({"jsonrpc":"2.0","id":3,"method":"session/set_config_option","params":{"sessionId":session,"configId":"provider","type":"id","value":"two"}}));
+    assert!(first.recv().get("result").is_some());
+    assert!(first.finish().0.success());
+    let narrowed = format!("profile='work'\n[profiles.work]\nconnections=['one']\n{connections}");
+    let mut second = Agent::configured_with_state(&narrowed, Some(&state));
+    second.initialize(1);
+    second.send(&json!({"jsonrpc":"2.0","id":2,"method":"session/resume","params":{"sessionId":session,"cwd":root.path(),"replayFrom":{"type":"start"}}}));
+    let rejected = second.recv();
+    assert!(
+        rejected["error"]["data"]
+            .as_str()
+            .unwrap()
+            .contains("outside the active profile")
+    );
     assert!(second.finish().0.success());
 }
 

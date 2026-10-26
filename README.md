@@ -59,7 +59,7 @@ Bee merges up to three TOML files, lowest precedence first: the global
 `$XDG_CONFIG_HOME/bee/config.toml` (or `~/.config/bee/config.toml`, on every platform), the file named by
 `BEE_CONFIG`, and the project's `.config/bee.toml`. Tables merge key by key, higher layers win for scalars, and arrays
 are replaced rather than extended. A malformed or unreadable file, or a missing `BEE_CONFIG` file, stops Bee at launch
-with an actionable error that never repeats the file's contents. Provider profiles (`[providers.<name>]`: the protocols
+with an actionable error that never repeats the file's contents. Provider connections (`[providers.<name>]`: the protocols
 the provider speaks, each with its base URL and options, plus model, credential reference and headers) are validated and
 selectable per ACPv2 session. An optional `model_protocols = { "vendor/model.v2" = "openai-responses" }` table
 routes exact model IDs to configured protocols; unmapped IDs use `prefer` unless catalog hints are explicitly enabled.
@@ -68,13 +68,20 @@ cached offline fallback and separately enabled endpoint listings. Catalog refres
 explicit configuration wins over opted-in catalog protocol hints and context budgets.
 See the [documentation](https://noirbizarre.github.io/bee/#configuration).
 
+[Named profiles](docs/profiles.md) group connection references and independent model preferences for contexts such as
+work and personal. Select one with `profile = "work"` or `BEE_PROFILE=work`; precedence is implicit `default` → global
+selector → `BEE_PROFILE` → `BEE_CONFIG` file → project selector. Unknown profiles fail without fallback. Existing
+configurations become `default` in memory, retaining connection names and credentials. Once explicit profiles are defined,
+an undeclared `default` is empty. ACP selections, account commands and durable session access are scoped to the active
+profile.
+
 ## Authentication
 
-A profile's `credential` names an environment variable (`{ env = "KEY" }`) or Bee's credential store
+A connection's `credential` names an environment variable (`{ env = "KEY" }`) or Bee's credential store
 (`{ store = true }`, optionally with `login = "openrouter"` for a browser sign-in). `bee auth login`, `logout` and
 `status` manage the store, which is a `0600` file under `$XDG_DATA_HOME/bee`. Providers are data:
 `preset = "openrouter"` (also `openai`, `anthropic`, `opencode`, `deepseek`, `google`, `groq`, `mistral`, `xai`,
-`ollama`) fills in a profile, and your own `presets` and `login_flows` tables extend or override the shipped ones.
+`ollama`) fills in a connection, and your own `presets` and `login_flows` tables extend or override the shipped ones.
 OpenRouter's sign-in returns an API key; Cloudflare uses a scoped API token and not Wrangler's login; remote MCP server
 authorization is a separate audience and is not implemented. Credentials are resolved when inference needs them. See the
 [documentation](https://noirbizarre.github.io/bee/#authentication).

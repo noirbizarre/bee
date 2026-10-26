@@ -42,7 +42,7 @@ pub enum Command {
 /// `bee models ...`.
 #[derive(Debug, Subcommand)]
 pub enum ModelsCommand {
-    /// Browse the public catalog's providers, independently of configured profiles.
+    /// Browse the public catalog's providers, independently of configured connections.
     Providers {
         /// Print structured metadata and freshness rather than a table.
         #[arg(long)]
@@ -50,10 +50,10 @@ pub enum ModelsCommand {
     },
     /// Show model suggestions or explicitly enumerate an endpoint's visible IDs.
     List {
-        /// Configured profile; the default profile when omitted.
-        #[arg(conflicts_with = "catalog_provider")]
+        /// Connection in the active profile; its default connection when omitted.
+        #[arg(value_name = "CONNECTION", conflicts_with = "catalog_provider")]
         profile: Option<String>,
-        /// Browse a Models.dev provider rather than a configured profile.
+        /// Browse a Models.dev provider rather than a configured connection.
         #[arg(long, conflicts_with = "endpoint")]
         catalog_provider: Option<String>,
         /// Query configured OpenAI-compatible endpoints using existing credentials.
@@ -74,23 +74,25 @@ pub enum ModelsCommand {
 /// `bee auth ...`.
 #[derive(Debug, Subcommand)]
 pub enum AuthCommand {
-    /// Store a credential for a provider profile that uses `credential = { store = true }`.
+    /// Store a credential for a connection that uses `credential = { store = true }`.
     ///
-    /// Without flags, signs in with the browser if the profile has a `login`
+    /// Without flags, signs in with the browser if the connection has a `login`
     /// configured. With `--with-token`, reads an API token from standard input.
     Login(LoginArgs),
-    /// Forget the credential Bee stored for a profile.
+    /// Forget the credential Bee stored for a connection.
     ///
     /// API keys stay valid with the provider until revoked there. ChatGPT
     /// logout also attempts renewable-session revocation, retaining registration.
     Logout {
-        /// The profile; the default profile if omitted.
+        /// Connection in the active profile; its default connection if omitted.
+        #[arg(value_name = "CONNECTION")]
         profile: Option<String>,
     },
-    /// Show where each profile's credential comes from and whether it is
+    /// Show where each active connection's credential comes from and whether it is
     /// available. Never prints a credential.
     Status {
-        /// Only this profile.
+        /// Only this connection in the active profile.
+        #[arg(value_name = "CONNECTION")]
         profile: Option<String>,
     },
 }
@@ -98,7 +100,8 @@ pub enum AuthCommand {
 /// The arguments of `bee auth login`.
 #[derive(Debug, Args)]
 pub struct LoginArgs {
-    /// The profile; the default profile if omitted.
+    /// Connection in the active profile; its default connection if omitted.
+    #[arg(value_name = "CONNECTION")]
     pub profile: Option<String>,
 
     /// Read an API token from standard input instead of signing in.

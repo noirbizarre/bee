@@ -1,16 +1,17 @@
-//! Provider profiles, free of the ACPv2 SDK.
+//! Provider connections, free of the ACPv2 SDK.
 //!
-//! A *profile* is a named connection: which protocols the endpoint speaks and
-//! where, with which headers, and which model to ask for by default. The
-//! protocols are properties of the profile, never inferred from its name, and
+//! The historical Rust type `Profile` is a named connection: which protocols
+//! the endpoint speaks and where, with which headers, and which model to ask
+//! for by default. Protocols are properties of the connection, never inferred from its name, and
 //! nothing here knows a commercial provider: any name and any model id is
 //! accepted. One provider can serve several protocols, each at its own URL
 //! and with its own options; exact `model_protocols` mappings override `prefer`.
 //! See ADR-007, ADR-010 and ADR-013.
 //!
-//! Profiles are read from the merged [`Config`] (ADR-006) under `provider`
-//! (the default profile) and `providers.<name>`, optionally laid over a preset
-//! (ADR-009). Nothing is sent anywhere yet:
+//! Connections are read from the merged [`Config`] (ADR-006) under
+//! `providers.<name>`, optionally laid over a preset (ADR-009). Named grouping
+//! profiles scope the returned collection and its default connection (ADR-022).
+//! Nothing is sent anywhere yet:
 //! this module only describes endpoints. A credential is a *reference* to where
 //! the secret lives; resolving it is `auth` (ADR-008).
 //!
@@ -315,6 +316,21 @@ impl fmt::Debug for Profile {
 }
 
 impl Profile {
+    pub(crate) fn with_model_preferences(
+        mut self,
+        model: Option<String>,
+        models: Option<Vec<String>>,
+    ) -> Self {
+        // Only the scoped clone changes: shared connection credentials and other
+        // profiles' preferences must retain their original identity and defaults.
+        if let Some(model) = model {
+            self.model = Some(model);
+        }
+        if let Some(models) = models {
+            self.models = models;
+        }
+        self
+    }
     /// Exact Models.dev association; never a required registry entry.
     pub fn catalog_provider(&self) -> Option<&str> {
         self.catalog_provider.as_deref()
@@ -481,16 +497,32 @@ impl Profile {
     }
 }
 
-/// Every configured profile, and which one is the default.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// The active grouping profile's connections and default connection.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Providers {
-    profiles: BTreeMap<String, Profile>,
+    pub(crate) profiles: BTreeMap<String, Profile>,
     // Always names a profile, and is `Some` whenever there is one.
-    default: Option<String>,
+    pub(crate) default: Option<String>,
+    pub(crate) profile_name: String,
+}
+
+impl Default for Providers {
+    fn default() -> Self {
+        Self {
+            profiles: BTreeMap::new(),
+            default: None,
+            profile_name: "default".into(),
+        }
+    }
 }
 
 impl Providers {
-    /// Read and validate the profiles from `config`.
+    /// The grouping profile that owns these connections and durable sessions.
+    #[must_use]
+    pub fn profile_name(&self) -> &str {
+        &self.profile_name
+    }
+    /// Read connections and resolve the active named grouping profile from `config`.
     ///
     /// No `providers` table is not an error: Bee then has no provider, which
     /// is the state before one is configured.
@@ -501,6 +533,10 @@ impl Providers {
     /// type, an unknown key, an unknown protocol, a missing `protocol`, an
     /// unusable value, or a default `provider` that is unknown or missing.
     pub fn from_config(config: &Config) -> Result<Self> {
+        crate::profile::resolve(config, Self::connections(config)?)
+    }
+
+    pub(crate) fn connections(config: &Config) -> Result<BTreeMap<String, Profile>> {
         // Built before any profile is read, so a profile can name a preset or
         // a login flow the user defined (ADR-009).
         let catalog = Catalog::from_config(config)?;
@@ -508,11 +544,6 @@ impl Providers {
             config,
             catalog: &catalog,
             fallback: "<unknown>".to_owned(),
-        };
-
-        let default = match config.get("provider") {
-            None => None,
-            Some(value) => Some(reader.string("provider", value)?.to_owned()),
         };
 
         let mut profiles = BTreeMap::new();
@@ -526,6 +557,26 @@ impl Providers {
             Some(other) => return Err(reader.wrong_type("providers", "a table", other)),
         }
 
+        Ok(profiles)
+    }
+
+    pub(crate) fn legacy(config: &Config, profiles: BTreeMap<String, Profile>) -> Result<Self> {
+        let default = match config.get("provider") {
+            None => None,
+            Some(value) => Some(
+                value
+                    .as_str()
+                    .ok_or_else(|| Error::ProviderType {
+                        key: "provider".into(),
+                        path: config
+                            .origin("provider")
+                            .map_or_else(|| "<unknown>".into(), |p| p.display().to_string()),
+                        expected: "a string",
+                        found: value.type_str(),
+                    })?
+                    .to_owned(),
+            ),
+        };
         let available = || profiles.keys().cloned().collect::<Vec<_>>().join(", ");
         let default = match default {
             // Named by the user, so it must exist: falling back to another
@@ -555,7 +606,11 @@ impl Providers {
             },
         };
 
-        Ok(Self { profiles, default })
+        Ok(Self {
+            profiles,
+            default,
+            profile_name: "default".into(),
+        })
     }
 
     /// The profile called `name`.

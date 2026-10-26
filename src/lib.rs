@@ -25,6 +25,7 @@ pub mod login;
 pub mod models;
 mod plan;
 pub mod preset;
+mod profile;
 pub mod provider;
 pub mod session;
 pub mod skills;

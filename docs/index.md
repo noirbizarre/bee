@@ -13,7 +13,7 @@ Bee is at the **bootstrap stage**: the repository, tooling, CI and release autom
 serves ACPv2 over stdio, so a client can start it, complete the `initialize` handshake, create sessions and submit
 prompts. Bee advertises the baseline session lifecycle (`session/new`, `list`, `resume`, `close`, `prompt`, `cancel`).
 
-**Chat Completions, Responses and Anthropic Messages inference are implemented.** Selected profiles receive prompts and
+**Chat Completions, Responses and Anthropic Messages inference are implemented.** Selected connections receive prompts and
 stream answers over ACP. Cancellation and close interrupt pending inference. Production sessions retain successful
 context across close/resume and process restart. Start resume replays the separate visible transcript before current
 state. See [session history](sessions.md) for storage, retention and client restoration.
@@ -54,6 +54,14 @@ Tables merge key by key, and for a scalar the higher layer wins. An array in a h
 instead of extending it. Giving one key different types in two layers (a string over an integer, say) is an error that
 names the key and both files. See [ADR-006](adr/006-layered-xdg-configuration.md).
 
+### Named profiles
+
+[Profiles](profiles.md) group connection references and profile-specific model preferences. Select with top-level
+`profile = "work"` or `BEE_PROFILE=work`. The selector precedence is implicit `default` → global setting → `BEE_PROFILE`
+→ `BEE_CONFIG` file → project setting. An unknown profile fails without fallback. Existing configurations retain their
+behavior through an in-memory `default` profile; once explicit groups exist, an undeclared `default` is empty.
+Connection selection, auth/model commands and durable session access are scoped to the active profile.
+
 ### Agent execution
 
 ```toml
@@ -71,16 +79,16 @@ See [turn execution limits](inference.md#turn-execution-limits) for boundary beh
 Optional [model discovery](models.md) enriches ACP selectors and `bee models` with Models.dev metadata and separately
 enabled endpoint listings. Catalog refresh is automatic and nonblocking; configured model IDs always work independently.
 
-A provider is a named connection profile, separate from the protocols it speaks and from the model:
+A provider connection is separate from the grouping profile, the protocols it speaks and the model:
 
 ```toml
-provider = "work"                  # the default profile (optional when there is only one)
+provider = "work"                  # legacy default connection, within the implicit default profile
 
 [providers.work]                   # any name; it is a label, never looked up
 model = "corp/ft-2026"             # optional default model: any id, listed anywhere or not
 models = ["corp/base"]             # optional suggestions for model selectors, not a limit
 credential = { env = "GATEWAY_KEY" }           # optional: names where the secret lives, see Authentication
-headers = { "X-Team" = "infra" }   # optional, sent only to this profile
+headers = { "X-Team" = "infra" }   # optional, sent only to this connection
 timeout_ms = 120000               # optional whole-request deadline, including streaming
 max_output_tokens = 4096          # optional output limit
 context_window = 32768            # optional explicit context capacity; no default
@@ -113,16 +121,16 @@ options = { max_tokens = 2048 }
 
 Mapping keys are literal, case-sensitive model IDs: quote IDs containing dots, slashes or other TOML punctuation.
 There is no prefix matching or vendor inference. Mapping targets must be supported protocols configured on the final
-profile, including endpoints inherited from a preset; invalid targets stop Bee at launch. Mappings do not add model
+connection, including endpoints inherited from a preset; invalid targets stop Bee at launch. Mappings do not add model
 suggestions or restrict which IDs can be selected. Unknown/private models remain usable without Models.dev or another
-catalog. `prefer` is still required for multi-protocol profiles because unmapped models need a fallback.
+catalog. `prefer` is still required for multi-protocol connections because unmapped models need a fallback.
 
 `model_protocols` merges key by key across global, `BEE_CONFIG` and project files, and over presets: a higher-priority
 entry replaces the same model ID while retaining other entries. An empty table (`model_protocols = {}`) does not clear
 inherited mappings. See [ADR-013](adr/013-per-model-protocol-selection.md).
 
 `context_window` and entries of `model_context_windows` are positive 32-bit token capacities. Exact model entries win
-over the profile fallback; otherwise capacity is unknown unless catalog context windows are explicitly enabled.
+over the connection fallback; otherwise capacity is unknown unless catalog context windows are explicitly enabled.
 The model map merges per key across layers and presets,
 without clearing inherited entries for an empty table. Before each request, Bee estimates input, reserves the effective
 output maximum and drops oldest complete turns when needed. The active turn and its tool pairs remain intact.
@@ -130,17 +138,18 @@ Configured sessions report labeled estimates and notices when older context is r
 [conversation context and token budgets](inference.md#conversation-context-and-token-budgets) for the estimate formula,
 transactional retention and explicit overflow handling.
 
-Several profiles can use the same protocol, so a gateway, a local server and a vendor API are just three profiles.
-Layers merge as above: a project file can override one header or the model of a global profile. Unknown keys,
+Several connections can use the same protocol, so a gateway, a local server and a vendor API are three connections.
+Layers merge as above: a project file can override one header or the model of a global connection. Unknown keys,
 unsupported protocols and malformed URLs, headers or models stop Bee at launch with an error that names the key and
 the file and never the value. A `credential` only *names* where the secret lives; do not put a key in the file (see
 [Authentication](#authentication)).
 
 When a provider is configured, Bee offers each ACPv2 session a `provider` and a `model` configuration option and
 handles `session/set_config_option`. These are session settings and differ from the configuration above: the client
-chooses among configured profiles and can name any model id, but cannot change a profile's endpoint, headers or
-credential. The provider is the client's choice, else `provider`, else the only profile; the model is the client's
-choice, else the profile's `model`, else the first of its `models`. Choosing another provider resets the model, and
+chooses among connections in the active profile and can name any model id, but cannot change a connection's endpoint,
+headers or credential. The provider is the client's choice, else the active profile's default connection; the model is
+the client's choice, else the effective `model`, else the first effective `models` entry. Profile model fields override
+connection defaults independently. Choosing another provider resets the model, and
 settings cannot change while a turn is running. See [ADR-007](adr/007-provider-profiles-and-model-selection.md).
 
 Protocol resolution uses that effective model ID for every prompt, whether selected by the client or supplied by a
@@ -152,7 +161,7 @@ See [Inference and smoke tests](inference.md) for the supported subset and verif
 
 ## Authentication
 
-A profile's `credential` says where its secret comes from. It is separate from the `protocol` (which only decides how
+A connection's `credential` says where its secret comes from. It is separate from the `protocol` (which only decides how
 the secret is presented: `Authorization: Bearer` for `openai-chat` and `openai-responses`, `x-api-key` for
 `anthropic-messages`) and from the model. Exactly one source, or none:
 
@@ -169,7 +178,7 @@ at launch.
 
 ### Presets
 
-Bee ships ready-made profiles, so a well-known provider is one line. A profile names a preset and overlays its own keys:
+Bee ships ready-made connection presets. A connection names a preset and overlays its own keys:
 
 ```toml
 [providers.work]
@@ -193,14 +202,14 @@ Shipped presets, with the variable each reads its key from:
 | `xai`        | `openai-responses`, `openai-chat`                       | `XAI_API_KEY`                     |
 | `ollama`     | `openai-chat`, local server                             | none                              |
 
-Scalars and arrays in the profile replace the preset's. `model_protocols`, `model_context_windows`, `headers` and each
+Scalars and arrays in the connection replace the preset's. `model_protocols`, `model_context_windows`, `headers` and each
 protocol's table under `protocols` merge key by key, `prefer` replaces, and `credential` is replaced whole.
 Every URL comes from vendor documentation,
 and a vendor is listed by the protocols Bee speaks: OpenCode Zen serves its GPT, Grok and Muse models over
 `openai-responses`, its Claude models over `anthropic-messages` and the rest over `openai-chat`, and only its Gemini
 models (Google's native protocol) cannot be reached. Set exact `model_protocols` entries for models needing a protocol
 other than the preset's preference. OpenCode Go uses other endpoints
-(`/inference/go`) and needs a profile of its own. The catalogue deliberately has no model lists: name your own
+(`/inference/go`) and needs a connection of its own. The catalogue deliberately has no model lists: name your own
 `model`.
 
 Define your own preset, or override a shipped one by name, in a `presets` table of any configuration file:
@@ -257,7 +266,7 @@ open-source, locally hosted applications. Paid or remotely hosted offerings requ
 [separate approval path](https://openai.com/form/sign-in-with-chatgpt-interest/).
 Use is subject to the applicable [OpenAI terms and policies](https://openai.com/policies).
 
-Configure a named profile in your Bee configuration:
+Configure a named connection in your Bee configuration:
 
 ```toml
 provider = "personal"
@@ -276,13 +285,13 @@ bee models list personal --endpoint
 Login displays **Continue with ChatGPT**, opens the browser, and receives authorization at a temporary
 `http://127.0.0.1:<port>/auth/callback` listener. `--no-browser` prints the authorization URL for you to open locally.
 The callback must reach the Bee host; on a remote machine arrange secure loopback forwarding.
-`--with-token` and `--paste-code` are not supported for this profile.
+`--with-token` and `--paste-code` are not supported for this connection.
 Authorize ChatGPT-plan usage when prompted, then use the account-specific model listing or your ACP client's model
 picker to select an available model slug. A declined plan permission is retained as a signed-in, inference-disabled
 registration; explicitly repeat `bee auth login personal` to request permission again.
 
-Named profiles are distinct account/workspace labels. Add another profile using `preset = "chatgpt"` for another
-registration; email alone does not identify a workspace. Reauthorization of an existing profile must match its
+Named connections are distinct account/workspace labels. Add another connection using `preset = "chatgpt"` for another
+registration; email alone does not identify a workspace. Reauthorization of an existing connection must match its
 verified account and issued client ID. Bee reuses registration and host identity across restarts and logout.
 The Bee data directory defines one host installation; give copied installations or self-hosted VMs distinct host
 identities by starting with a fresh Bee data directory and signing in there.
@@ -305,7 +314,7 @@ See [ChatGPT inference limitations](inference.md#chatgpt-plan-requests) and
 ### ACP browser sign-in
 
 During a prompt, a missing or expired stored credential starts browser sign-in when
-the profile names a login flow and the client advertises `capabilities.elicitation.url`.
+the connection names a login flow and the client advertises `capabilities.elicitation.url`.
 Bee sends session-scoped `elicitation/create` with a unique ID. Accepting the URL
 means the browser interaction may proceed, not that authentication succeeded.
 Bee waits for the loopback callback, validates state, exchanges the code over HTTPS,
@@ -332,14 +341,15 @@ guidance. A provider's inference 401/403 does not automatically retry login or i
 ### Commands
 
 ```bash
-bee auth login [PROFILE]                 # browser sign-in for OpenRouter or ChatGPT profiles
-bee auth login [PROFILE] --paste-code    # no callback: open the URL anywhere, paste the code it shows (SSH, containers)
-bee auth login [PROFILE] --with-token    # read an API token from standard input
-bee auth logout [PROFILE]                # forget Bee's stored copy
-bee auth status [PROFILE]                # where each credential comes from, never the credential itself
+bee auth login [CONNECTION]                 # browser sign-in for OpenRouter or ChatGPT connections
+bee auth login [CONNECTION] --paste-code    # no callback: open anywhere, paste the code (SSH, containers)
+bee auth login [CONNECTION] --with-token    # read an API token from standard input
+bee auth logout [CONNECTION]                # forget Bee's stored copy
+bee auth status [CONNECTION]                # where each credential comes from, never the credential itself
 ```
 
-`PROFILE` defaults to the default profile. `--no-browser` prints the sign-in URL without trying to open it. Prompts and
+`CONNECTION` defaults to the active profile's default connection for login/logout; status lists its member connections.
+Explicit targets must be members. `--no-browser` prints the sign-in URL without trying to open it. Prompts and
 URLs go to stderr; only `status` writes to stdout. Bare `bee` still serves ACPv2.
 
 ### OAuth sign-in, API tokens, inference credentials and MCP authorization
@@ -351,7 +361,7 @@ These are different things and Bee keeps them apart:
   exchange supplies no refresh token or key expiry metadata; a revoked or expired key requires signing in again.
   ChatGPT's separate flow
   returns renewable OAuth tokens tied to a verified account/workspace registration.
-- **API tokens** are pasted (`--with-token`) or read from a variable. API-key profiles support them, and they are the
+- **API tokens** are pasted (`--with-token`) or read from a variable. API-key connections support them, and they are the
   only option for providers with no browser flow.
 - **Cloudflare** (Workers AI, AI Gateway) uses a *scoped API token* from the environment or the store. Bee does not
   read or reuse Wrangler's browser-login token: it belongs to Wrangler and is not interchangeable with an API token's
@@ -375,7 +385,7 @@ in diagnostics or debug output. See [ADR-008](adr/008-provider-authentication.md
 ### OpenRouter browser authentication
 
 OpenRouter's officially supported [OAuth PKCE flow](https://openrouter.ai/docs/guides/overview/auth/oauth) creates a
-user-controlled API key. Configure a profile in your Bee configuration:
+user-controlled API key. Configure a connection in your Bee configuration:
 
 ```toml
 [providers.openrouter]
@@ -424,7 +434,8 @@ credential = { env = "OPENROUTER_API_KEY" }
 The environment source replaces the store source entirely. See
 [ADR-021](adr/021-openrouter-authentication.md) for the verified protocol, lifecycle and eligibility constraints.
 
-Stored credentials are resolved when an inference request needs them, using the selected profile's audience.
+Stored credentials are resolved when inference needs them, using the selected connection's audience. Referencing the
+same connection from several profiles intentionally shares its credentials; separate accounts need separate connections.
 
 ## Scope
 
