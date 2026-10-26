@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use serde_json::{Value, json};
 
 use super::{Error, Message, Model, Native, Step, Stop, Tool, Usage, call, string};
-use crate::provider::Protocol;
+use crate::provider::{Protocol, ProtocolOptions};
 
 pub(super) async fn run(
     model: &Model,
@@ -84,6 +84,53 @@ pub(super) fn request(model: &Model, messages: &[Message], tools: &[Tool]) -> Re
         if model.is_chatgpt() {
             body["tools"] = json!([{"type":"namespace","name":"bee","description":"Bee client-side tools","tools":body["tools"].clone()}]);
         }
+    }
+    let ProtocolOptions::OpenAiResponses { cache } = model.endpoint().options() else {
+        return Err(Error::Malformed);
+    };
+    let boundaries = super::cache::openai(model, &mut body, cache)?;
+    if boundaries.instructions() {
+        let block = super::cache::marked_text("input_text", &model.instructions)?;
+        body.as_object_mut()
+            .expect("request object")
+            .remove("instructions");
+        body["input"]
+            .as_array_mut()
+            .expect("input array")
+            .insert(0, json!({"role":"developer","content":[block]}));
+    }
+    if boundaries.conversation() {
+        let mut blocks = Vec::new();
+        let mut items = body["input"]
+            .as_array_mut()
+            .expect("input array")
+            .iter_mut()
+            .peekable();
+        while let Some(item) = items.next() {
+            let field = if item["type"] == "function_call_output" {
+                "output"
+            } else if item["role"] == "user" {
+                "content"
+            } else {
+                continue;
+            };
+            let text = item[field].as_str().ok_or(Error::Malformed)?;
+            if text.is_empty() {
+                continue;
+            }
+            // Keep the same block representation on replay as the bounded marker window grows.
+            item[field] = json!([{"type":"input_text","text":text}]);
+            // Consecutive results form one completed step boundary, preserving slots
+            // for previous writes even when the model made many parallel calls.
+            if field == "content"
+                || items
+                    .peek()
+                    .is_none_or(|next| next["type"] != "function_call_output")
+            {
+                blocks.push(&mut item[field][0]);
+            }
+        }
+        super::cache::mark_conversation(blocks, &cache.options)?;
     }
     Ok(body)
 }
@@ -368,10 +415,7 @@ impl Parser {
                 }),
             },
             stop,
-            usage: Usage {
-                input: response["usage"]["input_tokens"].as_u64(),
-                output: response["usage"]["output_tokens"].as_u64(),
-            },
+            usage: Usage::openai(&response["usage"], true),
         });
         Ok(())
     }
@@ -382,11 +426,15 @@ mod tests {
     use super::*;
 
     fn model() -> Model {
+        model_with_options("")
+    }
+
+    fn model_with_options(options: &str) -> Model {
         let root = tempfile::tempdir().unwrap();
         let project = root.path().join("project");
         let path = crate::config::project_config_path(&project);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, "[providers.subscription]\npreset='chatgpt'\nmodel='account-model'\ncontext_window=10000\nmax_output_tokens=2000").unwrap();
+        std::fs::write(&path, format!("[providers.subscription]\npreset='chatgpt'\nmodel='account-model'\ncontext_window=10000\nmax_output_tokens=2000\n[providers.subscription.protocols.openai-responses.options]\n{options}")).unwrap();
         let config =
             crate::config::Config::load(&crate::config::Environment::default(), &project).unwrap();
         let providers = crate::provider::Providers::from_config(&config).unwrap();
@@ -419,6 +467,33 @@ mod tests {
             model.context(&messages, &tools).unwrap().reserved_output,
             2000
         );
+    }
+
+    #[test]
+    fn chatgpt_allows_keys_but_rejects_retention_and_unverified_write_policies() {
+        let messages = [Message::User("hello".into())];
+        let body = request(&model(), &messages, &[]).unwrap();
+        assert!(
+            body["prompt_cache_key"]
+                .as_str()
+                .unwrap()
+                .starts_with("bee-v1-")
+        );
+        let explicit =
+            model_with_options("prompt_cache_key={mode='explicit',value='application-key'}");
+        assert_eq!(
+            request(&explicit, &messages, &[]).unwrap()["prompt_cache_key"],
+            "application-key"
+        );
+        for options in [
+            "prompt_cache_retention='24h'",
+            "prompt_cache_options={enabled=true}",
+        ] {
+            assert!(matches!(
+                request(&model_with_options(options), &messages, &[]),
+                Err(Error::Cache(_))
+            ));
+        }
     }
 
     #[test]

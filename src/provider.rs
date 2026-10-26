@@ -30,6 +30,9 @@ use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::preset::{Catalog, LoginSpec, SpecError, deep_merge};
 
+pub mod cache;
+use cache::{AnthropicCache, OpenAiCache};
+
 /// The keys a profile table accepts.
 const PROFILE_KEYS: &[&str] = &[
     "preset",
@@ -195,16 +198,22 @@ pub enum ProtocolOptions {
     OpenAiChat {
         /// Which field carries the output limit.
         max_tokens_field: MaxTokensField,
+        /// Native OpenAI caching controls; compatibility is checked on the selected route.
+        cache: OpenAiCache,
     },
-    /// For [`Protocol::OpenAiResponses`]. It has no settings yet: the output
-    /// limit is always `max_output_tokens`, so there is nothing to switch.
-    OpenAiResponses,
+    /// For [`Protocol::OpenAiResponses`].
+    OpenAiResponses {
+        /// Native OpenAI caching controls.
+        cache: OpenAiCache,
+    },
     /// For [`Protocol::AnthropicMessages`].
     AnthropicMessages {
         /// The `anthropic-version` header, if not the backend's own.
         version: Option<String>,
         /// The output limit, if not the backend's own.
         max_tokens: Option<u32>,
+        /// Explicit opt-in to Anthropic cache writes.
+        cache: AnthropicCache,
     },
 }
 
@@ -213,20 +222,33 @@ impl ProtocolOptions {
         match protocol {
             Protocol::OpenAiChat => Self::OpenAiChat {
                 max_tokens_field: MaxTokensField::default(),
+                cache: OpenAiCache::default(),
             },
-            Protocol::OpenAiResponses => Self::OpenAiResponses,
+            Protocol::OpenAiResponses => Self::OpenAiResponses {
+                cache: OpenAiCache::default(),
+            },
             Protocol::AnthropicMessages => Self::AnthropicMessages {
                 version: None,
                 max_tokens: None,
+                cache: AnthropicCache::default(),
             },
         }
     }
 
     fn allowed_keys(protocol: Protocol) -> &'static [&'static str] {
         match protocol {
-            Protocol::OpenAiChat => &["max_tokens_field"],
-            Protocol::OpenAiResponses => &[],
-            Protocol::AnthropicMessages => &["version", "max_tokens"],
+            Protocol::OpenAiChat => &[
+                "max_tokens_field",
+                "prompt_cache_key",
+                "prompt_cache_retention",
+                "prompt_cache_options",
+            ],
+            Protocol::OpenAiResponses => &[
+                "prompt_cache_key",
+                "prompt_cache_retention",
+                "prompt_cache_options",
+            ],
+            Protocol::AnthropicMessages => &["version", "max_tokens", "cache_control"],
         }
     }
 }
@@ -1319,7 +1341,11 @@ impl Reader<'_> {
         self.only_keys(key, table, ProtocolOptions::allowed_keys(protocol))?;
         let mut options = ProtocolOptions::defaults(protocol);
         match &mut options {
-            ProtocolOptions::OpenAiChat { max_tokens_field } => {
+            ProtocolOptions::OpenAiChat {
+                max_tokens_field,
+                cache,
+            } => {
+                *cache = self.openai_cache(key, table)?;
                 if let Some(value) = table.get("max_tokens_field") {
                     let key = format!("{key}.max_tokens_field");
                     *max_tokens_field = match self.string(&key, value)? {
@@ -1332,12 +1358,15 @@ impl Reader<'_> {
                     };
                 }
             }
-            // Nothing to read: `only_keys` above already refused every key.
-            ProtocolOptions::OpenAiResponses => {}
+            ProtocolOptions::OpenAiResponses { cache } => {
+                *cache = self.openai_cache(key, table)?;
+            }
             ProtocolOptions::AnthropicMessages {
                 version,
                 max_tokens,
+                cache,
             } => {
+                *cache = self.anthropic_cache(key, table)?;
                 if let Some(value) = table.get("version") {
                     let key = format!("{key}.version");
                     let text = self.string(&key, value)?;

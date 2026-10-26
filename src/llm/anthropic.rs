@@ -89,6 +89,10 @@ pub(super) fn request(model: &Model, messages: &[Message], tools: &[Tool]) -> Re
     if !tools.is_empty() {
         body["tools"] = tools.iter().map(|tool| json!({"name":tool.name,"description":tool.description,"input_schema":tool.parameters})).collect();
     }
+    let ProtocolOptions::AnthropicMessages { cache, .. } = model.endpoint().options() else {
+        return Err(Error::Malformed);
+    };
+    super::cache::anthropic(model, &mut body, cache)?;
     Ok(body)
 }
 
@@ -104,6 +108,7 @@ struct Parser {
     blocks: Vec<Block>,
     stop: Option<Stop>,
     usage: Usage,
+    raw_usage: Value,
     result: Option<Step>,
 }
 
@@ -159,6 +164,7 @@ impl Parser {
                     return Err(Error::Malformed);
                 }
                 self.started = true;
+                self.raw_usage = message["usage"].clone();
                 self.usage = usage(&message["usage"]);
             }
             "content_block_start" => {
@@ -235,9 +241,23 @@ impl Parser {
                 {
                     self.stop = Some(reason(value)?);
                 }
-                // Anthropic's delta output count is cumulative, not additive.
-                if let Some(count) = value["usage"]["output_tokens"].as_u64() {
-                    self.usage.output = Some(count);
+                // All delta counters are cumulative. Overlay reports on the start
+                // snapshot so omitted fields survive without double-counting writes.
+                if let Some(delta) = value["usage"].as_object() {
+                    if !self.raw_usage.is_object() {
+                        self.raw_usage = json!({});
+                    }
+                    for (key, count) in delta {
+                        if let (Some(existing), Some(nested)) = (
+                            self.raw_usage.get_mut(key).and_then(Value::as_object_mut),
+                            count.as_object(),
+                        ) {
+                            existing.extend(nested.clone());
+                        } else {
+                            self.raw_usage[key] = count.clone();
+                        }
+                    }
+                    self.usage = usage(&self.raw_usage);
                 }
             }
             "message_stop" => {
@@ -287,15 +307,7 @@ fn reason(value: &Value) -> Result<Stop, Error> {
 }
 
 fn usage(value: &Value) -> Usage {
-    let input = value["input_tokens"].as_u64().map(|input| {
-        input
-            .saturating_add(value["cache_creation_input_tokens"].as_u64().unwrap_or(0))
-            .saturating_add(value["cache_read_input_tokens"].as_u64().unwrap_or(0))
-    });
-    Usage {
-        input,
-        output: value["output_tokens"].as_u64(),
-    }
+    Usage::anthropic(value)
 }
 
 fn complete(blocks: Vec<Value>, stop: Stop, usage: Usage) -> Result<Step, Error> {

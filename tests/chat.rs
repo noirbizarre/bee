@@ -345,7 +345,7 @@ async fn streaming_text_and_usage_are_assembled_without_a_json_fallback() {
         ),
         event(
             "",
-            json!({"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":4}})
+            json!({"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":4,"prompt_tokens_details":{"cached_tokens":3,"cache_write_tokens":0}}})
         )
     );
     let server = Server::start(vec![Response::sse(stream)]);
@@ -365,6 +365,14 @@ async fn streaming_text_and_usage_are_assembled_without_a_json_fallback() {
     assert_eq!(text, "héllo");
     assert_eq!(step.stop, Stop::MaxTokens);
     assert_eq!(step.usage.output, Some(4));
+    let bee::llm::CacheUsage::OpenAi {
+        cached, written, ..
+    } = &step.usage.cache[0]
+    else {
+        panic!("native cache usage expected")
+    };
+    assert_eq!(cached.tokens, Some(3));
+    assert_eq!(written.tokens, Some(0));
 }
 
 #[tokio::test]

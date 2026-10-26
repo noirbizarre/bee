@@ -115,9 +115,15 @@ impl InferenceHttp {
         let routed;
         #[cfg(test)]
         let url = if let Some(route) = &self.test_route {
-            // Exercise the real wire adapter while keeping production's fixed OAuth audience.
-            assert_eq!(url, "https://api.openai.com/v1/responses");
-            routed = format!("{route}/responses");
+            // Preserve official endpoint identity for capability checks while exercising
+            // the real adapter against a credential-free local test server.
+            let suffix = match url {
+                "https://api.openai.com/v1/responses" => "/responses",
+                "https://api.openai.com/v1/chat/completions" => "/chat/completions",
+                "https://api.anthropic.com/v1/messages" => "/v1/messages",
+                _ => panic!("test route requires a known official endpoint"),
+            };
+            routed = format!("{route}{suffix}");
             routed.as_str()
         } else {
             url

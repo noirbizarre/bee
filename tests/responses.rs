@@ -11,7 +11,7 @@ fn message(text: &str) -> Value {
 }
 
 fn completed(items: Vec<Value>) -> Value {
-    json!({"id":"response-1","status":"completed","output":items,"usage":{"input_tokens":5,"output_tokens":2}})
+    json!({"id":"response-1","status":"completed","output":items,"usage":{"input_tokens":5,"output_tokens":2,"input_tokens_details":{"cached_tokens":3,"cache_write_tokens":1,"cache_write_tokens_details":{"ttl_30m_tokens":1,"ttl_12h_tokens":0}}}})
 }
 
 fn stream(items: Vec<Value>, delta: bool) -> String {
@@ -81,6 +81,19 @@ async fn streamed_text_is_not_duplicated_by_the_terminal_response() {
     assert_eq!(text, "héllo");
     assert_eq!(step.stop, Stop::End);
     assert_eq!(step.usage.input, Some(5));
+    let bee::llm::CacheUsage::OpenAi {
+        cached,
+        written,
+        ttl_30m,
+        ttl_12h,
+    } = &step.usage.cache[0]
+    else {
+        panic!("native cache usage expected")
+    };
+    assert_eq!(cached.tokens, Some(3));
+    assert_eq!(written.tokens, Some(1));
+    assert_eq!(ttl_30m.tokens, Some(1));
+    assert_eq!(ttl_12h.tokens, Some(0));
     let request = server.request();
     assert!(request.head.starts_with("POST /prefix/responses "));
     assert!(request.head.contains("authorization: Bearer key"));
