@@ -149,8 +149,8 @@ impl Protocol {
 ///
 /// Only a reference: resolving it, and any secret handling, is `auth`'s
 /// (ADR-008). It says *where* the secret is, never how a request presents it:
-/// that is the protocol's business. Adding a source kind later is a new variant
-/// and a new accepted key.
+/// that depends on the protocol and native authentication mode. Adding a source
+/// kind later is a new variant and a new accepted key.
 #[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CredentialSource {

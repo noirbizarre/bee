@@ -190,9 +190,11 @@ not the provider's automatic caching.
 
 ## Authentication
 
-A connection's `credential` says where its secret comes from. It is separate from the `protocol` (which only decides how
-the secret is presented: `Authorization: Bearer` for `openai-chat` and `openai-responses`, `x-api-key` for
-`anthropic-messages`) and from the model. Exactly one source, or none:
+A connection's `credential` says where its secret comes from, independently of the protocol and model. Ordinary protocol
+defaults present it as `Authorization: Bearer` for `openai-chat` and `openai-responses`, or `x-api-key` for
+`anthropic-messages`. Native authentication can override that presentation: Copilot's `auth = "github"` uses
+`Authorization: Bearer` for all three protocols, including Messages, without an `x-api-key` header.
+Exactly one source, or none:
 
 ```toml
 credential = { env = "OPENROUTER_API_KEY" }            # a variable in the environment that launches Bee

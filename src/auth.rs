@@ -8,11 +8,13 @@
 //! - [`CredentialStore`] and [`FileStore`]: where `bee auth login` keeps what
 //!   it obtains, in a private file.
 //! - [`resolve`]: fixed-credential lookup; [`chatgpt`] owns renewable sessions.
-//! - [`header_for`]: how a protocol presents that secret.
+//! - [`header_for`]: the ordinary protocol defaults for presenting that secret.
 //!
 //! Authentication is configured apart from the protocol and the models: a
-//! profile may use any protocol with any source, and the protocol only decides
-//! how the resolved secret is *presented*. LLM provider credentials and MCP
+//! profile may use any protocol with any source. Protocols supply default secret
+//! presentation; native authentication can override it. In particular, Copilot
+//! uses bearer authentication across all three protocols, including Messages.
+//! LLM provider credentials and MCP
 //! server authorization are different audiences and are stored apart
 //! ([`Audience`]), so a token for one can never be returned for the other. See
 //! ADR-008.
@@ -784,10 +786,10 @@ pub fn resolve(
     }
 }
 
-/// The header that presents `secret` to an endpoint speaking `protocol`.
+/// The default header that presents `secret` to an endpoint speaking `protocol`.
 ///
-/// The protocol decides this, not the credential source: a key from the
-/// environment and one from a browser sign-in are presented identically.
+/// The credential source does not change this default. Native authentication
+/// modes can override it; Copilot requests use bearer authentication even for Messages.
 #[must_use]
 pub fn header_for(protocol: Protocol, secret: &Secret) -> (&'static str, Secret) {
     match protocol {
