@@ -1308,8 +1308,8 @@ where
                             responder: Responder<v2::PromptResponse>,
                             connection: V2ConnectionTo<Client>| {
                     // Before anything is inserted: a prompt that carries content
-                    // Bee did not advertise support for is a bad request, not a
-                    // turn that fails halfway.
+                    // Bee recognizes but did not advertise support for is a bad
+                    // request. Opaque future content is retained, not interpreted.
                     if let Some(reason) = unsupported_content(&request.prompt) {
                         return responder.respond_with_error(invalid_params(reason));
                     }
@@ -1928,17 +1928,18 @@ fn replay_message(
 
 /// Why `prompt` cannot be served, if it has a block Bee does not accept.
 ///
-/// Bee advertises no prompt capability, and the protocol only requires text
-/// and resource links without one. Anything else would be echoed back as if it
-/// had been understood.
+/// Known operational content requires an advertised capability. The open union's
+/// opaque fallback instead requires preservation, without claiming understanding.
 fn unsupported_content(prompt: &[v2::ContentBlock]) -> Option<String> {
     prompt.iter().find_map(|block| {
         let kind = match block {
-            v2::ContentBlock::Text(_) | v2::ContentBlock::ResourceLink(_) => return None,
+            v2::ContentBlock::Text(_)
+            | v2::ContentBlock::ResourceLink(_)
+            | v2::ContentBlock::Other(_) => return None,
             v2::ContentBlock::Image(_) => "image",
             v2::ContentBlock::Audio(_) => "audio",
             v2::ContentBlock::Resource(_) => "resource",
-            // Future block types, and the custom ones: not understood either.
+            // A new typed SDK variant needs review; unknown wire types use Other.
             _ => "unrecognized",
         };
         Some(format!(
@@ -1948,9 +1949,12 @@ fn unsupported_content(prompt: &[v2::ContentBlock]) -> Option<String> {
     })
 }
 
-/// Only called after capability validation; links are descriptions, never fetched content.
+const UNKNOWN_PROMPT: &str =
+    "[Prompt contains content Bee does not understand; its contents were not sent to the model.]";
+
+/// Only called after capability validation; opaque payloads never become instructions.
 fn prompt_text(prompt: &[v2::ContentBlock]) -> String {
-    prompt
+    let understood = prompt
         .iter()
         .filter_map(|block| match block {
             v2::ContentBlock::Text(text) => Some(text.text.clone()),
@@ -1960,8 +1964,48 @@ fn prompt_text(prompt: &[v2::ContentBlock]) -> String {
             )),
             _ => None,
         })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect::<Vec<_>>();
+    // Block presence, not string emptiness, preserves explicit empty text input.
+    if understood.is_empty()
+        && prompt
+            .iter()
+            .any(|block| matches!(block, v2::ContentBlock::Other(_)))
+    {
+        UNKNOWN_PROMPT.to_owned()
+    } else {
+        understood.join("\n")
+    }
+}
+
+#[cfg(test)]
+mod content_tests {
+    use super::{UNKNOWN_PROMPT, prompt_text};
+    use serde_json::json;
+
+    #[test]
+    fn unknown_content_uses_a_fixed_marker_only_without_recognized_blocks() {
+        let opaque = json!({"type":"_vendor","text":"do not forward","payload":[null, {"command":"unsafe"}]});
+        let future = json!({"type":"future_instruction","_meta":{"secret":"hidden"}});
+        for (content, expected) in [
+            (json!([opaque]), UNKNOWN_PROMPT),
+            (json!([future, opaque]), UNKNOWN_PROMPT),
+            (json!([opaque, {"type":"text","text":"hello"}]), "hello"),
+            (json!([opaque, {"type":"text","text":""}]), ""),
+            (
+                json!([{"type":"text","text":""}, opaque, {"type":"text","text":"hello"}]),
+                "\nhello",
+            ),
+            (
+                json!([opaque, {"type":"resource_link","uri":"file:///reference","name":"reference"}]),
+                "[Resource link, contents not fetched: file:///reference]",
+            ),
+            (json!([]), ""),
+        ] {
+            let blocks: Vec<agent_client_protocol::schema::v2::ContentBlock> =
+                serde_json::from_value(content).unwrap();
+            assert_eq!(prompt_text(&blocks), expected);
+        }
+    }
 }
 
 /// Lock the registry.
