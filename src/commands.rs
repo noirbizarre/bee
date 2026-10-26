@@ -376,8 +376,7 @@ mod tests {
             std::fs::create_dir_all(project_config_path(&project).parent().unwrap()).unwrap();
             std::fs::write(
                 project_config_path(&project),
-                "[providers.or]\nprotocols = { openai-chat = {} }\n\
-                 credential = { store = true, login = \"openrouter\" }\n",
+                "[providers.or]\npreset = \"openrouter\"\n",
             )
             .unwrap();
             let env = Environment::new(None, Some(dir.path().join("home")), None);
@@ -394,6 +393,16 @@ mod tests {
 
         /// Run `bee auth login` and return what it wrote to stderr.
         fn login(&self, args: LoginArgs, open: &dyn Fn(&str), input: &str) -> (Result<()>, String) {
+            self.login_with_http(args, open, input, &KeyGiver)
+        }
+
+        fn login_with_http(
+            &self,
+            args: LoginArgs,
+            open: &dyn Fn(&str),
+            input: &str,
+            http: &dyn Http,
+        ) -> (Result<()>, String) {
             let env = Environment::new(None, None, None);
             let store = self.store();
             let (mut out, mut err) = (Vec::new(), Vec::new());
@@ -404,7 +413,7 @@ mod tests {
                     env: &env,
                     providers: &self.providers,
                     store,
-                    http: &KeyGiver,
+                    http,
                     login_http: &bee::http::AsyncLoginHttp,
                     timeout: Duration::from_secs(5),
                     open,
@@ -542,6 +551,93 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(stored.secret().expose(), "my-token");
+    }
+
+    #[rstest::rstest]
+    #[case::expired_code(403)]
+    #[case::provider_failure(500)]
+    fn a_failed_openrouter_reauthorization_preserves_the_previous_key(#[case] status: u16) {
+        struct Refused(u16);
+        impl Http for Refused {
+            fn post_json(
+                &self,
+                _: &str,
+                _: &str,
+            ) -> std::result::Result<HttpResponse, Unreachable> {
+                Ok(HttpResponse {
+                    status: self.0,
+                    body: "secret-provider-response".into(),
+                })
+            }
+        }
+        let fixture = Fixture::new();
+        fixture
+            .login(args(true, false, false), &|_| {}, KEY)
+            .0
+            .unwrap();
+
+        let (result, output) = fixture.login_with_http(
+            args(false, true, false),
+            &|_| {},
+            "secret-expired-code",
+            &Refused(status),
+        );
+
+        let error = result.unwrap_err();
+        assert!(matches!(error, bee::Error::AuthExchangeFailed { .. }));
+        let diagnostic = format!("{output}{error:?}{error}");
+        for secret in [KEY, "secret-expired-code", "secret-provider-response"] {
+            assert!(!diagnostic.contains(secret));
+        }
+        assert_eq!(
+            fixture
+                .store()
+                .get(Audience::Provider("or"))
+                .unwrap()
+                .unwrap()
+                .secret()
+                .expose(),
+            KEY
+        );
+    }
+
+    #[test]
+    fn an_openrouter_denial_preserves_the_previous_key() {
+        let fixture = Fixture::new();
+        fixture
+            .login(args(true, false, false), &|_| {}, KEY)
+            .0
+            .unwrap();
+        let open = |url: &str| {
+            let url = reqwest::Url::parse(url).unwrap();
+            let callback = url
+                .query_pairs()
+                .find(|(name, _)| name == "callback_url")
+                .unwrap()
+                .1
+                .into_owned();
+            let port = reqwest::Url::parse(&callback).unwrap().port().unwrap();
+            std::thread::spawn(move || {
+                let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+                write!(stream, "GET /callback?error=access_denied HTTP/1.1\r\n\r\n").unwrap();
+                let _ = stream.read_to_string(&mut String::new());
+            });
+        };
+
+        let (result, output) = fixture.login(args(false, false, false), &open, "");
+
+        assert!(matches!(result, Err(bee::Error::AuthDenied)));
+        assert!(!output.contains(KEY));
+        assert_eq!(
+            fixture
+                .store()
+                .get(Audience::Provider("or"))
+                .unwrap()
+                .unwrap()
+                .secret()
+                .expose(),
+            KEY
+        );
     }
 
     #[cfg(unix)]

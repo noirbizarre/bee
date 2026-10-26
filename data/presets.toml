@@ -14,6 +14,7 @@
 # A `pkce-key` flow: an authorization-code flow with PKCE (RFC 7636, S256) whose
 # exchange returns a credential (an API key), not an access and refresh token.
 # The names are the provider's own query parameters and JSON fields.
+# Official protocol and API-key lifecycle: docs/adr/021-openrouter-authentication.md.
 [login_flows.openrouter]
 kind = "pkce-key"
 authorize_url = "https://openrouter.ai/auth"
