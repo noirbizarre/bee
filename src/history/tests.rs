@@ -1,4 +1,149 @@
 use super::*;
+
+#[tokio::test]
+async fn presentation_recovery_terminalizes_interrupted_work_without_committing_model_context() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(root.path().join("state")).unwrap();
+    let (id, handle) = store.create(snapshot()).await.unwrap();
+    handle
+        .accept(1, serde_json::json!([{"type":"text","text":"work"}]))
+        .await
+        .unwrap();
+    for event in [
+        crate::presentation::Event::Accepted {
+            id: "tool-1-1".into(),
+            name: "bash".into(),
+            kind: "execute".into(),
+            locations: Vec::new(),
+            input: serde_json::json!({}),
+        },
+        crate::presentation::Event::Started {
+            id: "tool-1-1".into(),
+        },
+        crate::presentation::Event::Artifact {
+            id: "tool-1-1".into(),
+            artifact: crate::presentation::Artifact::TerminalStarted {
+                command: "command".into(),
+                cwd: root.path().into(),
+            },
+        },
+        crate::presentation::Event::Artifact {
+            id: "tool-1-1".into(),
+            artifact: crate::presentation::Artifact::TerminalOutput(vec![255, 0, 42]),
+        },
+    ] {
+        handle.presentation(1, event, || {}).await.unwrap().unwrap();
+    }
+    handle.release().await.unwrap();
+    let (_, restored, interrupted) = store.attach(&id).await.unwrap();
+    assert!(interrupted);
+    restored.recover().await.unwrap();
+    let updates = restored
+        .run(|journal, _| {
+            assert!(journal.projection.snapshot.messages.is_empty());
+            Ok(journal.projection.presentation.snapshots())
+        })
+        .await
+        .unwrap();
+    assert_eq!(updates[0]["output"]["data"], "/wAq");
+    assert_eq!(updates[0]["exitStatus"], serde_json::json!({}));
+    assert_eq!(updates[1]["status"], "failed");
+    restored.release().await.unwrap();
+}
+
+#[rstest::rstest]
+#[case(false)]
+#[case(true)]
+#[tokio::test]
+async fn failed_presentation_writes_never_publish_and_terminal_write_failures_reconcile_on_recovery(
+    #[case] fail_finish: bool,
+) {
+    let (_root, store, id, handle) = create().await;
+    handle.accept(1, json!([])).await.unwrap();
+    let event = crate::presentation::Event::Accepted {
+        id: "tool-1-1".into(),
+        name: "read".into(),
+        kind: "read".into(),
+        locations: Vec::new(),
+        input: json!({}),
+    };
+    if fail_finish {
+        handle
+            .presentation(1, event.clone(), || {})
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    handle
+        .run(|journal, _| {
+            journal.fault = Some(Fault::BeforeWrite);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    if fail_finish {
+        assert!(handle.finish(1, "completed", None).await.is_err());
+    } else {
+        let published = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = published.clone();
+        assert!(
+            handle
+                .presentation(1, event, move || {
+                    observed.store(true, Ordering::SeqCst);
+                })
+                .await
+                .unwrap()
+                .is_err()
+        );
+        assert!(!published.load(Ordering::SeqCst));
+    }
+    handle.release().await.unwrap();
+    let (_, restored, _) = store.attach(&id).await.unwrap();
+    restored.recover().await.unwrap();
+    let updates = restored
+        .run(|journal, _| Ok(journal.projection.presentation.snapshots()))
+        .await
+        .unwrap();
+    assert_eq!(updates.len(), usize::from(fail_finish));
+    if fail_finish {
+        assert_eq!(updates[0]["status"], "failed");
+    }
+}
+
+#[tokio::test]
+async fn tool_replay_reserves_all_bytes_before_any_history_is_published() {
+    let (_root, _, _, handle) = create().await;
+    handle.accept(1, json!([])).await.unwrap();
+    handle
+        .presentation(
+            1,
+            crate::presentation::Event::Accepted {
+                id: "tool-1-1".into(),
+                name: "read".into(),
+                kind: "read".into(),
+                locations: Vec::new(),
+                input: json!({}),
+            },
+            || {},
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    handle.finish(1, "cancelled", None).await.unwrap();
+    let budget = Arc::new(ReplayBudget::new(Settings::default()));
+    budget.0.store(1, Ordering::SeqCst);
+    assert!(
+        handle
+            .replay_all(
+                budget,
+                |_| panic!("partial messages"),
+                |_, _| panic!("partial plans"),
+                |_| panic!("partial tools")
+            )
+            .await
+            .is_err()
+    );
+}
 use journal::{Fault, Reader};
 use serde_json::json;
 
@@ -270,7 +415,7 @@ async fn incomplete_creations_are_not_published_to_the_session_listing() {
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(first["version"], 4);
+    assert_eq!(first["version"], 5);
     assert_eq!(first["seq"], 0);
     assert_eq!(first["event"]["id"], id);
 }

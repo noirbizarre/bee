@@ -42,6 +42,9 @@ fn limit() -> usize {
 }
 
 impl Tool for Glob {
+    fn kind(&self) -> &'static str {
+        "search"
+    }
     type Input = Input;
     type Output = Output;
     fn target(&self, input: &Input) -> Option<super::Target> {

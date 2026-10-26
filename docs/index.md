@@ -21,7 +21,7 @@ Cancelled, failed and refused turns do not enter model context.
 Prompts accept text and resource links, represented as references without fetching their contents.
 
 The bounded SDK-free loop supports injected function executors. Normal ACP sessions advertise and execute the native
-`bash`, `read`, `glob`, `grep`, `list`, `write`, and `edit` tools across all three backends,
+`bash`, `read`, `glob`, `grep`, `list`, `write`, `edit`, `delete`, `move`, and `copy` tools across all three backends,
 using each session's working directory.
 Client-hosted MCP tools are discovered and invoked through ACPv2's `session.mcp.acp` transport alongside the native
 catalog. The client supplies server attachments and enforces permissions. See [tools](tools.md) for the contracts,

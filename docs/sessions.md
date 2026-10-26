@@ -23,9 +23,11 @@ Unix directories use mode 0700; journal and lock files use mode 0600. Windows di
 owner-only DACLs inherited by files. Existing unsafe permissions are refused.
 History is not encrypted at rest: it contains prompts, assistant answers,
 successful tool results, native continuation and committed instruction/skill snapshots.
+It also contains retained tool presentation, committed mutation receipts, and bounded raw terminal output.
 
-There is **no automatic age, message-count or disk-size expiry**. Model-context eviction does not remove
-the visible transcript. `session/close` detaches the session; it does not delete it. Session deletion is not
+There is **no automatic disk-size expiry**. Model-context eviction does not remove
+visible messages or plans; tool/terminal presentation has its separate bounded retention policy below.
+`session/close` detaches the session; it does not delete it. Session deletion is not
 advertised. For manual removal, first close the session and stop any Bee process that owns it, then remove
 that session's entire directory. Do not edit individual journal/lock files while attached. Ordinary tools can inspect
 or archive the JSONL; a reader of an active journal must accept only its complete record prefix.
@@ -53,7 +55,8 @@ The version 1 event types are:
 
 Version 2 adds `plan_updated` events. Version 3 makes profile ownership explicit in the immutable `session_created`
 snapshot. Version 4 adds account-bound automatic-selection state and explicit-selection-required guards to creation and
-settings records. Writers emit version 4; readers also accept versions 1–3, whose missing selection state means the
+settings records. Version 5 adds `presentation` delta events for tool/terminal observations and receipt-space reservations.
+Writers emit version 5; readers also accept versions 1–4, whose missing selection state means the
 original explicit/default behavior and whose missing profile means `default`. New records can append to legacy journals
 without rewriting their prefix. Older binaries reject newer versions rather than ignoring profile ownership or guards.
 
@@ -142,11 +145,47 @@ messages while leaving their visible transcript intact. Successful native tool-c
 committed guidance snapshots survive restart. Provider/model selection survives; provider configuration and
 credentials are resolved from current configuration when inference next runs.
 
-Replay sends historical user/assistant messages and latest execution-plan snapshots.
+Replay sends historical user/assistant messages, latest execution-plan snapshots, and retained tool/terminal snapshots.
 It does not execute tools, query providers, request
 permissions, reopen login flows or restore previous MCP authority. Tool calls/results retained for model
-continuation are data, not executable restoration instructions. Existing live behavior does not emit ACP
-tool-lifecycle updates, so restoration does not invent historical tool events.
+continuation are data, not executable restoration instructions. Legacy journals without tool observations
+do not acquire invented historical tool events.
+
+## Tool and terminal retention
+
+Tool cards, committed changes, and terminal bytes are visible history independent of successful
+model context. They survive failure/cancellation and whole-turn context eviction. Production
+persists observations before publishing them; embedded memory sessions retain them for the runtime's
+lifetime. Filesystem publication and journal persistence are separate boundaries: cancellation or
+a later storage failure does not roll back a mutation. A crash between publication and recording
+its receipt can leave an interrupted operation with an unknown filesystem outcome.
+
+Retained presentation is bounded to 8 MiB per turn, with cleanup headroom, and 32 MiB or 128 completed
+presentation turns per session. At most 1024 cards are admitted per turn. Oldest completed whole
+presentation turns are evicted together, preserving terminal-reference dependencies. Reduction and
+eviction are deterministic during both live execution and recovery. Messages and plans retain their
+existing policies; the append-only physical journal has no automatic disk compaction/expiry.
+
+Each terminal retains a 256 KiB byte prefix; patches are at most 256 KiB. Displayed input, raw result,
+and readable result fields each have 256 KiB encoded bounds. Oversized previews explicitly truncate;
+infeasible patches are omitted without losing operation/path facts. Committed receipt reservations
+precede mutations; oversized operations fail before publication. All queued history shares the 4 MiB
+pending-output bound, and replay includes conservative framing/base64 accounting in the existing
+cumulative connection budget.
+
+Start replay sends full replacement tool snapshots and authoritative terminal byte snapshots, not
+historical chunks. Terminal definitions precede their references, with stable IDs in turn/first-seen
+order. Repeated replay replaces rather than appends content. It describes retained entity state;
+existing full assistant-message aggregation does not reconstruct exact original text/tool interleaving.
+Active replay and subsequent live output share one serialized publication boundary. State-only resume
+does not replay these entities.
+
+Before terminal idle, unfinished tools become cancelled on session cancellation or failed on other
+interruption; completed tools and committed changes remain intact. Terminals without observed exit
+details receive an exited-unknown object after process cleanup. Turn completion atomically reconciles
+durable snapshots; interrupted recovery applies the same reduction without rerunning execution.
+Storage failure suppresses ordinary uncommitted content but best-effort closes visible entities before
+error idle; those fallback updates do not claim durability. Recovery uses the last valid journal prefix.
 
 ## Execution-plan retention
 

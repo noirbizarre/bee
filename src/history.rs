@@ -641,6 +641,56 @@ async fn blocking<T: Send + 'static>(
 }
 
 impl Handle {
+    pub(crate) fn presentation(
+        &self,
+        turn: u64,
+        event: crate::presentation::Event,
+        emit: impl FnOnce() + Send + 'static,
+    ) -> tokio::sync::oneshot::Receiver<Result<()>> {
+        let (send, receive) = tokio::sync::oneshot::channel();
+        let bytes = serde_json::to_vec(&event)
+            .map_or(usize::MAX / 4, |v| v.len().saturating_mul(2))
+            .saturating_add(256);
+        if let Err(error) = self.healthy() {
+            let _ = send.send(Err(error));
+            return receive;
+        }
+        if self
+            .0
+            .queued
+            .fetch_add(bytes, Ordering::AcqRel)
+            .saturating_add(bytes)
+            > 4 * 1024 * 1024
+        {
+            self.0.queued.fetch_sub(bytes, Ordering::AcqRel);
+            let failure = error(&self.0.path, "history output queue is full");
+            self.fail(failure.clone());
+            let _ = send.send(Err(failure));
+            return receive;
+        }
+        let handle = self.clone();
+        if self
+            .0
+            .sender
+            .send(Job::Run(Box::new(move |journal| {
+                let result = handle.healthy().and_then(|()| {
+                    journal.append(Event::Presentation { turn, event })?;
+                    emit();
+                    Ok(())
+                });
+                if let Err(failure) = &result {
+                    handle.fail(failure.clone());
+                }
+                handle.0.queued.fetch_sub(bytes, Ordering::AcqRel);
+                let _ = send.send(result);
+            })))
+            .is_err()
+        {
+            self.0.queued.fetch_sub(bytes, Ordering::AcqRel);
+            self.fail(error(&self.0.path, "history worker stopped"));
+        }
+        receive
+    }
     /// Ephemeral state publication shares replay's lane, not its journal.
     pub(crate) fn enqueue(&self, emit: impl FnOnce() + Send + 'static) -> Result<()> {
         let emit = Arc::new(Mutex::new(Some(emit)));
@@ -926,11 +976,22 @@ impl Handle {
         self.replay_with_plans(budget, emit, |_, _| Ok(())).await
     }
 
+    #[cfg(test)]
     pub(crate) async fn replay_with_plans(
+        &self,
+        budget: Arc<ReplayBudget>,
+        emit: impl FnMut(Message) -> Result<()> + Send + 'static,
+        emit_plan: impl FnMut(u64, crate::plan::Entries) -> Result<()> + Send + 'static,
+    ) -> Result<()> {
+        self.replay_all(budget, emit, emit_plan, |_| Ok(())).await
+    }
+
+    pub(crate) async fn replay_all(
         &self,
         budget: Arc<ReplayBudget>,
         mut emit: impl FnMut(Message) -> Result<()> + Send + 'static,
         mut emit_plan: impl FnMut(u64, crate::plan::Entries) -> Result<()> + Send + 'static,
+        mut emit_presentation: impl FnMut(serde_json::Value) -> Result<()> + Send + 'static,
     ) -> Result<()> {
         self.run(move |journal, _| {
             if journal.projection.transcript_bytes > budget.0.load(Ordering::Acquire) {
@@ -953,10 +1014,19 @@ impl Handle {
                     .checked_add(plan_replay_bytes(plan)?)
                     .ok_or_else(ReplayBudget::exhausted)?;
             }
+            let presentation = journal.projection.presentation.snapshots();
+            for update in &presentation {
+                bytes = bytes
+                    .checked_add(update.to_string().len() + 256)
+                    .ok_or_else(ReplayBudget::exhausted)?;
+            }
             budget.reserve(bytes)?;
             journal.for_each_message(&mut emit)?;
             for (turn, plan) in &journal.projection.plans {
                 emit_plan(*turn, plan.clone())?;
+            }
+            for update in presentation {
+                emit_presentation(update)?;
             }
             Ok(())
         })

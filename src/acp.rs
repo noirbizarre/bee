@@ -26,6 +26,7 @@ use crate::{Error, Result};
 mod interactions;
 mod mcp;
 mod plans;
+mod presentation;
 
 #[cfg(all(test, unix))]
 mod oauth_tests;
@@ -242,6 +243,8 @@ pub struct Reply {
     selection_failure: Arc<Mutex<Option<crate::selection::Reason>>>,
     preferences: crate::selection::Store,
     plan: Arc<Mutex<Option<crate::plan::Entries>>>,
+    presentation: Arc<Mutex<presentation::Ledger>>,
+    presentation_history: Option<crate::history::Handle>,
     mcp: Arc<Mutex<mcp::Bindings>>,
     servers: Vec<mcp::Server>,
     interactions: Arc<Mutex<interactions::State>>,
@@ -571,8 +574,10 @@ async fn inference(
     let cancellation = tokio_util::sync::CancellationToken::new();
     // ACP owns the terminal update; dropping its future also signals tool observers.
     let _guard = cancellation.clone().drop_guard();
+    let artifacts = reply.clone();
     let context = crate::tool::Context::new(cwd, cancellation, crate::tool::MAX_OUTPUT_BYTES)
-        .map_err(|error| TurnFailure::new(error.to_string()))?;
+        .map_err(|error| TurnFailure::new(error.to_string()))?
+        .with_artifacts(move |id, artifact| artifacts.artifact(id, artifact));
     if runtime
         .tools
         .definitions()
@@ -600,7 +605,7 @@ async fn inference(
         connection: &reply.connection,
         bindings: &reply.mcp,
     };
-    let outcome = crate::agent::run_with_guidance(
+    let outcome = crate::agent::run_observed(
         &model,
         messages,
         executor.definitions(),
@@ -608,6 +613,7 @@ async fn inference(
         &mut |text| reply.text(text),
         runtime.limits,
         guidance,
+        Some(&reply),
     )
     .await
     .map_err(|error| {
@@ -1105,9 +1111,14 @@ where
                                 let replay_id = request.session_id.clone();
                                 let plan_connection = updates.clone();
                                 let plan_id = request.session_id.clone();
-                                if let Err(error) = handle.replay_with_plans(replay_budget, move |message| replay_message(&replay_connection, &replay_id, message), move |turn, plan| {
+                                let presentation_connection = updates.clone();
+                                let presentation_id = request.session_id.clone();
+                                if let Err(error) = handle.replay_all(replay_budget, move |message| replay_message(&replay_connection, &replay_id, message), move |turn, plan| {
                                     send_update(&plan_connection, &plan_id, plans::update(turn, plan))
                                         .map_err(|_| crate::history::Error { path: "<session plan>".into(), reason: "cannot restore execution plan", help: "reconnect and resume the session" })
+                                }, move |value| {
+                                    send_update(&presentation_connection, &presentation_id, presentation::update(value))
+                                        .map_err(|_| crate::history::Error { path: "<session tools>".into(), reason: "cannot restore tool presentation", help: "reconnect and resume the session" })
                                 }).await {
                                     return responder.respond_with_error(history_error(error));
                                 }
@@ -1144,12 +1155,15 @@ where
                         // Always replace, including an empty list: old routes are not authorization.
                         lock(&mcp).sessions.insert(id.clone(), servers);
                         if matches!(request.replay_from, Some(v2::ReplayFrom::Start(_))) {
+                            let presentation_state = sessions.presentation(&id);
+                            let presentation = lock(&presentation_state);
+                            let tool_updates = presentation.snapshots();
                             let plan_bytes = sessions.plans(&id).try_fold(0usize, |bytes, (_, plan)| {
                                 bytes.checked_add(crate::history::plan_replay_bytes(plan)?).ok_or(crate::history::Error {
                                     path: "<session plan>".into(), reason: "plan replay exceeds the byte budget", help: "increase the history replay byte budget",
                                 })
                             });
-                            if let Err(error) = plan_bytes.and_then(|bytes| replay_budget.reserve(bytes)) {
+                            if let Err(error) = plan_bytes.and_then(|bytes| replay_budget.reserve(bytes.saturating_add(tool_updates.iter().map(|v| v.to_string().len() + 256).sum::<usize>()))) {
                                 return responder.respond_with_error(history_error(error));
                             }
                             if let Err(error) = replay_budget.reserve_messages(sessions.transcript(&id)) {
@@ -1162,6 +1176,9 @@ where
                             }
                             for (turn, plan) in sessions.plans(&id) {
                                 send_update(&connection, &request.session_id, plans::update(turn, plan.clone()))?;
+                            }
+                            for value in tool_updates {
+                                send_update(&connection, &request.session_id, presentation::update(value))?;
                             }
                         }
                         // The session keeps what the client chose before it
@@ -1409,10 +1426,12 @@ where
                         let _ = history.enqueue(publish_acceptance);
                     } else { publish_acceptance(); }
 
+                    let retained_presentation = lock(&sessions).presentation(&id);
+                    let presentation_history = lock(&sessions).history(&id);
                     let reply = Reply {
                         sessions: Arc::clone(&sessions),
                         connection: connection.clone(),
-                        id,
+                        id: id.clone(),
                         session_id,
                         message_id: turn.agent_message_id,
                         token: turn.token,
@@ -1425,6 +1444,8 @@ where
                         selection_failure: Arc::new(Mutex::new(None)),
                         preferences,
                         plan: Arc::new(Mutex::new(None)),
+                        presentation: Arc::new(Mutex::new(presentation::Ledger::new(retained_presentation))),
+                        presentation_history,
                         mcp: Arc::clone(&mcp),
                         servers,
                         interactions: Arc::clone(&interactions),
@@ -1670,6 +1691,7 @@ where
     let token = reply.token;
     let completed = Arc::clone(&reply.completed);
     let plan = Arc::clone(&reply.plan);
+    let presentation = Arc::clone(&reply.presentation);
     let selected_protocol = Arc::clone(&reply.protocol);
     let used = Arc::clone(&reply.used);
     let selection_failure = Arc::clone(&reply.selection_failure);
@@ -1797,6 +1819,13 @@ where
     }
     let publish = move || {
         let mut sessions = lock(&sessions);
+        for update in presentation::finish(
+            &presentation,
+            token,
+            matches!(stop_reason, v2::StopReason::Cancelled),
+        ) {
+            let _ = send_update(&connection, &session_id, update);
+        }
         lock(&interactions).waiting.remove(&id);
         if let Some(plan) = lock(&plan).as_mut()
             && plan.cancel_unfinished()

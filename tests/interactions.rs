@@ -151,7 +151,7 @@ async fn only_an_offered_bash_approval_can_create_a_file(#[case] outcome: &'stat
                     if let Some(request) = requests.first() {
                         assert_eq!(request["sessionId"], session.to_string());
                         assert_eq!(request["subject"]["cwd"], root.path().to_str().unwrap());
-                        assert_eq!(request["subject"]["toolCallId"], "call-1");
+                        assert_eq!(request["subject"]["toolCallId"], "tool-1-1");
                         assert_eq!(request["options"][0]["kind"], "allow_once");
                         assert_eq!(request["options"][1]["kind"], "reject_once");
                     }
@@ -202,7 +202,7 @@ async fn form_answers_are_validated_before_reaching_the_model(#[case] action: &'
                             _| {
                     let request = serde_json::to_value(request).unwrap();
                     assert_eq!(request["mode"], "form");
-                    assert_eq!(request["toolCallId"], "call-1");
+                    assert_eq!(request["toolCallId"], "tool-1-1");
                     assert_eq!(request["requestedSchema"]["required"], json!(["answer"]));
                     if action == "error" {
                         return responder
@@ -988,8 +988,13 @@ async fn stopping_pending_interactions_cleans_up_before_idle_and_isolates_sessio
                         v2::SessionUpdate::UserMessage(_)
                     ));
                 }
+                let mut snapshot = updates.recv().await.unwrap().update;
+                if start {
+                    assert!(matches!(snapshot, v2::SessionUpdate::ToolCallUpdate(_)));
+                    snapshot = updates.recv().await.unwrap().update;
+                }
                 assert!(matches!(
-                    updates.recv().await.unwrap().update,
+                    snapshot,
                     v2::SessionUpdate::StateUpdate(v2::StateUpdate::RequiresAction(_))
                 ));
                 let other = connection

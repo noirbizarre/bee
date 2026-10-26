@@ -81,6 +81,9 @@ pub struct Output {
 }
 
 impl Tool for Grep {
+    fn kind(&self) -> &'static str {
+        "search"
+    }
     type Input = Input;
     type Output = Output;
 

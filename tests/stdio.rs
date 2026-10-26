@@ -345,10 +345,16 @@ fn a_new_process_restores_native_identity_transcript_selection_and_tool_context_
     );
     assert_eq!(second.recv()["result"]["sessions"][0]["sessionId"], session);
     let replay = second.resume(&session, root.path(), true);
-    assert_eq!(replay.len(), 3);
+    assert_eq!(replay.len(), 4);
     assert_eq!(replay[0]["params"]["update"]["messageId"], "user-1");
     assert_eq!(replay[0]["params"]["update"]["content"], prompt);
     assert_eq!(replay[1]["params"]["update"]["messageId"], "agent-1");
+    assert_eq!(
+        replay[2]["params"]["update"]["sessionUpdate"],
+        "tool_call_update"
+    );
+    assert_eq!(replay[2]["params"]["update"]["toolCallId"], "tool-1-1");
+    assert_eq!(replay[2]["params"]["update"]["content"][0]["type"], "diff");
     assert_eq!(
         replay[1]["params"]["update"]["content"][0]["text"],
         "durable answer"
@@ -972,17 +978,45 @@ fn bash_output_is_captured_without_corrupting_the_protocol_stream() {
     agent.send(&json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":std::env::temp_dir()}}));
     let session = agent.recv()["result"]["sessionId"].clone();
     agent.send(&json!({"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"text","text":"run"}]}}));
+    let mut terminal = None;
+    let mut referenced = false;
+    let mut output = Vec::new();
+    let mut exited = false;
     loop {
         // recv parses every stdout line, including any accidental child output.
         let message = agent.recv();
         if message["method"] == "session/request_permission" {
-            assert_eq!(message["params"]["subject"]["toolCallId"], "bash-call");
+            assert_eq!(message["params"]["subject"]["toolCallId"], "tool-1-1");
             agent.send(&json!({"jsonrpc":"2.0","id":message["id"],"result":{"outcome":{"outcome":"selected","optionId":"allow_once"}}}));
+        }
+        let update = &message["params"]["update"];
+        match update["sessionUpdate"].as_str() {
+            Some("terminal_update") => {
+                terminal = Some(update["terminalId"].clone());
+                exited |= update["exitStatus"].is_object();
+            }
+            Some("tool_call_content_chunk") if update["content"]["type"] == "terminal" => {
+                assert_eq!(Some(update["content"]["terminalId"].clone()), terminal);
+                referenced = true;
+            }
+            Some("terminal_output_chunk") => {
+                use base64::Engine;
+                assert_eq!(Some(update["terminalId"].clone()), terminal);
+                output.extend(
+                    base64::engine::general_purpose::STANDARD
+                        .decode(update["data"].as_str().unwrap())
+                        .unwrap(),
+                );
+            }
+            _ => {}
         }
         if message["params"]["update"]["state"] == "idle" {
             break;
         }
     }
+    assert!(referenced && exited);
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("child-stdout") && output.contains("child-stderr"));
     server.request();
     let result = server.request().body["messages"].to_string();
     assert!(result.contains("child-stdout"));
@@ -991,6 +1025,84 @@ fn bash_output_is_captured_without_corrupting_the_protocol_stream() {
     let (status, stderr) = agent.finish();
     assert!(status.success());
     assert!(stderr.is_empty());
+}
+
+#[test]
+fn every_file_change_operation_is_serialized_as_standard_v2_diff_content() {
+    let root = tempfile::tempdir().unwrap();
+    let calls = [
+        ("write", json!({"path":"original","content":"old\n"})),
+        (
+            "edit",
+            json!({"path":"original","old_text":"old","new_text":"new"}),
+        ),
+        ("copy", json!({"source":"original","destination":"copied"})),
+        ("move", json!({"source":"copied","destination":"moved"})),
+        ("delete", json!({"path":"moved"})),
+        ("delete", json!({"path":42})),
+    ];
+    let mut responses = calls.iter().enumerate().map(|(i,(name,args))| support::Response::json(json!({"choices":[{"index":0,"message":{"tool_calls":[{"id":format!("call-{i}"),"type":"function","function":{"name":name,"arguments":args.to_string()}}]},"finish_reason":"tool_calls"}]}))).collect::<Vec<_>>();
+    responses.push(support::Response::json(support::chat_text("done")));
+    let server = support::Server::start(responses);
+    let mut agent = Agent::configured(&format!(
+        "[providers.test]\nmodel='test'\nprotocols={{openai-chat={{base_url='{}'}}}}",
+        server.url
+    ));
+    agent.initialize(1);
+    agent
+        .send(&json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":root.path()}}));
+    let session = agent.recv()["result"]["sessionId"].clone();
+    agent.send(&json!({"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"text","text":"work"}]}}));
+    let messages = agent.until_idle();
+    let diffs = messages
+        .iter()
+        .filter_map(|m| {
+            let update = &m["params"]["update"];
+            (update["sessionUpdate"] == "tool_call_content_chunk"
+                && update["content"]["type"] == "diff")
+                .then_some(update)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(diffs.len(), 5);
+    for (index, operation) in ["add", "modify", "copy", "move", "delete"]
+        .iter()
+        .enumerate()
+    {
+        assert_eq!(diffs[index]["toolCallId"], format!("tool-1-{}", index + 1));
+        assert_eq!(
+            diffs[index]["content"]["changes"][0]["operation"],
+            *operation
+        );
+        assert!(
+            std::path::Path::new(
+                diffs[index]["content"]["changes"][0]["path"]
+                    .as_str()
+                    .unwrap()
+            )
+            .is_absolute()
+        );
+        if cfg!(windows) && *operation == "delete" {
+            assert!(
+                diffs[index]["content"].get("patch").is_none(),
+                "Windows has no authoritative executable mode"
+            );
+        } else {
+            assert_eq!(diffs[index]["content"]["patch"]["format"], "git_patch");
+            assert!(
+                diffs[index]["content"]["patch"]["text"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("diff --git \"")
+            );
+        }
+    }
+    assert!(
+        messages
+            .iter()
+            .any(|m| m["params"]["update"]["toolCallId"] == "tool-1-6"
+                && m["params"]["update"]["status"] == "failed")
+    );
+    assert!(agent.finish().0.success());
 }
 
 #[rstest::rstest]
@@ -1097,10 +1209,13 @@ fn configured_turn_limits_reach_real_stdio_inference() {
         names,
         [
             "bash",
+            "copy",
+            "delete",
             "edit",
             "glob",
             "grep",
             "list",
+            "move",
             "read",
             "update_plan",
             "write"
@@ -1208,7 +1323,7 @@ fn context_truncation_reports_committed_history_and_failures_leave_it_intact_ove
         .find(|message| message["role"] == "user")
         .unwrap();
     assert_eq!(user["content"], first);
-    let recovered = server.request().body.to_string();
+    let recovered = server.request().body["messages"].to_string();
     assert!(recovered.contains("first-answer"));
     assert!(!recovered.contains("oversized"));
     let trimmed = server.request().body.to_string();

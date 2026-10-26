@@ -31,6 +31,11 @@ SDK and bridge versions are pinned because the enabled `unstable_protocol_v2` an
 and SDK are the implementation source of truth; the independently versioned TCK may
 expose additional compatibility requirements. Updating one does not update the others.
 
+The #71 tool-presentation implementation retains this specification revision. Relevant draft changes
+were rechecked against official main `9eaeebbe4dbadb6f3eed74aca41758960e75c6c4`: its clarification
+that adjacent tool text chunks may render continuously is compatible with the pinned append semantics.
+Its newer initialization version-negotiation rules are separate from this presentation implementation.
+
 The three official tags `v1.12.0`, `schema-v1.26.0` and `schema-v2.0.0-alpha.9` resolve to
 the specification commit above. These are independent version namespaces: schema crate `1.12.0`
 does not mean wire version 1, and SDK `3.5.0` does not mean wire version 3.
@@ -131,7 +136,7 @@ All methods in this table are client → agent; updates are agent → client.
 | `session/list`, cwd filter | Partially supported | Returns IDs/cwd in creation order, including production sessions after restart; exact cwd filtering. Single page, no titles/timestamps. [Listing tests][test-session], [history tests][test-stdio]. |
 | List `cursor` / `nextCursor` pagination | Planned | Any supplied cursor is currently rejected because Bee never issues one. [#74](https://github.com/noirbizarre/bee/issues/74); `list_with_a_cursor_is_rejected_because_bee_never_issues_one` in [tests/session.rs][test-session]. |
 | `session/resume`, current-state synchronization | Implemented and supported | Requires original cwd/known identity. Omitted/null `replayFrom` sends current state before response; active state remains active. [Session][test-session] and [cancellation tests][test-cancel]. |
-| Start replay and stable message/plan identity | Implemented and supported | `replayFrom: {"type":"start"}` sends retained full messages, latest plans, then current state; no execution replay. Unknown/malformed cursors rejected; cumulative replay budget can reject a whole replay. [Restart/replay tests][test-stdio], [plans][test-plans], [retention contract](sessions.md). |
+| Start replay and stable entity identity | Implemented and supported | `replayFrom: {"type":"start"}` sends retained full messages, latest plans and tool/terminal snapshots, then current state; no execution replay. Unknown/malformed cursors rejected; cumulative replay budget can reject a whole replay. `tests/stdio.rs`, `tests/tool_presentation.rs`, [retention contract](sessions.md). |
 | Durable sessions and exclusive attachment | Implemented and supported | Production survives restarts; one OS-lock owner, explicit corruption/storage failures. Embedded runtimes default to memory. [Process tests][test-stdio], [session history](sessions.md). Durability has no separate v2 capability flag. |
 | Profile-scoped session ownership | Implemented and supported | Listing is limited to the active profile; cross-profile resume and removed selected connections fail before recovery/replay. `profile_ownership_isolates_history_and_models_across_process_restarts` in [wire tests][test-stdio]. This is local session policy, not an additional ACP capability. |
 | `session/close` | Implemented and supported | Detaches rather than deletes. Active work/requests are cleaned up and terminal idle precedes response. Known closed sessions are idempotent; unknown IDs fail. [Close tests][test-cancel], [session tests][test-session]. |
@@ -182,10 +187,11 @@ All update names below are values of agent → client `session/update.sessionUpd
 
 | Feature | Status | Behavior, limitation and evidence / tracking |
 | --- | --- | --- |
-| `tool_call_update` | Planned | No creation/status/input/output/location updates emitted today. Covers tool kinds (`read`, `edit`, `delete`, `move`, `search`, `execute`, `think`, `fetch`, `switch_mode`, `other`) and pending/in-progress/completed/failed/cancelled presentation. [#71](https://github.com/noirbizarre/bee/issues/71). |
-| `tool_call_content_chunk`; tool `content` blocks | Planned | Tool execution results reach the model but do not stream as ACP tool-card content. [#71](https://github.com/noirbizarre/bee/issues/71), [current execution tests][test-e2e]. |
-| Tool `diff` content | Planned | Native writes/edits do not emit structured changes or git patches. Add/delete/modify/move/copy display operations are tracked in [#71](https://github.com/noirbizarre/bee/issues/71). |
-| `terminal_update`, `terminal_output_chunk`; tool `terminal` references | Planned | Bash executes locally without agent-owned ACP terminal presentation. [#71](https://github.com/noirbizarre/bee/issues/71); distinct from removed v1 client terminal RPCs. |
+| `tool_call_update` | Implemented and supported | Correlated pending/in_progress/completed/failed/cancelled cards for native/MCP calls, bounded inputs/results, implementation-owned kinds, and known absolute locations. Emits read/edit/delete/move/search/execute/other; think/fetch/switch_mode are not current producers. Turn-qualified IDs also correlate permissions/forms. Evidence: `tests/tool_presentation.rs`, `tests/interactions.rs`, `tests/mcp_integration.rs`. |
+| `tool_call_content_chunk`; tool `content` blocks | Implemented and supported | Bounded text/JSON result content, diffs and terminal references; full replacement content on replay. Complete MCP envelopes remain model-facing; rich multimodal presentation is separate #81. Evidence: `tests/tool_presentation.rs`, `tests/mcp_integration.rs`, `tests/stdio.rs`. |
+| Tool `diff` content | Implemented and supported | Committed add/delete/modify/move/copy operations from native write/edit/delete/move/copy, including directories and partial deletion. Optional bounded git_patch with absolute Git-quoted paths; no patch for unavailable/binary/large/directory-tree content. Bash/MCP output is not interpreted as mutation evidence. Evidence: `every_file_change_operation_is_serialized_as_standard_v2_diff_content` in `tests/stdio.rs`, `src/presentation/patch.rs`, `src/tool/tree.rs`. |
+| `terminal_update`, `terminal_output_chunk`; tool `terminal` references | Implemented and supported | Agent-owned Bash process observation: independent base64 raw-byte chunks, bounded prefix snapshots, command/cwd and actual or unknown exit details. No input/resize/process-control RPCs. Evidence: `raw_terminal_bytes_and_cancelled_tool_are_published_before_idle` in `tests/tool_presentation.rs`, `bash_output_is_captured_without_corrupting_the_protocol_stream` in `tests/stdio.rs`. |
+| Tool/terminal retention, recovery and cancellation | Implemented and supported | Visible state survives failed turns, context eviction and restart. Full snapshot replay is idempotent; unfinished entities close before idle/close and reconcile on recovery. Bounds and append-only disk policy: [session contract](sessions.md#tool-and-terminal-retention). Evidence: `tests/tool_presentation.rs`, `src/history/tests.rs`, `src/presentation.rs`, `tests/stdio.rs`. |
 | `plan_update`, `plan.type: items` | Implemented and supported | Standard ordered full replacement under a turn-owned `planId`; empty snapshots clear entries. High/medium/low priorities and pending/in_progress/completed/cancelled states. [Plan tests][test-plans], [plan implementation][plan-code]. |
 | Plan finalization, retention and replay | Implemented and supported | Unfinished entries become cancelled before terminal idle, even on normal end. Latest snapshots survive failure, eviction and production restart. Bounded to 128 entries, 4096 bytes/entry, 64 KiB aggregate. [Plan tests][test-plans], [wire restart test][test-stdio]. |
 
@@ -353,6 +359,8 @@ Paths below are relative to the repository root.
 | Session new/list/close/resume, cwd checks, invalid IDs and settings | `tests/session.rs`, `tests/selection.rs`, `tests/stdio.rs` |
 | Prompt acceptance, echoed message IDs, running/text/terminal ordering | `tests/session.rs`, `tests/e2e.rs` |
 | Itemized plans, full replacement, statuses, cancellation/failure, memory/durable replay | `tests/plans.rs`, across all three inference protocols |
+| Tool lifecycle, five diff operations, directory guidance, raw terminal bytes, active/idempotent memory/durable replay | `tests/tool_presentation.rs`, all three inference protocols for native mutation cycles; `tests/mcp_integration.rs` for MCP |
+| Exact tool/diff/terminal wire shapes and process-restart tool snapshots | `tests/stdio.rs`; bounded reduction, patch applicability, mutation races, partial cancellation and storage faults in module tests |
 | Exact serialized plan notifications, process restart and interrupted recovery without reexecution | `tests/stdio.rs`; storage faults and replay budgets in history unit tests |
 | Streaming before the provider completes | Gated SSE response in `tests/e2e.rs`; provider adapter suites |
 | Active resume reports running/requires_action, idle resume reports idle | `tests/cancel.rs`, `tests/session.rs`, `tests/interactions.rs` |
@@ -404,7 +412,7 @@ model speed. Every exchange has a deadline and subprocesses are cleaned up on fa
 Run the main compatibility tests with:
 
 ```sh
-cargo test --test e2e --test stdio --test acp --test session --test cancel --test inference --test mcp_integration --test interactions --test plans --test selection
+cargo test --test e2e --test stdio --test acp --test session --test cancel --test inference --test mcp_integration --test interactions --test plans --test tool_presentation --test selection
 mise run ci
 ```
 
@@ -438,6 +446,30 @@ CI provisions Python 3.14 with uv and selects it for both the runner and nested 
 The TCK launches a fresh Bee process per test with an isolated cwd, HOME and configuration. Its cancellation
 prompt deliberately holds a model response pending; it does not use a live provider.
 Additional arguments are passed to the TCK. The runner preserves the TCK exit code.
+
+### #71 implementation verification: 2026-10-26
+
+On Linux, against the #71 implementation working tree on `feat/acp-tool-lifecycle`:
+
+These test runs preceded the submission-review corrections for encoded patch bounds, executable deletion
+modes, and Windows directory unlinking. The corrections and added regressions were compiled/linted;
+the test suites were not rerun during submission, as requested by the maintainer.
+
+- `mise run ci` passed: **983 tests**, formatting, Clippy, spelling, workflow/Markdown linting,
+  and the documentation build.
+- `cargo test -j 2` passed: **986 tests including 3 documentation tests**.
+- `mise run test:compatibility` passed: **86 passed, 39 skipped, 0 failed** using the pinned TCK above.
+  Its fixture still returns text-only answers, so tool/terminal/permission scenarios remain outside
+  that run's evidence. Bee's production and serialized-wire suites provide those assertions.
+- Isolated production tree/patch modules type-checked for Windows MSVC and macOS ARM64 using a
+  lightweight harness without TLS dependencies. Full cross-target checks were blocked in the existing
+  `aws-lc-sys` C build by this Linux host's missing platform C toolchains; this is not a native-platform test run.
+
+The new evidence includes all five committed diff operations, directory guidance before side effects,
+native/MCP lifecycle correlation, raw terminal bytes and active replay, cancellation/close ordering,
+idempotent memory/durable replay, restart recovery, mutation races/partial deletion, and storage failure
+after execution without publishing uncommitted results. Test names and exact supported subsets are recorded
+in the tool/terminal rows above. This does not establish complete ACP conformance or a real Hive UI run.
 
 ### Recorded result: 2026-10-26
 

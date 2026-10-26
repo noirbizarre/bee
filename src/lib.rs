@@ -24,6 +24,7 @@ pub mod llm;
 pub mod login;
 pub mod models;
 mod plan;
+pub mod presentation;
 pub mod preset;
 mod profile;
 pub mod provider;

@@ -30,6 +30,9 @@ pub struct Output {
 }
 
 impl Tool for Edit {
+    fn kind(&self) -> &'static str {
+        "edit"
+    }
     type Input = Input;
     type Output = Output;
     fn target(&self, input: &Input) -> Option<super::Target> {
@@ -93,7 +96,19 @@ impl Tool for Edit {
         result.push_str(&input.new_text);
         result.push_str(&source.bytes[start + input.old_text.len()..]);
         let staged = mutation::Staged::new(&target, &result, context).await?;
+        context.emit(crate::presentation::Artifact::Reserve(
+            crate::presentation::PATCH_BYTES + target.path.as_os_str().len() * 6 + 1024,
+        ))?;
         staged.publish(&target, Some(&source), context)?;
+        mutation::receipt(
+            context,
+            "modify",
+            &target.path,
+            None,
+            false,
+            Some(&source.bytes),
+            Some(&result),
+        )?;
         Ok(Output {
             bytes_written: size,
         })

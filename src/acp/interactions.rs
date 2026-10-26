@@ -246,7 +246,7 @@ impl Reply {
             call.arguments["command"].as_str().ok_or(Error::Tool)?,
             cwd,
         )
-        .tool_call_id(v2::ToolCallId::new(call.id.clone()));
+        .tool_call_id(v2::ToolCallId::new(self.tool_id(call)));
         let request = v2::RequestPermissionRequest::new(
             self.session_id.clone(),
             "Run Bash command",
@@ -303,7 +303,7 @@ impl Reply {
         let request = v2::CreateElicitationRequest::new(
             v2::ElicitationFormMode::new(
                 v2::ElicitationSessionScope::new(self.session_id.clone())
-                    .tool_call_id(v2::ToolCallId::new(call.id.clone())),
+                    .tool_call_id(v2::ToolCallId::new(self.tool_id(call))),
                 v2::ElicitationSchema::new().property(
                     "answer",
                     v2::StringPropertySchema::new()
@@ -382,6 +382,12 @@ impl Native<'_> {
 }
 
 impl crate::agent::Executor for Native<'_> {
+    fn description(&self, call: &Call) -> crate::presentation::Description {
+        self.inner.description(call)
+    }
+    fn targets(&self, call: &Call) -> Vec<crate::tool::Target> {
+        self.inner.targets(call)
+    }
     fn output_limit(&self) -> usize {
         self.inner.output_limit()
     }

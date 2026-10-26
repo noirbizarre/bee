@@ -13,7 +13,7 @@ use super::{Message, Result, Snapshot, error, open_options, open_private_file};
 // A corrupt/malicious line must not allocate the size of the entire journal.
 // This bounds one record, not transcript length or the number of sessions.
 pub(super) const MAX_RECORD_BYTES: usize = 64 * 1024 * 1024;
-const VERSION: u32 = 4;
+const VERSION: u32 = 5;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -46,6 +46,10 @@ pub(super) enum Event {
     PlanUpdated {
         turn: u64,
         plan: crate::plan::Entries,
+    },
+    Presentation {
+        turn: u64,
+        event: crate::presentation::Event,
     },
     TurnFinished {
         turn: u64,
@@ -134,7 +138,7 @@ fn decode(line: &[u8], seq: u64, path: &Path) -> Result<Event> {
         serde_json::from_slice(line).map_err(|_| error(path, "invalid complete journal record"))?;
     // Existing journals remain readable; older binaries reject new records by
     // version instead of interpreting an extended event contract as v1.
-    if !matches!(record.version, 1 | 2 | 3 | VERSION) {
+    if !matches!(record.version, 1 | 2 | 3 | 4 | VERSION) {
         return Err(error(
             path,
             "unsupported session history version; use a compatible Bee version",
@@ -189,6 +193,12 @@ fn decode(line: &[u8], seq: u64, path: &Path) -> Result<Event> {
         {
             return Err(error(path, "invalid session profile ownership"));
         }
+    }
+    if record.version < 5 && matches!(event, Event::Presentation { .. }) {
+        return Err(error(
+            path,
+            "tool presentation requires session history version 5",
+        ));
     }
     if record.version == 1 && matches!(event, Event::PlanUpdated { .. }) {
         return Err(error(
@@ -250,6 +260,7 @@ pub(super) struct Projection {
     pub(super) transcript_bytes: usize,
     pub(super) created: u64,
     pub(super) plans: std::collections::BTreeMap<u64, crate::plan::Entries>,
+    pub(super) presentation: crate::presentation::State,
 }
 
 fn portable(messages: &mut [crate::llm::Message]) {
@@ -281,6 +292,7 @@ impl Projection {
             active: None,
             transcript_bytes: 0,
             plans: Default::default(),
+            presentation: Default::default(),
             created,
         })
     }
@@ -353,6 +365,14 @@ impl Projection {
                     .checked_add(text.len())
                     .ok_or_else(invalid)?;
             }
+            Event::Presentation { turn, event } => {
+                if self.active != Some(*turn) {
+                    return Err(invalid());
+                }
+                self.presentation
+                    .apply(*turn, event)
+                    .map_err(|_| invalid())?;
+            }
             Event::PlanUpdated { turn, plan } => {
                 if self.active != Some(*turn) || !plan.valid() {
                     return Err(invalid());
@@ -399,6 +419,8 @@ impl Projection {
                     plan.cancel_unfinished();
                 }
                 self.active = None;
+                self.presentation
+                    .finish(*turn, *outcome == Outcome::Cancelled);
             }
         }
         Ok(())

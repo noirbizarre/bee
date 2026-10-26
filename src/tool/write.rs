@@ -30,6 +30,9 @@ pub struct Output {
 }
 
 impl Tool for Write {
+    fn kind(&self) -> &'static str {
+        "edit"
+    }
     type Input = Input;
     type Output = Output;
     fn target(&self, input: &Input) -> Option<super::Target> {
@@ -56,8 +59,25 @@ impl Tool for Write {
                 "Destination already exists; inspect it and set overwrite:true only if replacement is intended.",
             ));
         }
+        // Patch capture is best-effort: overwriting binary/large files remains supported.
+        let before = target
+            .exists()
+            .then(|| target.snapshot(context).ok())
+            .flatten();
+        context.emit(crate::presentation::Artifact::Reserve(
+            crate::presentation::PATCH_BYTES + target.path.as_os_str().len() * 6 + 1024,
+        ))?;
         let staged = mutation::Staged::new(&target, &input.content, context).await?;
         staged.publish(&target, None, context)?;
+        mutation::receipt(
+            context,
+            if target.exists() { "modify" } else { "add" },
+            &target.path,
+            None,
+            false,
+            before.as_ref().map(|s| s.bytes.as_str()),
+            Some(&input.content),
+        )?;
         Ok(Output {
             bytes_written: input.content.len(),
         })

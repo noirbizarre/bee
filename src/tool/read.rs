@@ -47,6 +47,9 @@ pub struct Output {
 }
 
 impl Tool for Read {
+    fn kind(&self) -> &'static str {
+        "read"
+    }
     type Input = Input;
     type Output = Output;
 
