@@ -148,10 +148,12 @@ items are never shortened or split. If the protected turn plus tool definitions 
 the turn fails with `bee::llm::context_limit` before another HTTP request. A tool may already have performed side
 effects before its result makes the next request too large; context management cannot roll those effects back.
 
-Truncation changes the working copy only. Successful non-refused completion commits that reduced history; failure,
-cancellation or refusal leaves previously committed history intact. This bounds model history when configured,
-without keeping a separate full transcript. It does not summarize removed interaction or rewrite client-visible
-message history. Close/resume retains the remaining context within the connection.
+Truncation changes the working copy only. Successful non-refused completion commits that reduced model history;
+failure, cancellation or refusal leaves previously committed context intact. This bounds model history when configured,
+without summarizing removed interaction or rewriting the separate client-visible transcript. Production sessions retain
+visible history and successful model context across close/resume and process restarts; whole-turn context eviction does
+not delete visible messages. Embedded runtimes default to memory storage unless history is explicitly enabled.
+See [transcript versus model context](sessions.md#transcript-versus-model-context) for retention and replay boundaries.
 
 ### Usage and overflow reporting
 
