@@ -3,8 +3,53 @@
 Bee's SDK-free `tool` module defines typed native operations, their advertised
 schemas, and their execution context. `agent::NativeExecutor` connects a registry
 to the bounded inference loop. Normal ACP sessions advertise and execute the
-shipped `bash`, `read`, `glob`, `grep`, `list`, `write`, and `edit` tools. Their execution base is the session cwd,
+shipped `bash`, `read`, `glob`, `grep`, `list`, `write`, `edit`, `delete`, `move`, and `copy` tools.
+Their execution base is the session cwd,
 not the launch directory used to load configuration.
+
+## Tool and terminal presentation
+
+Native and client-hosted MCP calls produce standard ACP v2 `tool_call_update` upserts
+and `tool_call_content_chunk` append events. Bee assigns session-unique, turn-qualified
+IDs, also used by permissions and forms; provider call/result IDs are preserved separately.
+Calls are announced before interactions or execution, then progress from `pending` through
+`in_progress` to `completed`, `failed`, or `cancelled`. Invalid arguments and guidance-deferred
+calls have visible failure results. Invalid whole batches never execute. Ordinary tool failures
+remain recoverable model input. Fatal errors/panics close unfinished cards as failed; cancellation
+closes them as cancelled before idle. Already committed changes remain visible.
+
+Bee emits `read`, `edit`, `delete`, `move`, `search`, `execute`, and `other` kinds.
+`copy` uses `edit`, because ACP defines no copy kind. Custom tools and MCP default to
+`other`; Bee does not infer semantic operations from names or arbitrary result JSON.
+Known native locations are absolute paths (up to 64 initial locations). Input, raw output,
+and readable result previews are bounded independently to 256 KiB of encoded presentation each.
+Truncation is explicit and never changes the model-facing result envelope.
+
+Successful mutations attach authoritative structured `diff` changes: add, modify, delete,
+move, and copy, including directory changes and old/new paths where applicable.
+Bounded text changes and individual file moves/copies include optional `git_patch` text.
+Patches use absolute Git-quoted paths without `a/` or `b/` prefixes, and `/dev/null` for
+missing sides. Whole-file replacement hunks preserve CRLF and missing final newlines.
+Binary, large, unavailable-before-image, and directory-tree patches may be omitted.
+Patch bounds include JSON escaping. Deletion patches preserve the source's known executable mode;
+Windows deletion omits the optional patch because that mode cannot be established from native metadata.
+Directory deletes report each actual removal, including partial execution. Bash/MCP results
+do not invent filesystem diffs, and edit no-ops do not claim changes.
+
+Bash creates an agent-owned display terminal only after successful spawn. The tool card
+references its stable `terminalId`; `terminal_update` carries command/cwd, output snapshots,
+and observed exit status. `terminal_output_chunk` carries independently base64-encoded raw
+bytes in observed stdout/stderr read order. Invalid UTF-8, NUL, and escape sequences are
+preserved; this is one observed stream, not a claim about exact cross-pipe write order.
+The model still receives separate lossy stdout/stderr results. These display entities do
+not expose process input, resize, control RPCs, or the removed v1 client terminal executor.
+
+Chunks are at most 8 KiB raw. Bee retains a 256 KiB prefix per terminal and continues
+draining discarded output, reporting omitted-byte counts in `bee.dev/output` metadata.
+Process exit and tool success are separate: a nonzero Bash exit retains the existing
+ordinary Bash-result contract. Cleanup without an observed exit uses an unknown-detail
+exit object, never a fabricated exit code or signal. Terminal cleanup and pending updates
+precede idle and direct-close responses. See [retention and replay](sessions.md#tool-and-terminal-retention).
 
 ## Execution plans
 
@@ -288,6 +333,53 @@ Reads/staging cooperate with cancellation at checkpoints; synchronous filesystem
 calls, including final validation, can block. Cancellation before publication leaves
 the target intact. Cancellation after publication can report a cancelled invocation
 even though a complete file change committed; it cannot roll back that change.
+
+### Built-in deletion, moves, and copies
+
+The shipped registry includes `bee::tool::delete::Delete`, `bee::tool::r#move::Move`,
+and `bee::tool::copy::Copy`:
+
+```json
+{"path":"obsolete.txt"}
+{"path":"obsolete-directory","recursive":true}
+{"source":"original","destination":"renamed"}
+{"source":"source-directory","destination":"copied-directory","recursive":true}
+```
+
+`delete` takes `path` and optional `recursive` (default false). Regular files and
+empty directories need no recursion opt-in; nonempty directories require it.
+`move` takes `source` and `destination`; `copy` additionally accepts `recursive`
+(default false), required for directories. Destinations are exact absent paths,
+not existing containing directories; parents must exist. Overwrite is unsupported.
+Results count committed entries as `entries_deleted`, `entries_moved`, or `entries_copied`.
+
+Each operation inspects a complete deterministic manifest before mutation. It includes
+hidden/ignored entries and nested instruction scopes; discovered guidance reaches the
+model before execution. Both source and projected destination scopes participate.
+Copying skill files does not activate skills. Final symlinks, recursively encountered
+symlinks/reparse points, special entries, and different-device subtrees are rejected.
+Ancestor symlink resolution follows the existing native path policy. Cwd remains an
+execution base, not a sandbox. Self/descendant destinations and deleting/moving a
+directory containing the session cwd are rejected.
+
+Limits are 10,000 entries, depth 64, a conservative 2 MiB manifest path estimate,
+a 1 MiB committed-receipt reservation, and 64 MiB of actual copied file bytes.
+Long paths can reach these byte bounds before the entry bound. Aggregate prepared manifests also cap entries.
+Presentation receipt space is reserved before mutation. File copying uses bounded
+buffers and independent files, preserving Unix ordinary permission bits without
+privilege bits; ownership, ACLs, xattrs, timestamps, and hard-link topology are not preserved.
+
+Copy stages the complete file/tree in the destination parent before one no-clobber
+publication. Move uses same-filesystem exclusive rename (Linux/macOS/Windows);
+unsupported exclusive rename or cross-filesystem moves fail with no copy/delete fallback.
+Windows directory removal requires POSIX deletion semantics so retained inspection handles do not
+leave children pending deletion and block removal of their ancestors.
+Source identity validation is optimistic, not filesystem snapshot isolation.
+Recursive delete removes only planned entries in postorder, stopping on cancellation,
+conflict, or error. It never recursively adopts newly added entries, never claims rollback,
+and retains receipts for each completed removal. Inspect remaining paths before retrying
+a partial failure. Copy staging is cleaned up on failure/drop; actual cleanup failures
+are reported on the tool card, and a process crash can leave staging for manual inspection.
 
 ### Built-in discovery
 

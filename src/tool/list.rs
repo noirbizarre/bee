@@ -31,6 +31,9 @@ fn limit() -> usize {
 }
 
 impl Tool for List {
+    fn kind(&self) -> &'static str {
+        "search"
+    }
     type Input = Input;
     type Output = Output;
     fn target(&self, input: &Input) -> Option<super::Target> {

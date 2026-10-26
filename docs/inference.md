@@ -248,7 +248,8 @@ even from unsuccessful turns, independently of context eviction. See [session hi
 The SDK-free `agent::run` accepts tool definitions and an injected `Executor`, with correlated call/result history.
 The [native tool contract](tools.md) provides typed schema validation, registration, bounded results, and
 `agent::NativeExecutor` for this seam.
-Normal ACP sessions advertise and execute the shipped `bash`, `read`, `glob`, `grep`, `list`, `write`, and `edit` tools
+Normal ACP sessions advertise and execute the shipped `bash`, `read`, `glob`, `grep`, `list`,
+`write`, `edit`, `delete`, `move`, and `copy` tools
 through this
 same interface.
 The boundary also supplies [`update_plan`](tools.md#execution-plans) to publish

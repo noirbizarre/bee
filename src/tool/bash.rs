@@ -237,12 +237,25 @@ async fn capture(
     bytes: &mut Vec<u8>,
     truncated: &mut bool,
     capacity: usize,
+    context: &Context,
+    observed: &std::sync::atomic::AtomicU64,
 ) -> std::io::Result<()> {
     let mut chunk = [0_u8; 8192];
     loop {
         let count = reader.read(&mut chunk).await?;
         if count == 0 {
             return Ok(());
+        }
+        let offset = observed.fetch_add(count as u64, std::sync::atomic::Ordering::Relaxed);
+        let keep = (crate::presentation::TERMINAL_BYTES as u64)
+            .saturating_sub(offset)
+            .min(count as u64) as usize;
+        if keep > 0 {
+            context
+                .emit(crate::presentation::Artifact::TerminalOutput(
+                    chunk[..keep].to_vec(),
+                ))
+                .map_err(|_| std::io::Error::other("terminal presentation failed"))?;
         }
         let keep = count.min(capacity - bytes.len());
         bytes.extend_from_slice(&chunk[..keep]);
@@ -252,7 +265,28 @@ async fn capture(
     }
 }
 
+struct Accounting<'a> {
+    context: &'a Context,
+    observed: &'a std::sync::atomic::AtomicU64,
+}
+
+impl Drop for Accounting<'_> {
+    fn drop(&mut self) {
+        // Abortable drops the reader futures before idle; retain omission accounting on that path too.
+        let omitted = self
+            .observed
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .saturating_sub(crate::presentation::TERMINAL_BYTES as u64);
+        let _ = self
+            .context
+            .emit(crate::presentation::Artifact::TerminalOmitted(omitted));
+    }
+}
+
 impl Tool for Bash {
+    fn kind(&self) -> &'static str {
+        "execute"
+    }
     type Input = Input;
     type Output = Output;
     fn name(&self) -> &str {
@@ -317,6 +351,13 @@ impl Tool for Bash {
                 .map(nix::unistd::Pid::from_raw),
             child,
         };
+        context.emit(crate::presentation::Artifact::TerminalStarted {
+            command: crate::presentation::bounded(
+                &input.command,
+                crate::presentation::CALL_BYTES / 4,
+            ),
+            cwd: context.cwd().to_path_buf(),
+        })?;
         let mut stdout = process.child.stdout.take().ok_or_else(execution)?;
         let mut stderr = process.child.stderr.take().ok_or_else(execution)?;
         // Six serialized bytes per input byte covers JSON controls and lossy UTF-8.
@@ -325,12 +366,31 @@ impl Tool for Bash {
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let (mut out_cut, mut err_cut) = (false, false);
         let mut timed_out = false;
+        let observed = std::sync::atomic::AtomicU64::new(0);
+        let accounting = Accounting {
+            context,
+            observed: &observed,
+        };
         let status;
         {
             let drain = async {
                 tokio::try_join!(
-                    capture(&mut stdout, &mut out, &mut out_cut, capacity),
-                    capture(&mut stderr, &mut err, &mut err_cut, capacity)
+                    capture(
+                        &mut stdout,
+                        &mut out,
+                        &mut out_cut,
+                        capacity,
+                        context,
+                        &observed
+                    ),
+                    capture(
+                        &mut stderr,
+                        &mut err,
+                        &mut err_cut,
+                        capacity,
+                        context,
+                        &observed
+                    )
                 )
             };
             let work = async {
@@ -362,6 +422,23 @@ impl Tool for Bash {
         };
         #[cfg(not(unix))]
         let signal = None;
+        drop(accounting);
+        context.emit(crate::presentation::Artifact::TerminalExited {
+            code: status.code().and_then(|code| u32::try_from(code).ok()),
+            signal: signal.and_then(|number| {
+                #[cfg(unix)]
+                {
+                    nix::sys::signal::Signal::try_from(number)
+                        .ok()
+                        .map(|s| s.to_string())
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = number;
+                    None
+                }
+            }),
+        })?;
         Ok(Output {
             stdout: String::from_utf8_lossy(&out).into_owned(),
             stderr: String::from_utf8_lossy(&err).into_owned(),

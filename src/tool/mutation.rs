@@ -74,8 +74,40 @@ fn same(left: &Metadata, right: &Metadata) -> bool {
 }
 
 pub(super) struct Target {
-    path: PathBuf,
+    pub(super) path: PathBuf,
     original: Option<Metadata>,
+}
+
+pub(super) fn receipt(
+    context: &Context,
+    operation: &str,
+    path: &std::path::Path,
+    source: Option<&std::path::Path>,
+    directory: bool,
+    old: Option<&str>,
+    new: Option<&str>,
+) -> Result<(), Failure> {
+    let patch = if directory {
+        None
+    } else {
+        crate::presentation::patch::generate(operation, path, source, old, new)
+    };
+    let text = old.or(new).is_some_and(|s| !s.contains('\0'));
+    context.emit(crate::presentation::Artifact::Changes(
+        vec![crate::presentation::Change {
+            operation: operation.into(),
+            path: path.into(),
+            old_path: source.map(Into::into),
+            file_type: if directory {
+                Some("directory".into())
+            } else if text {
+                Some("text".into())
+            } else {
+                None
+            },
+        }],
+        patch,
+    ))
 }
 
 pub(super) struct Snapshot {

@@ -107,14 +107,34 @@ async fn completion(
     updates: &mut tokio::sync::mpsc::UnboundedReceiver<v2::UpdateSessionNotification>,
 ) -> (v2::IdleStateUpdate, String) {
     let mut text = String::new();
+    let mut tool_states = std::collections::BTreeMap::new();
     loop {
-        let update = updates.recv().await.unwrap().update;
+        let notification = updates.recv().await.unwrap();
+        let session = notification.session_id.to_string();
+        let update = notification.update;
+        if let v2::SessionUpdate::ToolCallUpdate(tool) = &update {
+            let value = serde_json::to_value(tool).unwrap();
+            if let Some(status) = value["status"].as_str() {
+                tool_states.insert(
+                    (session.clone(), tool.tool_call_id.to_string()),
+                    status.to_owned(),
+                );
+            }
+        }
         if let v2::SessionUpdate::AgentMessageChunk(chunk) = &update
             && let v2::ContentBlock::Text(content) = &chunk.content
         {
             text.push_str(&content.text);
         }
         if let v2::SessionUpdate::StateUpdate(v2::StateUpdate::Idle(idle)) = update {
+            assert!(
+                tool_states
+                    .iter()
+                    .filter(|((id, _), _)| id == &session)
+                    .map(|(_, status)| status)
+                    .all(|status| matches!(status.as_str(), "completed" | "failed" | "cancelled")),
+                "unfinished MCP tool before idle"
+            );
             return (idle, text);
         }
     }
@@ -147,8 +167,14 @@ async fn production_inference_calls_a_client_hosted_tool_and_retains_its_structu
         )
         .build();
     let (tx, mut updates) = tokio::sync::mpsc::unbounded_channel();
+    let presentation = Arc::new(Mutex::new(Vec::new()));
+    let observed = presentation.clone();
     let client = Client.v2().on_receive_notification(
         async move |update: v2::UpdateSessionNotification, _| {
+            observed
+                .lock()
+                .unwrap()
+                .push(serde_json::to_value(&update.update).unwrap());
             tx.send(update).map_err(Error::into_internal_error)
         },
         agent_client_protocol::on_receive_notification!(),
@@ -194,6 +220,24 @@ async fn production_inference_calls_a_client_hosted_tool_and_retains_its_structu
     .unwrap()
     .unwrap();
     assert_eq!(*seen.lock().unwrap(), vec![arguments()]);
+    let presentation = presentation.lock().unwrap();
+    let statuses = presentation
+        .iter()
+        .filter(|u| u["sessionUpdate"] == "tool_call_update")
+        .collect::<Vec<_>>();
+    assert_eq!(statuses.len(), 3);
+    assert_eq!(statuses[0]["toolCallId"], "tool-1-1");
+    assert_eq!(statuses[0]["kind"], "other");
+    assert!(
+        statuses[0]["name"]
+            .as_str()
+            .unwrap()
+            .contains("echo.original")
+    );
+    assert_eq!(
+        statuses[2]["rawOutput"]["result"]["structuredContent"],
+        arguments()
+    );
     let first = http.request();
     assert!(
         first.body.to_string().contains("bash"),

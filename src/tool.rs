@@ -15,14 +15,18 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 pub mod bash;
+pub mod copy;
+pub mod delete;
 mod discovery;
 pub mod edit;
 mod fs;
 pub mod glob;
 pub mod grep;
 pub mod list;
+pub mod r#move;
 mod mutation;
 pub mod read;
+mod tree;
 pub mod write;
 
 /// Maximum serialized bytes per tool result, including its JSON envelope.
@@ -45,6 +49,9 @@ pub fn builtins_with_bash(settings: bash::Settings) -> Result<Registry, Error> {
     registry.register(list::List)?;
     registry.register(write::Write)?;
     registry.register(edit::Edit)?;
+    registry.register(delete::Delete)?;
+    registry.register(r#move::Move)?;
+    registry.register(copy::Copy)?;
     Ok(registry)
 }
 
@@ -78,12 +85,23 @@ pub enum Error {
 }
 
 /// Per-turn execution inputs, supplied by the session owner.
+type ArtifactSink = std::sync::Arc<
+    dyn Fn(&str, crate::presentation::Artifact) -> Result<(), Failure> + Send + Sync,
+>;
+type Prepared = std::sync::Arc<
+    std::sync::Mutex<BTreeMap<String, Result<std::sync::Arc<tree::Manifest>, Failure>>>,
+>;
+
+/// Per-turn execution inputs, supplied by the session owner.
 #[derive(Clone)]
 pub struct Context {
     read_snapshot: Option<std::sync::Arc<str>>,
     cwd: PathBuf,
     cancellation: CancellationToken,
     output_limit: usize,
+    artifact: Option<ArtifactSink>,
+    call_id: String,
+    prepared: Prepared,
 }
 
 impl Context {
@@ -104,6 +122,9 @@ impl Context {
             cwd: cwd.into(),
             cancellation,
             output_limit,
+            artifact: None,
+            call_id: String::new(),
+            prepared: Default::default(),
         })
     }
 
@@ -120,6 +141,26 @@ impl Context {
     /// Maximum serialized result bytes, including the envelope.
     pub fn output_limit(&self) -> usize {
         self.output_limit
+    }
+    pub(crate) fn with_artifacts(
+        mut self,
+        sink: impl Fn(&str, crate::presentation::Artifact) -> Result<(), Failure>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        self.artifact = Some(std::sync::Arc::new(sink));
+        self
+    }
+    pub(crate) fn for_call(&self, id: &str) -> Self {
+        let mut context = self.clone();
+        context.call_id = id.into();
+        context
+    }
+    pub(crate) fn emit(&self, artifact: crate::presentation::Artifact) -> Result<(), Failure> {
+        self.artifact
+            .as_ref()
+            .map_or(Ok(()), |sink| sink(&self.call_id, artifact))
     }
 }
 
@@ -157,7 +198,7 @@ pub enum Code {
 ///
 /// Messages may contain intentional model-facing details. They are never included
 /// in diagnostic formatting, debug output, or an error source chain.
-#[derive(Serialize, thiserror::Error)]
+#[derive(Clone, Serialize, thiserror::Error)]
 #[error("native tool failure ({code:?}); inspect the model-facing result")]
 pub struct Failure {
     code: Code,
@@ -184,6 +225,14 @@ impl fmt::Debug for Failure {
 
 /// Implement a native operation; registration erases only its concrete types.
 pub trait Tool: Send + Sync + 'static {
+    /// Display kind is owned by the implementation, not guessed from its name.
+    fn kind(&self) -> &'static str {
+        "other"
+    }
+    /// Additional affected scopes, including nested mutation directories.
+    fn targets(&self, input: &Self::Input, _context: &Context) -> Vec<Target> {
+        self.target(input).into_iter().collect()
+    }
     /// Input schema and decoder must describe the same object-shaped input.
     type Input: DeserializeOwned + JsonSchema + Send;
     /// Structured success data; serialization is bounded by the registry.
@@ -246,12 +295,22 @@ impl fmt::Debug for Output {
 type Execution<'a> = Pin<Box<dyn Future<Output = Output> + Send + 'a>>;
 
 trait Erased: Send + Sync {
+    fn kind(&self) -> &'static str;
+    fn targets(&self, arguments: Value, context: &Context) -> Vec<Target>;
     fn preflight(&self, arguments: Value) -> Result<(), Failure>;
     fn target(&self, arguments: Value) -> Option<Target>;
     fn execute<'a>(&'a self, arguments: Value, context: &'a Context) -> Execution<'a>;
 }
 
 impl<T: Tool> Erased for T {
+    fn kind(&self) -> &'static str {
+        Tool::kind(self)
+    }
+    fn targets(&self, arguments: Value, context: &Context) -> Vec<Target> {
+        serde_json::from_value(arguments)
+            .ok()
+            .map_or_else(Vec::new, |input| Tool::targets(self, &input, context))
+    }
     fn preflight(&self, arguments: Value) -> Result<(), Failure> {
         let input = serde_json::from_value(arguments).map_err(|_| {
             Failure::new(
@@ -296,6 +355,34 @@ pub struct Registry {
 }
 
 impl Registry {
+    pub(crate) fn targets(&self, name: &str, arguments: &Value, context: &Context) -> Vec<Target> {
+        self.entries
+            .get(name)
+            .filter(|e| e.validator.is_valid(arguments))
+            .map_or_else(Vec::new, |e| {
+                e.implementation.targets(arguments.clone(), context)
+            })
+    }
+    pub(crate) fn description(
+        &self,
+        name: &str,
+        arguments: &Value,
+        context: &Context,
+    ) -> crate::presentation::Description {
+        crate::presentation::Description {
+            name: name.into(),
+            kind: self
+                .entries
+                .get(name)
+                .map_or("other", |e| e.implementation.kind()),
+            locations: self
+                .targets(name, arguments, context)
+                .into_iter()
+                .filter_map(|t| fs::path(context, &t.path.to_string_lossy()).ok())
+                .take(64)
+                .collect(),
+        }
+    }
     /// Validate without executing so authorization never precedes input checks.
     pub(crate) fn preflight(&self, name: &str, arguments: &Value) -> Result<(), Failure> {
         let entry = self.entries.get(name).ok_or_else(|| {
@@ -417,6 +504,9 @@ impl Registry {
             cwd: context.cwd.clone(),
             cancellation: context.cancellation.child_token(),
             output_limit: context.output_limit,
+            artifact: context.artifact.clone(),
+            call_id: context.call_id.clone(),
+            prepared: context.prepared.clone(),
         };
         // Also signal observers when an outer Abortable drops this dispatch.
         let _guard = execution.cancellation.clone().drop_guard();

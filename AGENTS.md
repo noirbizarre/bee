@@ -21,7 +21,10 @@ turns are excluded from model context. Separate visible history retains unsucces
 full message upserts before current state. Private per-session JSONL journals and exclusive OS locks preserve identity
 across restarts without replaying execution. Embedded runtimes default to isolated memory storage. The SDK-free bounded
 loop supports configurable turn limits and injected tool executors; production ACP
-registers the native bash, read, glob, grep, list, write and edit tools with session-relative execution contexts.
+registers the native bash, read, glob, grep, list, write, edit, delete, move and copy tools
+with session-relative execution contexts.
+Standard tool lifecycles, committed structured diffs and agent-owned terminal bytes are bounded visible history,
+independent of successful context; unfinished execution presentation closes before idle and reconciles on recovery.
 Client-hosted MCP tools are discovered per prompt and invoked through ACP's MCP transport, with session-scoped
 attachments, offline schema validation and complete JSON result envelopes. The client owns permission policy.
 Production ACP requests permission for Bash only, adds `ask_user` for form-capable clients,
@@ -90,6 +93,7 @@ src/
 ├── agent.rs    bounded model/tool loop with an injected executor
 ├── context.rs  SDK-free context estimates, explicit budgets and whole-turn eviction
 ├── plan.rs     SDK-free bounded plan snapshots and unfinished-entry reconciliation
+├── presentation.rs SDK-free bounded tool/terminal snapshots, committed changes and replay reduction
 ├── instructions.rs scoped AGENTS.md, persistent payloads and transactional guidance
 ├── skills.rs   standard YAML skill metadata, deterministic discovery and configured roots
 ├── tool.rs     typed native tools, validation, execution context and registry

@@ -36,7 +36,8 @@ context overflow fails explicitly. Sessions survive process restart, and start r
 through normal ACP updates. See [session history](docs/sessions.md) for storage, retention and client restoration.
 Prompts accept text and resource links (references
 only, never fetched). The SDK-free loop supports injected function executors; production ACP executes native
-`bash`, `read`, `glob`, `grep`, `list`, `write`, and `edit` tools in each session's working directory.
+`bash`, `read`, `glob`, `grep`, `list`, `write`, `edit`, `delete`, `move`, and `copy` tools in each session's working directory.
+Standard ACP tool cards, committed file/directory diffs, and agent-owned Bash terminal output are retained for replay.
 It also discovers and invokes client-hosted MCP tools through ACPv2's `session.mcp.acp` transport, alongside native
 tools. The client owns MCP configuration and permission policy; denials are returned to the model as tool errors.
 Native Bash requests client permission before execution. Form-capable clients receive

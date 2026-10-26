@@ -76,6 +76,7 @@ pub(super) fn declarations(servers: Vec<v2::McpServer>) -> Result<Vec<Server>, &
 
 struct Route {
     server: v2::McpServerAcpId,
+    display: String,
     name: String,
     validator: jsonschema::Validator,
 }
@@ -236,6 +237,7 @@ impl Catalog {
                         alias,
                         Route {
                             server: server.id.clone(),
+                            display: server.name.clone(),
                             name: name.into(),
                             validator,
                         },
@@ -323,6 +325,24 @@ impl Composite<'_> {
 }
 
 impl Executor for Composite<'_> {
+    fn description(&self, call: &Call) -> crate::presentation::Description {
+        if let Some(route) = self.catalog.routes.get(&call.name) {
+            crate::presentation::Description {
+                name: format!("{} / {}", route.display, route.name),
+                kind: "other",
+                locations: Vec::new(),
+            }
+        } else {
+            self.native.description(call)
+        }
+    }
+    fn targets(&self, call: &Call) -> Vec<crate::tool::Target> {
+        if self.catalog.routes.contains_key(&call.name) {
+            Vec::new()
+        } else {
+            self.native.targets(call)
+        }
+    }
     fn output_limit(&self) -> usize {
         self.native.output_limit()
     }

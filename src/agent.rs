@@ -123,6 +123,18 @@ pub struct ToolResult {
 
 /// Implemented by a caller that owns actual tool execution.
 pub trait Executor: Send + Sync {
+    /// Implementation-owned presentation, without interpreting arbitrary output.
+    fn description(&self, call: &Call) -> crate::presentation::Description {
+        crate::presentation::Description {
+            name: call.name.clone(),
+            kind: "other",
+            locations: Vec::new(),
+        }
+    }
+    /// All affected scopes; default preserves existing custom executors.
+    fn targets(&self, call: &Call) -> Vec<crate::tool::Target> {
+        self.target(call).into_iter().collect()
+    }
     /// Bound synthesized guidance results by the same budget as native output.
     fn output_limit(&self) -> usize {
         crate::tool::MAX_OUTPUT_BYTES
@@ -181,6 +193,20 @@ impl<'a> NativeExecutor<'a> {
 }
 
 impl Executor for NativeExecutor<'_> {
+    fn description(&self, call: &Call) -> crate::presentation::Description {
+        self.registry.description(
+            &call.name,
+            &call.arguments,
+            &self.context.for_call(&call.id),
+        )
+    }
+    fn targets(&self, call: &Call) -> Vec<crate::tool::Target> {
+        self.registry.targets(
+            &call.name,
+            &call.arguments,
+            &self.context.for_call(&call.id),
+        )
+    }
     fn output_limit(&self) -> usize {
         self.context.output_limit()
     }
@@ -197,7 +223,12 @@ impl Executor for NativeExecutor<'_> {
         Box::pin(async move {
             let result = self
                 .registry
-                .invoke_snapshot(&call.name, &call.arguments, &self.context, snapshot)
+                .invoke_snapshot(
+                    &call.name,
+                    &call.arguments,
+                    &self.context.for_call(&call.id),
+                    snapshot,
+                )
                 .await
                 .map_err(|_| Error::Cancelled)?;
             Ok(ToolResult {
@@ -213,7 +244,11 @@ impl Executor for NativeExecutor<'_> {
         Box::pin(async move {
             let result = self
                 .registry
-                .invoke(&call.name, &call.arguments, &self.context)
+                .invoke(
+                    &call.name,
+                    &call.arguments,
+                    &self.context.for_call(&call.id),
+                )
                 .await
                 .map_err(|error| match error {
                     crate::tool::Error::Cancelled => Error::Cancelled,
@@ -269,12 +304,43 @@ pub async fn run_with_limits(
 
 pub(crate) async fn run_with_guidance(
     model: &Model,
+    messages: Vec<Message>,
+    tools: &[Tool],
+    executor: Option<&dyn Executor>,
+    text: &mut (dyn FnMut(&str) + Send),
+    limits: Limits,
+    guidance: Option<crate::instructions::Turn>,
+) -> Result<Outcome, Error> {
+    run_observed(
+        model, messages, tools, executor, text, limits, guidance, None,
+    )
+    .await
+}
+
+pub(crate) trait Observer: Send + Sync {
+    fn observe<'a>(
+        &'a self,
+        call: &'a Call,
+        observation: Observation<'a>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'a>>;
+}
+
+pub(crate) enum Observation<'a> {
+    Accepted(crate::presentation::Description),
+    Started,
+    Finished(&'a ToolResult),
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_observed(
+    model: &Model,
     mut messages: Vec<Message>,
     tools: &[Tool],
     executor: Option<&dyn Executor>,
     text: &mut (dyn FnMut(&str) + Send),
     limits: Limits,
     mut guidance: Option<crate::instructions::Turn>,
+    observer: Option<&dyn Observer>,
 ) -> Result<Outcome, Error> {
     let mut model = model.clone();
     let mut usage = Usage::default();
@@ -342,6 +408,13 @@ pub(crate) async fn run_with_guidance(
             }
         }
         let calls = calls.clone();
+        if let Some(observer) = observer {
+            for call in &calls {
+                observer
+                    .observe(call, Observation::Accepted(executor.description(call)))
+                    .await?;
+            }
+        }
         messages.push(step.message);
         // Inspect the whole batch before side effects: a later path can reveal
         // instructions that invalidate arguments generated for an earlier call.
@@ -349,16 +422,21 @@ pub(crate) async fn run_with_guidance(
         if let Some(guidance) = &mut guidance {
             defer |= guidance.refresh().await?;
             for call in &calls {
-                if let Some(target) = executor.target(call) {
+                for target in executor.targets(call) {
                     defer |= guidance.preflight(&target).await?;
                 }
             }
         }
         for call in calls {
             let target = executor.target(&call);
-            if let (Some(guidance), Some(target)) = (&mut guidance, &target) {
+            if let Some(guidance) = &mut guidance {
                 // Earlier operations can rewrite AGENTS.md, including via bash.
-                defer |= guidance.preflight(target).await?;
+                for target in executor.targets(&call) {
+                    defer |= guidance.preflight(&target).await?;
+                }
+            }
+            if let Some(observer) = observer {
+                observer.observe(&call, Observation::Started).await?;
             }
             let result = if defer {
                 deferred()
@@ -393,6 +471,11 @@ pub(crate) async fn run_with_guidance(
             };
             if result.output.len() > crate::tool::MAX_OUTPUT_BYTES {
                 return Err(Error::Limit);
+            }
+            if let Some(observer) = observer {
+                observer
+                    .observe(&call, Observation::Finished(&result))
+                    .await?;
             }
             messages.push(Message::Tool {
                 id: call.id,

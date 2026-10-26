@@ -940,10 +940,13 @@ async fn acp_executes_shipped_tools_in_the_session_directory_and_retains_results
         names,
         [
             "bash",
+            "copy",
+            "delete",
             "edit",
             "glob",
             "grep",
             "list",
+            "move",
             "read",
             "update_plan",
             "write"
