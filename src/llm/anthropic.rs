@@ -19,7 +19,7 @@ pub(super) async fn run(
     model
         .http
         .post(
-            &format!("{}/v1/messages", model.endpoint().base_url()),
+            &format!("{}/v1/messages", model.base_url()),
             model.headers(Some(version.as_deref().unwrap_or("2023-06-01")))?,
             body,
             model.profile.timeout(),

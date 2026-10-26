@@ -121,7 +121,13 @@ impl InferenceHttp {
                 "https://api.openai.com/v1/responses" => "/responses",
                 "https://api.openai.com/v1/chat/completions" => "/chat/completions",
                 "https://api.anthropic.com/v1/messages" => "/v1/messages",
-                _ => panic!("test route requires a known official endpoint"),
+                _ => ["/responses", "/chat/completions", "/v1/messages"]
+                    .into_iter()
+                    .find(|suffix| {
+                        url.strip_suffix(suffix)
+                            .is_some_and(|base| crate::auth::copilot::validate_target(base).is_ok())
+                    })
+                    .expect("test route requires a known official endpoint"),
             };
             routed = format!("{route}{suffix}");
             routed.as_str()
@@ -298,6 +304,14 @@ pub struct Unreachable;
 
 /// Async sign-in transport, injectable without blocking an ACP dispatch loop.
 pub trait LoginHttp: Send + Sync {
+    /// Credential-bearing provider lookup; separate from unauthenticated OIDC discovery.
+    fn get_authenticated<'a>(
+        &'a self,
+        _url: &'a str,
+        _headers: reqwest::header::HeaderMap,
+    ) -> futures::future::BoxFuture<'a, Result<HttpResponse, Unreachable>> {
+        Box::pin(async { Err(Unreachable) })
+    }
     /// OAuth public clients exchange form bodies; default keeps existing fakes compatible.
     fn post_form<'a>(
         &'a self,
@@ -325,6 +339,13 @@ pub trait LoginHttp: Send + Sync {
 pub struct AsyncLoginHttp;
 
 impl LoginHttp for AsyncLoginHttp {
+    fn get_authenticated<'a>(
+        &'a self,
+        url: &'a str,
+        headers: reqwest::header::HeaderMap,
+    ) -> futures::future::BoxFuture<'a, Result<HttpResponse, Unreachable>> {
+        Box::pin(async move { login_response(login_client(true)?.get(url).headers(headers)).await })
+    }
     fn post_form<'a>(
         &'a self,
         url: &'a str,

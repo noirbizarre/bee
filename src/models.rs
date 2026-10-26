@@ -258,6 +258,9 @@ pub struct Provider {
 /// Relevant published model fields, stripped of endpoint/request overrides.
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Entry {
+    /// Account-native route declarations never enter the public cache.
+    #[serde(skip)]
+    pub protocols: Option<Vec<Protocol>>,
     /// Optional descriptive facts.
     pub metadata: Metadata,
     /// Published total context capacity.
@@ -376,6 +379,7 @@ fn parse_value(value: &Value) -> Result<BTreeMap<String, Provider>, Error> {
             entries.insert(
                 id.clone(),
                 Entry {
+                    protocols: None,
                     metadata: if metadata.valid() {
                         metadata
                     } else {
@@ -482,10 +486,25 @@ impl Snapshot {
 
     /// A frozen turn decision; this operation performs no I/O.
     pub fn resolve(&self, profile: &Profile, model: &str) -> Selection {
-        let hint = self.hint(profile, model);
+        let native = self
+            .endpoints
+            .get(profile.name())
+            .and_then(|listing| listing.entries.get(model));
+        let native_protocol = native
+            .and_then(|entry| entry.protocols.as_ref())
+            .and_then(|protocols| {
+                profile
+                    .endpoints()
+                    .iter()
+                    .find(|endpoint| protocols.contains(&endpoint.protocol()))
+            })
+            .map(|endpoint| endpoint.protocol());
+        let hint = native_protocol.or_else(|| self.hint(profile, model));
         let endpoint = profile.endpoint_for_model_with_hint(model, hint);
         let route_source = if profile.has_model_protocol(model) {
             "configuration"
+        } else if native_protocol == Some(endpoint.protocol()) {
+            "native_api"
         } else if hint.is_some_and(|hint| hint == endpoint.protocol()) {
             "models.dev"
         } else {
@@ -496,8 +515,11 @@ impl Snapshot {
             .entry(profile, model)
             .and_then(|(_, entry)| entry.context_window)
             .filter(|_| profile.catalog_context_window());
-        let window = explicit.or(catalog);
-        Selection {
+        let native_window = native
+            .and_then(|entry| entry.context_window)
+            .filter(|_| profile.is_copilot());
+        let window = explicit.or(native_window).or(catalog);
+        let mut selection = Selection {
             protocol: endpoint.protocol(),
             window,
             protocol_fact: self.fact(
@@ -514,13 +536,50 @@ impl Snapshot {
                     value.into(),
                     if explicit.is_some() {
                         "configuration"
+                    } else if native_window.is_some() {
+                        "native_api"
                     } else {
                         "models.dev"
                     },
                     "declared",
                 )
             }),
+        };
+        if let Some(listing) = self.endpoints.get(profile.name()) {
+            // Native facts carry account-list freshness, never the unrelated public catalogue timestamp.
+            if route_source == "native_api" {
+                selection.protocol_fact.fetched_at = listing.fetched_at;
+                selection.protocol_fact.stale = listing.stale;
+            }
+            if let Some(fact) = &mut selection.window_fact
+                && fact.source == "native_api"
+            {
+                fact.fetched_at = listing.fetched_at;
+                fact.stale = listing.stale;
+            }
         }
+        selection
+    }
+
+    /// A known native restriction must not silently become a fallback protocol.
+    pub(crate) fn check_route(
+        &self,
+        profile: &Profile,
+        model: &str,
+        protocol: Protocol,
+    ) -> Result<(), crate::llm::Error> {
+        if self
+            .endpoints
+            .get(profile.name())
+            .and_then(|listing| listing.entries.get(model))
+            .and_then(|entry| entry.protocols.as_ref())
+            .is_some_and(|protocols| !protocols.contains(&protocol))
+        {
+            return Err(crate::llm::Error::Copilot(
+                "selected protocol is not advertised for this model; update model_protocols or select another model",
+            ));
+        }
+        Ok(())
     }
 
     /// Merge field-by-field so explicit false and unknown remain different.
@@ -772,6 +831,26 @@ impl Service {
             (profile.clone(), credential.cloned()),
         );
         changed
+    }
+
+    /// A late authorization failure may only invalidate its own account's evidence.
+    pub(crate) fn invalidate_account(
+        &self,
+        profile: &Profile,
+        credential: Option<&crate::auth::Credential>,
+    ) -> bool {
+        let identities = self
+            .endpoint_identities
+            .lock()
+            .expect("endpoint identities");
+        if identities.get(profile.name()).is_none_or(|(old, account)| {
+            old != profile || !native::same_account(account.as_ref(), credential)
+        }) {
+            return false;
+        }
+        // Keep identity comparison and epoch/state mutation atomic with account replacement.
+        self.invalidate_endpoint(profile.name());
+        true
     }
 
     /// Only matching account evidence may constrain an automatically remembered model.
@@ -1068,7 +1147,12 @@ impl Service {
                 // Bound a whole paginated refresh, not only each individual page.
                 tokio::time::timeout(
                     Duration::from_secs(30),
-                    native::discover(self.http.as_ref(), profile, credential.as_ref()),
+                    native::discover(
+                        self.http.as_ref(),
+                        self.login_http.as_ref(),
+                        profile,
+                        credential.as_ref(),
+                    ),
                 )
                 .await
                 .unwrap_or(Err(Error::Transport))
@@ -1144,7 +1228,74 @@ pub async fn endpoint_models(
     env: &Environment,
 ) -> Result<Vec<String>, Error> {
     let credential = native::credential(profile, env, &crate::http::AsyncLoginHttp, |_| {}).await?;
-    native::discover(http, profile, credential.as_ref())
-        .await
-        .map(|listing| listing.models)
+    native::discover(
+        http,
+        &crate::http::AsyncLoginHttp,
+        profile,
+        credential.as_ref(),
+    )
+    .await
+    .map(|listing| listing.models)
+}
+
+#[cfg(test)]
+mod account_tests {
+    use super::*;
+    use crate::auth::{Credential, Secret};
+
+    struct NoHttp;
+    impl Http for NoHttp {
+        fn get<'a>(
+            &'a self,
+            _: &'a str,
+            _: reqwest::header::HeaderMap,
+            _: usize,
+        ) -> futures::future::BoxFuture<'a, Result<Vec<u8>, Error>> {
+            Box::pin(async { panic!("account invalidation must not send requests") })
+        }
+    }
+
+    #[test]
+    fn a_late_old_account_failure_preserves_the_replacement_listing_and_refresh_epoch() {
+        let profile = crate::test_support::configured_providers(
+            "[providers.work]\npreset='github'\ncredential={env='TOKEN'}",
+        )
+        .get("work")
+        .unwrap()
+        .clone();
+        let service = Service::new(
+            Settings::default(),
+            Arc::new(NoHttp),
+            Arc::new(FileCache(None)),
+            Arc::new(SystemClock),
+        );
+        let old = Credential::new(Secret::new("old-account"));
+        let replacement = Credential::new(Secret::new("replacement-account"));
+        service.observe_account(&profile, Some(&old));
+        service.observe_account(&profile, Some(&replacement));
+        let epoch = service.endpoint_epochs.lock().unwrap()["work"];
+        // A refresh started for the replacement account must remain publishable after the old failure.
+        assert!(!service.invalidate_account(&profile, Some(&old)));
+        assert_eq!(service.endpoint_epochs.lock().unwrap()["work"], epoch);
+        service.state.lock().unwrap().endpoints.insert(
+            "work".into(),
+            EndpointListing {
+                models: vec!["replacement-model".into()],
+                ..Default::default()
+            },
+        );
+        assert!(!service.invalidate_account(&profile, Some(&old)));
+        assert_eq!(
+            service
+                .account_snapshot(&profile, Some(&replacement))
+                .endpoints["work"]
+                .models,
+            ["replacement-model"]
+        );
+        assert_eq!(service.endpoint_epochs.lock().unwrap()["work"], epoch);
+        // The current account's own failure must still clear both visibility and pending refresh authority.
+        assert!(service.invalidate_account(&profile, Some(&replacement)));
+        assert!(!service.snapshot().endpoints.contains_key("work"));
+        assert_ne!(service.endpoint_epochs.lock().unwrap()["work"], epoch);
+    }
 }

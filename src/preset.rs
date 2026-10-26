@@ -100,7 +100,7 @@ pub(crate) struct ExchangeNames {
 /// Built from a `login_flows.<name>` table. Running it is `login`'s.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoginSpec {
-    pub(crate) chatgpt: bool,
+    pub(crate) kind: LoginKind,
     pub(crate) name: String,
     pub(crate) authorize_url: String,
     pub(crate) exchange_url: String,
@@ -110,11 +110,24 @@ pub struct LoginSpec {
     pub(crate) exchange: ExchangeNames,
 }
 
+/// Implemented authorization mechanisms, independent of credential sources.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LoginKind {
+    PkceKey,
+    ChatGpt,
+    Copilot,
+}
+
 impl LoginSpec {
     /// Whether this is OpenAI's dedicated public-client OAuth mechanism.
     #[must_use]
     pub fn is_chatgpt(&self) -> bool {
-        self.chatgpt
+        self.kind == LoginKind::ChatGpt
+    }
+    /// Whether this is GitHub's device authorization mechanism.
+    #[must_use]
+    pub fn is_copilot(&self) -> bool {
+        self.kind == LoginKind::Copilot
     }
     /// The flow's name, as `login` refers to it.
     #[must_use]
@@ -147,14 +160,32 @@ impl LoginSpec {
     ///
     /// A [`SpecError`] naming the key at fault.
     pub fn from_table(name: &str, table: &Table) -> SpecResult<Self> {
-        if table.get("kind").and_then(Value::as_str) == Some("chatgpt") {
+        if matches!(
+            table.get("kind").and_then(Value::as_str),
+            Some("chatgpt" | "github")
+        ) {
             only_keys(table, &["kind"], "")?;
+            let copilot = table["kind"].as_str() == Some("github");
             // This mechanism's trust boundary is fixed, not configurable URLs.
             return Ok(Self {
-                chatgpt: true,
+                kind: if copilot {
+                    LoginKind::Copilot
+                } else {
+                    LoginKind::ChatGpt
+                },
                 name: name.into(),
-                authorize_url: "https://auth.openai.com/api/accounts/authorize".into(),
-                exchange_url: "https://auth.openai.com/api/accounts/oauth/token".into(),
+                authorize_url: if copilot {
+                    "https://github.com/login/device"
+                } else {
+                    "https://auth.openai.com/api/accounts/authorize"
+                }
+                .into(),
+                exchange_url: if copilot {
+                    "https://github.com/login/oauth/access_token"
+                } else {
+                    "https://auth.openai.com/api/accounts/oauth/token"
+                }
+                .into(),
                 headless: false,
                 help: None,
                 authorize: AuthorizeNames {
@@ -178,7 +209,7 @@ impl LoginSpec {
             _ => {
                 return Err(SpecError::invalid(
                     "kind",
-                    "`kind` must be `pkce-key` or `chatgpt`",
+                    "`kind` must be `pkce-key`, `chatgpt` or `github`",
                 ));
             }
         }
@@ -254,7 +285,7 @@ impl LoginSpec {
         };
 
         Ok(Self {
-            chatgpt: false,
+            kind: LoginKind::PkceKey,
             name: name.to_owned(),
             authorize_url,
             exchange_url,

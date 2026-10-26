@@ -32,6 +32,7 @@ use crate::error::{Error, Result};
 use crate::provider::{CredentialSource, Profile, Protocol, Providers};
 
 pub mod chatgpt;
+pub mod copilot;
 
 /// The version of the credential file's layout.
 const STORE_VERSION: u64 = 1;
@@ -208,9 +209,7 @@ impl Document {
     }
 
     fn changed(&mut self, audience: Audience<'_>) {
-        if self.host_id.is_some()
-            && let Audience::Provider(profile) = audience
-        {
+        if let Audience::Provider(profile) = audience {
             // Tombstones distinguish even an empty logout from an untouched registration.
             self.profile_revisions
                 .insert(profile.into(), self.revision(profile).saturating_add(1));
@@ -231,7 +230,10 @@ impl Document {
     }
 
     fn is_empty(&self) -> bool {
-        self.host_id.is_none() && self.providers.is_empty() && self.mcp_servers.is_empty()
+        self.host_id.is_none()
+            && self.profile_revisions.is_empty()
+            && self.providers.is_empty()
+            && self.mcp_servers.is_empty()
     }
 }
 
@@ -402,8 +404,8 @@ impl FileStore {
 
     fn save(&self, document: &Document) -> Result<()> {
         if document.is_empty() {
-            // The last credential is gone: leave nothing behind, not a file of
-            // empty tables that still looks like it holds secrets.
+            // Empty MCP-only stores can disappear; provider revision tombstones
+            // must survive to invalidate a device login that completes after logout.
             return platform::remove(&self.path);
         }
         let table = |credentials: &BTreeMap<String, Credential>| {
@@ -443,7 +445,7 @@ impl FileStore {
         if let Some(host) = &document.host_id {
             root.insert("host_id".into(), host.clone().into());
         }
-        if document.host_id.is_some() {
+        if !document.profile_revisions.is_empty() {
             root.insert(
                 "profile_revisions".into(),
                 serde_json::to_value(&document.profile_revisions).expect("integer map serializes"),
@@ -479,7 +481,7 @@ impl CredentialStore for FileStore {
             .remove(&audience.name())
             .is_some();
         document.changed(audience);
-        if removed || document.host_id.is_some() {
+        if removed || !document.profile_revisions.is_empty() {
             self.save(&document)?;
         }
         Ok(removed)
@@ -504,7 +506,7 @@ impl FileStore {
                 return Ok(guard);
             }
             if start.elapsed() >= std::time::Duration::from_secs(30) {
-                return Err(chatgpt::failure("credential store is busy; retry shortly"));
+                return Err(Error::AuthStoreBusy);
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
@@ -522,7 +524,7 @@ impl FileStore {
                 return Ok(guard);
             }
             if start.elapsed() > std::time::Duration::from_secs(30) {
-                return Err(chatgpt::failure("credential store is busy; retry shortly"));
+                return Err(Error::AuthStoreBusy);
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }

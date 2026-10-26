@@ -18,7 +18,7 @@ pub(super) async fn run(
     model
         .http
         .post(
-            &format!("{}/chat/completions", model.endpoint().base_url()),
+            &format!("{}/chat/completions", model.base_url()),
             model.headers(None)?,
             body,
             model.profile.timeout(),

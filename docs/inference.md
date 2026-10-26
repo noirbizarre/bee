@@ -1,7 +1,8 @@
 # Inference and smoke tests
 
 Bee implements text and function-calling Chat Completions, Responses and Anthropic Messages.
-A profile's exact `model_protocols` mapping wins, followed by explicitly enabled catalog hints, then its preferred
+A profile's exact `model_protocols` mapping wins, followed by Copilot native endpoint declarations when available,
+explicitly enabled catalog hints, then its preferred
 protocol; failures never trigger
 protocol fallback. Any opaque
 model ID is accepted without a catalog lookup, but the endpoint must support that model and the selected protocol.
@@ -21,7 +22,7 @@ together. The provider's credential, custom headers and common limits are shared
   (`store = false`) with native output items and encrypted reasoning state. Function outputs correlate by call ID,
   not output-item ID. Built-in server tools and non-text message content are unsupported. Streams require item completion
   followed by a completed/incomplete response; usage and final objects never duplicate streamed text.
-- Anthropic appends `/v1/messages`, presents credentials with `x-api-key`, and sends `anthropic-version` from
+- Anthropic appends `/v1/messages`, normally presents credentials with `x-api-key`, and sends `anthropic-version` from
   `options.version` or the default `2023-06-01`. Its `max_tokens` comes from `options.max_tokens` if present, else the
   common `max_output_tokens`. Native text/tool-use blocks and grouped user tool-result blocks retain their order and
   error flags. Thinking, multimodal blocks, server tools and pause-turn continuation are explicitly unsupported.
@@ -57,6 +58,33 @@ Eligibility, permission and usage errors stop the request without protocol or bi
 Usage-limit recovery links to [ChatGPT usage settings](https://chatgpt.com/settings/usage).
 Tokens are refreshed before each model step; protocol, model and context selection remain frozen for the turn.
 See [setup and logout](index.md#use-your-chatgpt-plan).
+
+## GitHub Copilot requests
+
+The `github` preset sends a GitHub user bearer token directly to the account's validated Copilot API host.
+It uses the existing Chat Completions, Responses and Messages adapters, with exact native model endpoint declarations
+below explicit `model_protocols` configuration. Authentication does not depend on model discovery being enabled.
+The default base is `https://api.githubcopilot.com`; account metadata can select its exact individual, business or
+enterprise API counterpart. Custom Enterprise authentication domains and arbitrary API hosts are not accepted.
+
+All three protocols use `Authorization: Bearer`, including Messages, which sends no `x-api-key`. Requests identify
+Bee honestly and use Copilot API version `2026-08-01`, `Openai-Intent: conversation-edits`, and
+`X-Interaction-Type: conversation-agent`. An opaque interaction ID stays stable for the session. `X-Initiator` is
+`user` for a user-led request and `agent` after tool execution, including Messages tool results encoded as user content.
+Generated integration headers cannot be overridden by custom headers.
+
+Responses retains `store:false`, native function tools and encrypted reasoning replay. ChatGPT-specific tool
+namespaces and output-cap exceptions do not apply. Model, route and context budget freeze for the turn; exact configured
+capacity wins over native total context, then opted-in public capacity. Native prompt-only limits are informational.
+Default cache settings add no unverified Copilot cache controls; recognized returned usage is retained.
+
+Stored authority is rechecked before every model step. Logout or replacement stops the turn rather than switching
+accounts. Environment credentials remain captured from the explicitly selected source. Authentication rejection never
+replays inference or changes protocol, and invalidates private model visibility. Embedded callers prepare
+`auth::copilot::Session` and attach it with `Model::with_copilot_session` before inference.
+
+See [setup](index.md#use-github-copilot) and [ADR-024](adr/024-github-copilot-authentication.md) for consent identity,
+token lifecycle and the direct-wire compatibility basis.
 
 ## Prompt caching
 
@@ -255,9 +283,11 @@ context_window = 32768
 model_context_windows = { "small-model" = 8192 }
 ```
 
-An explicitly enabled [catalog context window](models.md#optional-protocol-hints-and-context-budgets) can supply a
-fallback below both explicit settings. Catalog budgets and protocol hints freeze at prompt acceptance; stale validated
-cache remains usable with visible provenance. Neither a download nor an endpoint listing is required before inference.
+Copilot's account-native total capacity can supply a fallback below both explicit settings. An explicitly enabled
+[catalog context window](models.md#optional-protocol-hints-and-context-budgets) applies below that native capacity.
+Budgets and protocol hints freeze before the model/tool loop; Copilot's final snapshot is account-bound after credential
+resolution. Stale validated facts remain usable with visible provenance. Explicit model/protocol mappings do not wait
+for optional discovery; Copilot may await a first native listing to resolve an otherwise unspecified model route.
 
 Both settings accept positive 32-bit integers, including in presets. An exact, case-sensitive model entry overrides
 the profile fallback. Quote model IDs containing TOML punctuation. The map merges per model across configuration

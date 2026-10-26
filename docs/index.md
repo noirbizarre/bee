@@ -210,6 +210,7 @@ Shipped presets, with the variable each reads its key from:
 | ------------ | ------------------------------------------------------- | --------------------------------- |
 | `openai`     | `openai-responses`, `openai-chat`                       | `OPENAI_API_KEY`                  |
 | `chatgpt`    | `openai-responses`                                      | stored ChatGPT OAuth tokens       |
+| `github` | `openai-responses`, `anthropic-messages`, `openai-chat` | stored GitHub device OAuth; explicit env override supported |
 | `anthropic`  | `anthropic-messages`                                    | `ANTHROPIC_API_KEY`               |
 | `openrouter` | `openai-chat`, `openai-responses`                       | stored, with browser sign-in      |
 | `opencode`   | `openai-chat`, `openai-responses`, `anthropic-messages` | `OPENCODE_API_KEY` (OpenCode Zen) |
@@ -222,7 +223,7 @@ Shipped presets, with the variable each reads its key from:
 
 Scalars and arrays in the connection replace the preset's. `model_protocols`, `model_context_windows`, `headers` and each
 protocol's table under `protocols` merge key by key, `prefer` replaces, and `credential` is replaced whole.
-Every URL comes from vendor documentation,
+URLs follow vendor documentation or the referenced native integration contract,
 and a vendor is listed by the protocols Bee speaks: OpenCode Zen serves its GPT, Grok and Muse models over
 `openai-responses`, its Claude models over `anthropic-messages` and the rest over `openai-chat`, and only its Gemini
 models (Google's native protocol) cannot be reached. Set exact `model_protocols` entries for models needing a protocol
@@ -270,8 +271,51 @@ Login flows may only be defined in the global file or the file `BEE_CONFIG` name
 `.config/bee.toml`: a flow chooses where the authorization code and key are sent, and a project file can come from a
 repository you only cloned. ChatGPT uses a separate `kind = "chatgpt"` mechanism with fixed trusted endpoints;
 its OAuth registration, identity verification and token renewal are not configurable PKCE-key exchanges.
-Device-code sign-in is unsupported.
+GitHub Copilot uses a separate fixed `kind = "github"` device mechanism.
 See [ADR-009](adr/009-provider-presets-and-login-flows.md).
+
+### Use GitHub Copilot
+
+For a GitHub.com account with Copilot chat access:
+
+```sh
+bee auth login github
+bee auth status github
+bee models list github --endpoint --json
+```
+
+Login adds the connection to user configuration, displays a code to enter at `https://github.com/login/device`,
+and waits for authorization. `--no-browser` prints instructions without opening a browser. This is a device flow:
+enter the code on GitHub, rather than pasting it into Bee. Bee uses the existing public OAuth client
+`Ov23li8tweQw6odWQebz`, also used by OpenCode; the consent application is not a Bee-owned registration.
+Successful login discovers account-visible models and can initialize the first session's model selection.
+
+To use a GitHub user token from an explicitly selected environment variable instead:
+
+```toml
+[providers.github]
+preset = "github"
+credential = { env = "COPILOT_GITHUB_TOKEN" }
+```
+
+Set that variable before starting Bee. This replaces the store-backed credential source and browser login;
+Bee does not search other variables, copy the token into its store, or fall back to stored authorization.
+Use a token accepted by the Copilot direct API for your account. A GitHub token that can access repositories
+does not necessarily authorize Copilot. Classic PATs are not a supported setup; server rejection remains authoritative.
+
+The preset's `auth = "github"` applies independently of optional discovery, presenting a bearer token on all
+three protocols. Account metadata may select a validated GitHub Copilot API host. Explicit entitlement denial stops
+the operation with guidance to activate Copilot or request an organization seat. Custom Enterprise login domains
+are not implemented. See [Copilot inference](inference.md#github-copilot-requests) for routing and context limits.
+
+With `discover_models = false`, configure a model and an exact `model_protocols` mapping when it differs from the
+preset preference. Authentication and safe target preparation still run. With native discovery enabled, advertised
+model endpoints determine the route below explicit configuration, without model-family guesses or protocol retries.
+ACP clients supporting URL elicitation can complete the same cancellable device flow during the first prompt.
+
+`bee auth logout github` removes Bee's stored token. Remote authorization remains valid until revoked in
+[GitHub's application settings](https://github.com/settings/connections/applications/Ov23li8tweQw6odWQebz).
+Status reports local presence, not verified entitlement. Failed or cancelled login preserves previous credentials.
 
 ### Use your ChatGPT plan
 
@@ -363,7 +407,7 @@ guidance. A provider's inference 401/403 does not automatically retry login or i
 ### Commands
 
 ```bash
-bee auth login [CONNECTION]                 # browser sign-in for OpenRouter or ChatGPT connections
+bee auth login [CONNECTION]                 # browser/device sign-in for supported connections
 bee auth login [CONNECTION] --paste-code    # no callback: open anywhere, paste the code (SSH, containers)
 bee auth login [CONNECTION] --with-token    # read an API token from standard input
 bee auth logout [CONNECTION]                # forget Bee's stored copy

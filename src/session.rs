@@ -137,7 +137,7 @@ pub struct Turn {
 /// protocol layer decides how work is aborted.
 type Cancel = Box<dyn FnOnce() + Send>;
 
-fn portable(history: &mut [Message]) {
+pub(crate) fn portable(history: &mut [Message]) {
     for message in history {
         if let Message::Assistant { native, .. } = message {
             *native = None;
@@ -437,9 +437,10 @@ impl Sessions {
         let mut messages = session.history.clone();
         // Refresh may change protocol with no model-ID change. Only the turn's
         // copy becomes portable, so failure/cancellation cannot destroy history.
-        if session
-            .protocol
-            .is_some_and(|protocol| protocol != selection.protocol)
+        if !profile.is_copilot()
+            && session
+                .protocol
+                .is_some_and(|protocol| protocol != selection.protocol)
         {
             portable(&mut messages);
         }

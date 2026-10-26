@@ -31,6 +31,10 @@ pub enum Error {
     #[error("ChatGPT plan request failed: {0}")]
     #[diagnostic(code(bee::llm::chatgpt))]
     ChatGpt(&'static str),
+    /// Fixed Copilot compatibility/authentication guidance.
+    #[error("GitHub Copilot request failed: {0}")]
+    #[diagnostic(code(bee::llm::copilot))]
+    Copilot(&'static str),
     /// The endpoint is throttling requests.
     #[error("the model endpoint rate limited the request; wait before trying again")]
     #[diagnostic(code(bee::llm::rate_limit))]
@@ -201,6 +205,8 @@ pub struct Step {
 /// A selected endpoint and its reusable async transport.
 #[derive(Clone)]
 pub struct Model {
+    copilot_session: Option<crate::auth::copilot::Session>,
+    copilot_agent: bool,
     chatgpt_session: Option<crate::auth::chatgpt::Session>,
     instructions: String,
     cache_scope: String,
@@ -221,6 +227,8 @@ impl Model {
     pub fn new(profile: Profile, model: String, credential: Option<Secret>) -> Result<Self, Error> {
         let selection = crate::models::Snapshot::default().resolve(&profile, &model);
         Ok(Self {
+            copilot_session: None,
+            copilot_agent: false,
             chatgpt_session: None,
             instructions: String::new(),
             cache_scope: "default".into(),
@@ -240,6 +248,23 @@ impl Model {
         text: &mut (dyn FnMut(&str) + Send),
     ) -> Result<Step, Error> {
         self.context(messages, tools)?.check()?;
+        if self.profile.is_copilot() != self.copilot_session.is_some() {
+            return Err(Error::Copilot(
+                "prepare a validated Copilot session before inference",
+            ));
+        }
+        if let Some(session) = &self.copilot_session {
+            session.check(&self.profile).await.map_err(|_| {
+                Error::Copilot(
+                    "credentials changed or became unavailable; start a new turn or repeat login",
+                )
+            })?;
+            if self.credential.as_ref() != Some(session.credential.secret()) {
+                return Err(Error::Copilot(
+                    "request credential does not match the prepared session",
+                ));
+            }
+        }
         if self.chatgpt_session.is_some() && !self.is_chatgpt() {
             return Err(Error::ChatGpt(
                 "renewable sessions require a validated ChatGPT profile",
@@ -262,6 +287,15 @@ impl Model {
         } else {
             self
         };
+        let mut copilot;
+        let model = if model.copilot_session.is_some() {
+            copilot = model.clone();
+            // Classify semantic tool continuations before Messages wraps them in a user role.
+            copilot.copilot_agent = !matches!(messages.last(), Some(Message::User(_)));
+            &copilot
+        } else {
+            model
+        };
         match model.endpoint().protocol() {
             Protocol::OpenAiChat => chat::run(model, messages, tools, text).await,
             Protocol::OpenAiResponses => responses::run(model, messages, tools, text).await,
@@ -271,6 +305,18 @@ impl Model {
 }
 
 impl Model {
+    /// Attach a trusted target and identity pinned for this turn.
+    pub fn with_copilot_session(mut self, session: crate::auth::copilot::Session) -> Self {
+        self.copilot_session = Some(session);
+        self
+    }
+
+    fn base_url(&self) -> &str {
+        self.copilot_session.as_ref().map_or_else(
+            || self.endpoint().base_url(),
+            |session| session.target.as_str(),
+        )
+    }
     /// Use renewable ChatGPT credentials for each step of a long-running turn.
     pub fn with_chatgpt_session(mut self, session: crate::auth::chatgpt::Session) -> Self {
         self.chatgpt_session = Some(session);
@@ -330,13 +376,33 @@ impl Model {
         &self,
         version: Option<&str>,
     ) -> Result<reqwest::header::HeaderMap, Error> {
-        request_headers(
+        let mut headers = request_headers(
             &self.profile,
             self.endpoint().protocol(),
             self.credential.as_ref(),
             version,
             true,
-        )
+        )?;
+        if let Some(session) = &self.copilot_session {
+            use reqwest::header::HeaderValue;
+            headers.insert(
+                "openai-intent",
+                HeaderValue::from_static("conversation-edits"),
+            );
+            headers.insert(
+                "x-interaction-type",
+                HeaderValue::from_static("conversation-agent"),
+            );
+            headers.insert(
+                "x-interaction-id",
+                HeaderValue::from_str(&session.interaction).map_err(|_| Error::Headers)?,
+            );
+            headers.insert(
+                "x-initiator",
+                HeaderValue::from_static(if self.copilot_agent { "agent" } else { "user" }),
+            );
+        }
+        Ok(headers)
     }
 }
 
@@ -366,7 +432,14 @@ pub(crate) fn request_headers(
         );
     }
     if let Some(secret) = credential {
-        let (name, value) = crate::auth::header_for(protocol, secret);
+        let (name, value) = if profile.is_copilot() {
+            (
+                "authorization",
+                Secret::new(format!("Bearer {}", secret.expose())),
+            )
+        } else {
+            crate::auth::header_for(protocol, secret)
+        };
         let mut value = HeaderValue::from_str(value.expose()).map_err(|_| Error::Headers)?;
         value.set_sensitive(true);
         headers.insert(
@@ -374,9 +447,20 @@ pub(crate) fn request_headers(
             value,
         );
     }
+    if profile.is_copilot() {
+        headers.insert(
+            "user-agent",
+            HeaderValue::from_static(concat!("bee/", env!("CARGO_PKG_VERSION"))),
+        );
+        headers.insert(
+            "x-github-api-version",
+            HeaderValue::from_static("2026-08-01"),
+        );
+    }
     for (name, value) in profile.headers() {
         let name = HeaderName::from_bytes(name.as_bytes()).map_err(|_| Error::Headers)?;
         if headers.contains_key(&name)
+            || (profile.is_copilot() && crate::auth::copilot::reserved_header(name.as_str()))
             || matches!(
                 name.as_str(),
                 "host" | "content-length" | "transfer-encoding"

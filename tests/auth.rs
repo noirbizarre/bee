@@ -942,7 +942,7 @@ mod file_store {
     }
 
     #[test]
-    fn removing_the_last_credential_deletes_the_file() {
+    fn removing_the_last_provider_credential_retains_only_login_revision_tombstones() {
         let sandbox = Sandbox::new();
         let store = sandbox.store();
         store
@@ -956,7 +956,11 @@ mod file_store {
         assert!(sandbox.store_path().exists());
         assert!(store.get(Audience::Provider("b")).unwrap().is_some());
         assert!(store.remove(Audience::Provider("b")).unwrap());
-        assert!(!sandbox.store_path().exists());
+        let document: serde_json::Value =
+            serde_json::from_slice(&fs::read(sandbox.store_path()).unwrap()).unwrap();
+        assert_eq!(document["providers"], serde_json::json!({}));
+        assert_eq!(document["profile_revisions"]["a"], 2);
+        assert_eq!(document["profile_revisions"]["b"], 2);
         assert!(
             !store.remove(Audience::Provider("b")).unwrap(),
             "idempotent"

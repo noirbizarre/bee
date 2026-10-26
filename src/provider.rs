@@ -35,6 +35,7 @@ use cache::{AnthropicCache, OpenAiCache};
 
 /// The keys a profile table accepts.
 const PROFILE_KEYS: &[&str] = &[
+    "auth",
     "preset",
     "protocols",
     "prefer",
@@ -62,6 +63,7 @@ const ENDPOINT_KEYS: &[&str] = &["base_url", "options"];
 /// The keys a preset table accepts: a profile's, but a preset cannot be built
 /// on another, so chains and cycles cannot exist.
 const PRESET_KEYS: &[&str] = &[
+    "auth",
     "protocols",
     "prefer",
     "model",
@@ -289,6 +291,7 @@ impl Endpoint {
 /// One named connection profile.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Profile {
+    copilot: bool,
     name: String,
     // In preference order, never empty. The order is data, not an accident of
     // how the file was written: see `prefer`.
@@ -341,6 +344,11 @@ impl fmt::Debug for Profile {
 }
 
 impl Profile {
+    /// Copilot authentication is independent of optional catalogue discovery.
+    #[must_use]
+    pub fn is_copilot(&self) -> bool {
+        self.copilot
+    }
     pub(crate) fn with_model_preferences(
         mut self,
         model: Option<String>,
@@ -858,6 +866,32 @@ impl Reader<'_> {
             Some(value) => self.headers(&format!("{key}.headers"), value)?,
         };
 
+        let copilot = match table.get("auth") {
+            None => false,
+            Some(value) if self.string(&format!("{key}.auth"), value)? == "github" => true,
+            Some(_) => {
+                return Err(self.invalid(
+                    &format!("{key}.auth"),
+                    "requires a supported authentication integration",
+                ));
+            }
+        };
+        if login.as_ref().is_some_and(|flow| flow.is_copilot()) && !copilot {
+            return Err(self.invalid(&key, "GitHub device login requires auth = github"));
+        }
+        if copilot
+            && (credential.is_none()
+                || login.as_ref().is_some_and(|flow| !flow.is_copilot())
+                || endpoints.iter().any(|endpoint| {
+                    crate::auth::copilot::validate_target(endpoint.base_url()).is_err()
+                })
+                || headers
+                    .iter()
+                    .any(|(name, _)| crate::auth::copilot::reserved_header(name)))
+        {
+            return Err(self.invalid(&key, "Copilot requires a credential, trusted Copilot endpoints, matching device login and no reserved headers"));
+        }
+
         if login.as_ref().is_some_and(|flow| flow.is_chatgpt())
             && (endpoints.len() != 1
                 || endpoints[0].protocol() != Protocol::OpenAiResponses
@@ -868,6 +902,7 @@ impl Reader<'_> {
         }
 
         Ok(Profile {
+            copilot,
             name: name.to_owned(),
             endpoints,
             model,
@@ -893,6 +928,7 @@ impl Reader<'_> {
             discovery: table.get("discovery").map(|value| {
                 match self.string(&format!("{key}.discovery"), value)? {
                     "openrouter" => Ok(crate::models::Integration::OpenRouter),
+                    "github" if copilot => Ok(crate::models::Integration::Copilot),
                     "chatgpt" if login.as_ref().is_some_and(|flow| flow.is_chatgpt()) => Ok(crate::models::Integration::ChatGpt),
                     _ => Err(self.invalid(&key, "discovery requires a supported integration and matching authentication")),
                 }

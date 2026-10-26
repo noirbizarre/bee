@@ -30,6 +30,9 @@ mod plans;
 #[cfg(all(test, unix))]
 mod oauth_tests;
 
+#[cfg(all(test, unix))]
+mod copilot_tests;
+
 /// The turn-owned plan operation added to every ACP runtime's model catalog.
 ///
 /// Exposed for hosts estimating context budgets; execution requires an active
@@ -398,6 +401,20 @@ async fn inference(
     };
     if let Some(discovery) = &runtime.discovery {
         discovery.observe_account(&profile, credential.as_ref());
+        if profile.is_copilot()
+            && profile.discover_models()
+            && reply
+                .input
+                .as_ref()
+                .is_none_or(|input| !profile.has_model_protocol(&input.model))
+            && !discovery
+                .account_snapshot(&profile, credential.as_ref())
+                .endpoints
+                .contains_key(profile.name())
+        {
+            // Only unresolved routes need native discovery on the critical path; explicit mappings can infer immediately.
+            let _ = discovery.list_endpoint(&profile, &env).await;
+        }
     }
     if reply.input.is_none() {
         if let Some(discovery) = &runtime.discovery
@@ -425,7 +442,22 @@ async fn inference(
             v2::SessionUpdate::ConfigOptionUpdate(v2::ConfigOptionUpdate::new(options)),
         );
     }
-    let crate::session::InferenceInput { profile, model, messages, cwd, instructions, selection } = reply.input.clone().ok_or_else(|| TurnFailure::new("no native model is available; refresh the connection catalogue or select a model over ACP"))?;
+    let crate::session::InferenceInput { profile, model, mut messages, cwd, instructions, mut selection } = reply.input.clone().ok_or_else(|| TurnFailure::new("no native model is available; refresh the connection catalogue or select a model over ACP"))?;
+    if profile.is_copilot() {
+        let snapshot = runtime
+            .discovery
+            .as_ref()
+            .map(|service| service.account_snapshot(&profile, credential.as_ref()))
+            .unwrap_or_default();
+        selection = snapshot.resolve(&profile, &model);
+        snapshot
+            .check_route(&profile, &model, selection.protocol)
+            .map_err(|error| TurnFailure::new(error.to_string()))?;
+        // Delay conversion until account-bound native routing is known, preserving encrypted continuation on unchanged routes.
+        if messages.iter().any(|message| matches!(message, crate::llm::Message::Assistant { native: Some(native), .. } if native.protocol != selection.protocol)) {
+            crate::session::portable(&mut messages);
+        }
+    }
     if let Some(reference) = lock(&reply.sessions).automatic(&reply.id) {
         // Login/renewal can replace an account after the initial preference check.
         if !reference.matches(&profile, credential.as_ref()) {
@@ -469,6 +501,35 @@ async fn inference(
     let observed_credential = credential.clone();
     let observed_profile = profile.clone();
     let observed_model = model.clone();
+    let copilot_session = if profile.is_copilot() {
+        Some(
+            crate::auth::copilot::Session::prepare(
+                &profile,
+                credential
+                    .clone()
+                    .ok_or_else(|| TurnFailure::new("missing Copilot credential"))?,
+                matches!(
+                    profile.credential(),
+                    Some(crate::provider::CredentialSource::Store { .. })
+                )
+                .then(|| store.clone()),
+                reply.id.clone(),
+                runtime.login_http.as_ref(),
+            )
+            .await
+            .map_err(|error| {
+                if crate::auth::copilot::unauthorized(&error) {
+                    reply.selection_failed(crate::selection::Reason::CredentialsUnavailable);
+                    if let Some(discovery) = &runtime.discovery {
+                        discovery.invalidate_account(&profile, credential.as_ref());
+                    }
+                }
+                TurnFailure::new(error.to_string())
+            })?,
+        )
+    } else {
+        None
+    };
     let credential = credential.map(|value| value.secret().clone());
     let mut model = crate::llm::Model::new(profile, model, credential)
         .map_err(|error| TurnFailure::new(error.to_string()))?
@@ -476,6 +537,9 @@ async fn inference(
         .with_cache_scope(lock(&reply.sessions).profile_name().to_owned());
     if let Some(session) = session {
         model = model.with_chatgpt_session(session);
+    }
+    if let Some(session) = copilot_session {
+        model = model.with_copilot_session(session);
     }
     #[cfg(test)]
     if let Some(http) = &runtime.inference_http {
@@ -549,6 +613,11 @@ async fn inference(
     .map_err(|error| {
         if error == crate::llm::Error::Authentication {
             reply.selection_failed(crate::selection::Reason::CredentialsUnavailable);
+            if observed_profile.is_copilot()
+                && let Some(discovery) = &runtime.discovery
+            {
+                discovery.invalidate_account(&observed_profile, observed_credential.as_ref());
+            }
         }
         TurnFailure::new(error.to_string())
     })?;

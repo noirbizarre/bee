@@ -33,6 +33,65 @@ impl Reply {
             )
         };
         let flow = profile.login_spec().ok_or_else(failed)?;
+        if flow.is_copilot() {
+            return tokio::time::timeout(crate::login::DEFAULT_TIMEOUT, async {
+                let login = crate::auth::copilot::SignIn::prepare(store, profile.name(), http)
+                    .await
+                    .map_err(|error| super::TurnFailure::new(error.to_string()))?;
+                let id = {
+                    let mut state = lock(&self.interactions);
+                    state.next_url += 1;
+                    format!("bee-login-{}", state.next_url)
+                };
+                self.phase(true).await.map_err(|_| failed())?;
+                let request = v2::CreateElicitationRequest::new(
+                    v2::ElicitationUrlMode::new(
+                        v2::ElicitationSessionScope::new(self.session_id.clone()),
+                        id.clone(),
+                        login.url.clone(),
+                    ),
+                    format!(
+                        "Continue with GitHub Copilot. Enter code: {}",
+                        login.user_code
+                    ),
+                );
+                let pending = {
+                    let sessions = lock(&self.sessions);
+                    if !sessions.is_current(&self.id, self.token) {
+                        return Err(failed());
+                    }
+                    self.connection.send_request(request)
+                };
+                let response = pending.block_task().await.map_err(|_| failed())?;
+                if !matches!(response.action, v2::ElicitationAction::Accept(_)) || !self.current() {
+                    return Err(failed());
+                }
+                let credential = login
+                    .complete(http)
+                    .await
+                    .map_err(|error| super::TurnFailure::new(error.to_string()))?;
+                self.phase(false).await.map_err(|_| failed())?;
+                login
+                    .commit_guarded(store, profile.name(), &credential, || {
+                        let sessions = lock(&self.sessions);
+                        sessions
+                            .is_current(&self.id, self.token)
+                            .then_some(sessions)
+                    })
+                    .await
+                    .map_err(|error| super::TurnFailure::new(error.to_string()))?;
+                let sessions = lock(&self.sessions);
+                if !sessions.is_current(&self.id, self.token) {
+                    return Err(failed());
+                }
+                self.connection
+                    .send_notification(v2::CompleteElicitationNotification::new(id))
+                    .map_err(|_| failed())?;
+                Ok(())
+            })
+            .await
+            .map_err(|_| failed())?;
+        }
         if flow.is_chatgpt() {
             return tokio::time::timeout(crate::login::DEFAULT_TIMEOUT, async {
                 let login = crate::auth::chatgpt::SignIn::prepare(store, profile.name()).await.map_err(|e| super::TurnFailure::new(e.to_string()))?;
