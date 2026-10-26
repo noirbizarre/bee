@@ -280,6 +280,10 @@ impl Reference {
             .expect("serializable identity");
         let mut digest = Sha256::new();
         digest.update(b"bee-model-account-v1\0");
+        if profile.is_copilot() {
+            // The same token/URL configured as a generic endpoint must not inherit Copilot authority.
+            digest.update(b"github-copilot\0");
+        }
         digest.update(bytes);
         let binding = digest
             .finalize()

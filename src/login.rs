@@ -561,6 +561,10 @@ fn require_pkce_key(flow: &LoginSpec) -> Result<()> {
         Err(crate::auth::chatgpt::failure(
             "use the dedicated ChatGPT OAuth sign-in mechanism",
         ))
+    } else if flow.is_copilot() {
+        Err(crate::auth::copilot::failure(
+            "use the dedicated GitHub device sign-in mechanism",
+        ))
     } else {
         Ok(())
     }

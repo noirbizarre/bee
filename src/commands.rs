@@ -158,6 +158,38 @@ fn login(args: &LoginArgs, context: &mut Context<'_>) -> Result<()> {
 
     if profile
         .login_spec()
+        .is_some_and(bee::preset::LoginSpec::is_copilot)
+        && !args.with_token
+    {
+        if args.paste_code {
+            return Err(Error::Copilot {
+                reason: "device login displays a code to enter in GitHub; omit --paste-code",
+            });
+        }
+        let store = context
+            .store
+            .file_store()
+            .ok_or(Error::AuthStoreUnsupported)?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|_| Error::Copilot {
+                reason: "cannot start sign-in runtime; retry login",
+            })?;
+        return runtime.block_on(async {
+            tokio::time::timeout(context.timeout, async {
+                let login = auth::copilot::SignIn::prepare(store, name, context.login_http).await?;
+                writeln!(context.err, "Continue with GitHub Copilot for `{name}`:\n\n  {}\n\nEnter code: {}\nWaiting for device authorization...", login.url, login.user_code).map_err(write_error)?;
+                if !args.no_browser { (context.open)(&login.url); }
+                let credential = login.complete(context.login_http).await?;
+                login.commit(store, name, &credential).await?;
+                writeln!(context.err, "Signed in to GitHub Copilot for `{name}`.").map_err(write_error)
+            }).await.map_err(|_| Error::Copilot { reason: "device authorization timed out; retry login" })?
+        });
+    }
+
+    if profile
+        .login_spec()
         .is_some_and(bee::preset::LoginSpec::is_chatgpt)
     {
         if args.with_token || args.paste_code {
@@ -294,7 +326,11 @@ fn logout(name: Option<&str>, context: &mut Context<'_>) -> Result<()> {
     } else {
         format!("No credential was stored for `{}`.", profile.name())
     };
-    writeln!(context.err, "{message}").map_err(write_error)
+    writeln!(context.err, "{message}").map_err(write_error)?;
+    if profile.is_copilot() {
+        writeln!(context.err, "Review or revoke GitHub authorization at https://github.com/settings/connections/applications/{}", auth::copilot::CLIENT_ID).map_err(write_error)?;
+    }
+    Ok(())
 }
 
 fn status(name: Option<&str>, context: &mut Context<'_>) -> Result<()> {
@@ -400,6 +436,97 @@ mod tests {
     use super::*;
 
     const KEY: &str = "sk-or-test-key";
+
+    #[cfg(unix)]
+    #[test]
+    fn copilot_cli_onboards_with_device_instructions_and_never_prints_the_token() {
+        struct Device;
+        impl bee::http::LoginHttp for Device {
+            fn post_json<'a>(
+                &'a self,
+                url: &'a str,
+                _: String,
+            ) -> futures::future::BoxFuture<'a, std::result::Result<HttpResponse, Unreachable>>
+            {
+                let value = if url.ends_with("/device/code") {
+                    serde_json::json!({"verification_uri":"https://github.com/login/device","user_code":"ABCD-EFGH","device_code":"fixture-device-secret","interval":1,"expires_in":900})
+                } else {
+                    assert_eq!(url, "https://github.com/login/oauth/access_token");
+                    serde_json::json!({"access_token":"fixture-github-secret","token_type":"bearer"})
+                };
+                Box::pin(async move {
+                    Ok(HttpResponse {
+                        status: 200,
+                        body: value.to_string(),
+                    })
+                })
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let env = Environment::new(None, Some(root.path().into()), None);
+        let plan = bee::config::persist::prepare(&env, root.path(), "github").unwrap();
+        let store = FileStore::from_environment(&env).unwrap();
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let mut input: &[u8] = b"";
+        {
+            let mut context = Context {
+                env: &env,
+                providers: plan.providers(),
+                store: &store,
+                http: &KeyGiver,
+                login_http: &Device,
+                timeout: Duration::from_secs(5),
+                open: &|_| panic!("--no-browser must not open the desktop"),
+                interactive: false,
+                discovery: None,
+                out: &mut out,
+                err: &mut err,
+                input: &mut input,
+            };
+            execute(AuthCommand::Login(args(false, false, true)), &mut context).unwrap();
+            assert!(out.is_empty());
+        }
+        plan.commit(&env, root.path()).unwrap();
+        let configured = Providers::from_config(&Config::load(&env, root.path()).unwrap()).unwrap();
+        assert!(configured.get("github").unwrap().is_copilot());
+        assert_eq!(
+            store
+                .get(Audience::Provider("github"))
+                .unwrap()
+                .unwrap()
+                .secret()
+                .expose(),
+            "fixture-github-secret"
+        );
+        {
+            let mut context = Context {
+                env: &env,
+                providers: &configured,
+                store: &store,
+                http: &KeyGiver,
+                login_http: &Device,
+                timeout: Duration::from_secs(5),
+                open: &|_| {},
+                interactive: false,
+                discovery: None,
+                out: &mut out,
+                err: &mut err,
+                input: &mut input,
+            };
+            execute(AuthCommand::Status { profile: None }, &mut context).unwrap();
+            execute(AuthCommand::Logout { profile: None }, &mut context).unwrap();
+        }
+        assert!(store.get(Audience::Provider("github")).unwrap().is_none());
+        let diagnostics = String::from_utf8(err).unwrap();
+        assert!(diagnostics.contains("ABCD-EFGH"));
+        assert!(diagnostics.contains("https://github.com/login/device"));
+        assert!(diagnostics.contains(bee::auth::copilot::CLIENT_ID));
+        let output = String::from_utf8(out).unwrap();
+        assert!(output.contains("stored credential present"));
+        for secret in ["fixture-github-secret", "fixture-device-secret"] {
+            assert!(!format!("{diagnostics}{output}").contains(secret));
+        }
+    }
 
     #[cfg(unix)]
     #[test]

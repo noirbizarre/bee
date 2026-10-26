@@ -155,9 +155,19 @@ fn concurrent_preference_updates_preserve_profiles_and_private_atomic_state() {
         for index in 0..12 {
             let store = Store::open(&history).unwrap();
             scope.spawn(move || {
-                store
-                    .remember(&format!("profile/{index}"), reference())
-                    .unwrap()
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                loop {
+                    match store.remember(&format!("profile/{index}"), reference()) {
+                        Ok(()) => break,
+                        Err(error) => {
+                            // Windows ACL work under coverage can exhaust the production one-second best-effort deadline.
+                            // Retry only reported contention so this test verifies merging without weakening that deadline.
+                            assert_eq!(error.reason, "recent model state is busy; retry later");
+                            assert!(std::time::Instant::now() < deadline, "{error}");
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                        }
+                    }
+                }
             });
         }
     });

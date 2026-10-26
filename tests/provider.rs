@@ -59,6 +59,34 @@ fn load(text: &str) -> bee::Result<Providers> {
 }
 
 #[test]
+fn copilot_authentication_survives_env_overrides_and_disabled_discovery() {
+    let providers = load("[providers.work]\npreset='github'\ncredential={env='COPILOT_GITHUB_TOKEN'}\ndiscover_models=false").unwrap();
+    let profile = providers.get("work").unwrap();
+    assert!(profile.is_copilot());
+    assert_eq!(profile.catalog_provider(), Some("github-copilot"));
+    assert!(!profile.discover_models());
+    assert!(profile.login_spec().is_none());
+    assert_eq!(
+        profile.credential(),
+        Some(&CredentialSource::Env("COPILOT_GITHUB_TOKEN".into()))
+    );
+    assert_eq!(profile.endpoints().len(), 3);
+}
+
+#[rstest]
+#[case("auth='unsupported-secret'")]
+#[case("headers={Authorization='sk-super-secret-token'}")]
+#[case("headers={X-Interaction-Id='sk-super-secret-token'}")]
+#[case("credential={store=true,login='chatgpt'}")]
+#[case("protocols.openai-chat.base_url='https://evil.example/sk-super-secret-token'")]
+fn copilot_rejects_unsafe_connection_overrides_without_repeating_values(#[case] extra: &str) {
+    let error = load(&format!("[providers.work]\npreset='github'\n{extra}")).unwrap_err();
+    let rendered = format!("{error:?} {error}");
+    assert!(!rendered.contains(SECRET));
+    assert!(!rendered.contains("unsupported-secret"));
+}
+
+#[test]
 fn context_windows_merge_per_model_across_presets_and_layers() {
     let sandbox = Sandbox::new();
     sandbox.write(&sandbox.global(), "[presets.local]\ncontext_window=10000\nmodel_context_windows={small=1000,large=20000}\n[presets.local.protocols.openai-chat]\n[providers.work]\npreset='local'\nmodel_context_windows={small=2000}\n");

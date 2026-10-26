@@ -405,7 +405,16 @@ fn a_token_can_be_stored_checked_and_forgotten_without_it_ever_being_printed() {
         .success()
         .stdout(predicate::str::is_empty())
         .stderr(predicate::str::contains("Removed the stored credential"));
-    assert!(!file.exists(), "the last credential takes the file with it");
+    let document: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert_eq!(document["providers"], serde_json::json!({}));
+    assert!(
+        !document["profile_revisions"]
+            .as_object()
+            .unwrap()
+            .is_empty(),
+        "logout tombstones prevent an older pending login from restoring authority"
+    );
 
     isolated(dir.path())
         .args(["auth", "status", "stored"])

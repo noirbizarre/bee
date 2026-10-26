@@ -19,6 +19,8 @@ pub enum Integration {
     OpenRouter,
     /// Official subscription-backed OAuth integration, separate from API keys.
     ChatGpt,
+    /// GitHub user-token authenticated Copilot model catalogue.
+    Copilot,
 }
 
 pub(super) fn same_account(a: Option<&Credential>, b: Option<&Credential>) -> bool {
@@ -112,9 +114,37 @@ pub(super) fn empty_listing(profile: &Profile) -> EndpointListing {
 
 pub(super) async fn discover(
     http: &dyn Http,
+    login_http: &dyn crate::http::LoginHttp,
     profile: &Profile,
     credential: Option<&Credential>,
 ) -> Result<EndpointListing, Error> {
+    if profile.discovery() == Some(Integration::Copilot) {
+        let credential = credential.ok_or(Error::Unauthorized)?;
+        let target = crate::auth::copilot::target(credential.secret(), login_http)
+            .await
+            .map_err(|error| {
+                if crate::auth::copilot::unauthorized(&error) {
+                    Error::Unauthorized
+                } else {
+                    Error::Credentials
+                }
+            })?;
+        let headers = crate::llm::request_headers(
+            profile,
+            Protocol::OpenAiChat,
+            Some(credential.secret()),
+            None,
+            false,
+        )
+        .map_err(|_| Error::Credentials)?;
+        let bytes = http
+            .get(&format!("{target}/models"), headers, MAX_LIST_BYTES)
+            .await?;
+        if bytes.len() > MAX_LIST_BYTES {
+            return Err(Error::Limit);
+        }
+        return copilot_listing(profile, &bytes);
+    }
     let chatgpt = profile
         .login_spec()
         .is_some_and(crate::preset::LoginSpec::is_chatgpt);
@@ -242,4 +272,154 @@ pub(super) async fn discover(
         listing.models.sort();
     }
     Ok(listing)
+}
+
+fn copilot_listing(profile: &Profile, bytes: &[u8]) -> Result<EndpointListing, Error> {
+    let value: Value = serde_json::from_slice(bytes).map_err(|_| Error::Malformed)?;
+    let data = value["data"].as_array().ok_or(Error::Malformed)?;
+    if data.len() > 100_000 {
+        return Err(Error::Limit);
+    }
+    let mut listing = empty_listing(profile);
+    listing.provenance = "native_api";
+    listing.scope = "account_visible";
+    for item in data {
+        // Picker/policy visibility limits automatic choices, not the routing facts needed by explicit selections.
+        let automatic = item["model_picker_enabled"] != false
+            && item["policy"]["state"] != "disabled"
+            && item["capabilities"]["supports"]["tool_calls"] != false
+            && item["capabilities"]["supports"]["streaming"] != false;
+        let id = item["id"].as_str().ok_or(Error::Malformed)?;
+        crate::provider::check_model_id(id).map_err(|_| Error::Malformed)?;
+        if listing.entries.contains_key(id) {
+            continue;
+        }
+        let protocols = item
+            .get("supported_endpoints")
+            .map(|value| {
+                value
+                    .as_array()
+                    .ok_or(Error::Malformed)?
+                    .iter()
+                    .map(|endpoint| {
+                        Ok(match endpoint.as_str().ok_or(Error::Malformed)? {
+                            "/chat/completions" => Some(Protocol::OpenAiChat),
+                            "/responses" => Some(Protocol::OpenAiResponses),
+                            "/v1/messages" => Some(Protocol::AnthropicMessages),
+                            _ => None,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, Error>>()
+                    .map(|items| items.into_iter().flatten().collect::<Vec<_>>())
+            })
+            .transpose()?;
+        let mut entry = Entry {
+            protocols,
+            ..Entry::default()
+        };
+        entry.metadata.display_name = item["name"].as_str().map(str::to_owned);
+        let limits = &item["capabilities"]["limits"];
+        entry.context_window = positive(&limits["max_context_window_tokens"]);
+        entry.metadata.output_limit = positive(&limits["max_output_tokens"]);
+        entry.metadata.input_limit = positive(&limits["max_prompt_tokens"]);
+        let supports = &item["capabilities"]["supports"];
+        entry.metadata.tool_call = supports["tool_calls"].as_bool();
+        entry.metadata.structured_output = supports["structured_outputs"].as_bool();
+        entry.metadata.input_modalities = supports["vision"].as_bool().map(|vision| {
+            if vision {
+                vec!["text".into(), "image".into()]
+            } else {
+                vec!["text".into()]
+            }
+        });
+        if !entry.metadata.valid() {
+            return Err(Error::Malformed);
+        }
+        if let Some(name) = &entry.metadata.display_name {
+            listing.display_names.insert(id.into(), name.clone());
+        }
+        // An explicitly unsupported route remains evidence for manual-selection errors, not an automatic choice.
+        if automatic
+            && entry.protocols.as_ref().is_none_or(|protocols| {
+                profile
+                    .endpoints()
+                    .iter()
+                    .any(|endpoint| protocols.contains(&endpoint.protocol()))
+            })
+        {
+            listing.models.push(id.into());
+        }
+        listing.entries.insert(id.into(), entry);
+    }
+    Ok(listing)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn copilot_non_picker_models_retain_routes_and_context_for_explicit_selection() {
+        let profile =
+            crate::test_support::configured_providers("[providers.work]\npreset='github'")
+                .get("work")
+                .unwrap()
+                .clone();
+        let listing = copilot_listing(&profile, br#"{"data":[
+            {"id":"hidden-model","model_picker_enabled":false,"supported_endpoints":["/chat/completions"],"capabilities":{"limits":{"max_context_window_tokens":32000}}},
+            {"id":"picker-model","model_picker_enabled":true,"supported_endpoints":["/responses"]}
+        ]}"#).unwrap();
+        assert_eq!(listing.models, ["picker-model"]);
+        let mut snapshot = Snapshot::default();
+        snapshot.endpoints.insert("work".into(), listing);
+        let selection = snapshot.resolve(&profile, "hidden-model");
+        assert_eq!(selection.protocol, Protocol::OpenAiChat);
+        assert_eq!(selection.window, Some(32000));
+        assert!(
+            snapshot
+                .check_route(&profile, "hidden-model", Protocol::OpenAiResponses)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn copilot_explicit_routes_override_native_facts_but_cannot_violate_them() {
+        let profile = crate::test_support::configured_providers("[providers.work]\npreset='github'\nmodel_protocols={multi='openai-chat',conflict='openai-responses'}\ncontext_window=64000").get("work").unwrap().clone();
+        let listing = copilot_listing(&profile, br#"{"data":[
+            {"id":"multi","supported_endpoints":["/responses","/chat/completions"],"capabilities":{"limits":{"max_context_window_tokens":32000}}},
+            {"id":"conflict","supported_endpoints":["/chat/completions"]},
+            {"id":"future-only","supported_endpoints":["/unknown"]},
+            {"id":"prompt-only","capabilities":{"limits":{"max_prompt_tokens":8000}}}
+        ]}"#).unwrap();
+        let mut snapshot = Snapshot::default();
+        snapshot.endpoints.insert("work".into(), listing);
+        let selection = snapshot.resolve(&profile, "multi");
+        assert_eq!(selection.protocol, Protocol::OpenAiChat);
+        assert_eq!(selection.protocol_fact.source, "configuration");
+        assert_eq!(selection.window, Some(64000));
+        assert!(
+            snapshot
+                .check_route(&profile, "multi", selection.protocol)
+                .is_ok()
+        );
+        assert!(
+            snapshot
+                .check_route(
+                    &profile,
+                    "conflict",
+                    snapshot.resolve(&profile, "conflict").protocol
+                )
+                .is_err()
+        );
+        assert!(
+            snapshot
+                .check_route(&profile, "future-only", Protocol::OpenAiResponses)
+                .is_err()
+        );
+        assert!(
+            snapshot.endpoints["work"].entries["prompt-only"]
+                .context_window
+                .is_none()
+        );
+    }
 }

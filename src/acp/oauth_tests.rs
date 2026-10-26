@@ -6,7 +6,7 @@ use crate::test_support::{Response, Server, event};
 use agent_client_protocol::{Client, Responder};
 use serde_json::{Value, json};
 
-fn stream(items: Vec<Value>) -> String {
+pub(super) fn stream(items: Vec<Value>) -> String {
     let mut wire = event(
         "response.created",
         json!({"type":"response.created","response":{"id":"response","status":"in_progress"}}),

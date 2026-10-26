@@ -109,6 +109,124 @@ fn defaults() -> (Arc<MemoryCache>, Arc<Time>) {
     )
 }
 
+struct CopilotAccount(AtomicUsize);
+impl bee::http::LoginHttp for CopilotAccount {
+    fn post_json<'a>(
+        &'a self,
+        _: &'a str,
+        _: String,
+    ) -> BoxFuture<'a, Result<bee::http::HttpResponse, bee::http::Unreachable>> {
+        Box::pin(async { panic!("model discovery must not start OAuth") })
+    }
+    fn get_authenticated<'a>(
+        &'a self,
+        url: &'a str,
+        headers: reqwest::header::HeaderMap,
+    ) -> BoxFuture<'a, Result<bee::http::HttpResponse, bee::http::Unreachable>> {
+        assert_eq!(url, "https://api.github.com/copilot_internal/user");
+        assert_eq!(headers["x-github-api-version"], "2025-04-01");
+        assert!(headers["authorization"].is_sensitive());
+        let status = self.0.load(Ordering::SeqCst) as u16;
+        Box::pin(async move {
+            Ok(bee::http::HttpResponse { status, body: json!({"chat_enabled":true,"endpoints":{"api":"https://api.business.githubcopilot.com"}}).to_string() })
+        })
+    }
+}
+
+#[tokio::test]
+async fn copilot_native_discovery_binds_routes_and_limits_to_the_selected_account() {
+    let profile =
+        support::configured_providers("[providers.work]\npreset='github'\ncredential={env='KEY'}")
+            .get("work")
+            .unwrap()
+            .clone();
+    let http = Arc::new(FakeHttp::new(vec![Ok(json!({"data":[
+        {"id":"chat-only","name":"Chat model","model_picker_enabled":true,"supported_endpoints":["/chat/completions"],"capabilities":{"limits":{"max_context_window_tokens":32000,"max_prompt_tokens":28000,"max_output_tokens":4000},"supports":{"tool_calls":true,"streaming":true}}},
+        {"id":"messages-only","name":"Messages model","supported_endpoints":["/v1/messages"]},
+        {"id":"responses-only","supported_endpoints":["/responses"]},
+        {"id":"disabled","policy":{"state":"disabled"}},
+        {"id":"not-tools","capabilities":{"supports":{"tool_calls":false}}},
+        {"id":"unsupported","supported_endpoints":["/embeddings"]}
+    ]}).to_string().into_bytes()), Err(Error::Transport), Err(Error::Transport)]));
+    let (cache, clock) = defaults();
+    let service = Service::new(Settings::default(), http.clone(), cache.clone(), clock)
+        .with_login_http(Arc::new(CopilotAccount(AtomicUsize::new(200))));
+    let env = Environment::default().with_variable("KEY", "first-account-secret");
+    let listing = service.list_endpoint(&profile, &env).await.unwrap();
+    assert_eq!(
+        listing.models,
+        ["chat-only", "messages-only", "responses-only"]
+    );
+    assert_eq!(
+        listing.entries["chat-only"].metadata.input_limit,
+        Some(28000)
+    );
+    let snapshot = service.snapshot();
+    let selection = snapshot.resolve(&profile, "chat-only");
+    assert_eq!(selection.protocol, Protocol::OpenAiChat);
+    assert_eq!(selection.protocol_fact.source, "native_api");
+    assert_eq!(selection.window, Some(32000));
+    assert_eq!(
+        snapshot.resolve(&profile, "messages-only").protocol,
+        Protocol::AnthropicMessages
+    );
+    assert_eq!(
+        snapshot.resolve(&profile, "responses-only").protocol,
+        Protocol::OpenAiResponses
+    );
+    let requests = http.requests.lock().unwrap().clone();
+    assert_eq!(
+        requests[0].0,
+        "https://api.business.githubcopilot.com/models"
+    );
+    assert_eq!(
+        requests[0].1["authorization"],
+        "Bearer first-account-secret"
+    );
+    assert_eq!(requests[0].1["x-github-api-version"], "2026-08-01");
+    assert!(!requests[0].1.contains_key("x-api-key"));
+    assert!(!requests[0].1.contains_key("x-initiator"));
+    drop(requests);
+    assert!(service.list_endpoint(&profile, &env).await.is_err());
+    assert_eq!(service.snapshot().endpoints["work"].models, listing.models);
+    let changed = Environment::default().with_variable("KEY", "replacement-account-secret");
+    assert!(service.list_endpoint(&profile, &changed).await.is_err());
+    assert!(service.snapshot().endpoints["work"].models.is_empty());
+    assert_eq!(
+        selection.window,
+        Some(32000),
+        "turn decisions are immutable"
+    );
+    assert!(
+        cache.bytes.lock().unwrap().is_none(),
+        "private model facts never enter public cache"
+    );
+}
+
+#[tokio::test]
+async fn copilot_entitlement_rejection_clears_a_previous_private_listing() {
+    let profile =
+        support::configured_providers("[providers.work]\npreset='github'\ncredential={env='KEY'}")
+            .get("work")
+            .unwrap()
+            .clone();
+    let http = Arc::new(FakeHttp::new(vec![Ok(
+        br#"{"data":[{"id":"visible","supported_endpoints":["/responses"]}]}"#.to_vec(),
+    )]));
+    let account = Arc::new(CopilotAccount(AtomicUsize::new(200)));
+    let (cache, clock) = defaults();
+    let service =
+        Service::new(Settings::default(), http, cache, clock).with_login_http(account.clone());
+    let env = Environment::default().with_variable("KEY", "account-secret");
+    service.list_endpoint(&profile, &env).await.unwrap();
+    account.0.store(403, Ordering::SeqCst);
+    assert_eq!(
+        service.list_endpoint(&profile, &env).await.err().unwrap(),
+        Error::Unauthorized
+    );
+    assert!(service.snapshot().endpoints["work"].models.is_empty());
+}
+
 #[tokio::test]
 async fn openrouter_native_pages_preserve_metadata_and_last_good_account_catalogue() {
     let profile = support::configured_providers(

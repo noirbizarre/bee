@@ -651,6 +651,24 @@ pub enum Error {
         reason: &'static str,
     },
 
+    /// Fixed Copilot recovery guidance, never an upstream response body.
+    #[error("GitHub Copilot authorization failed: {reason}")]
+    #[diagnostic(
+        code(bee::auth::copilot),
+        help(
+            "Check Copilot access and the selected token, or run `bee auth login <profile>` again"
+        )
+    )]
+    Copilot {
+        /// An allowlisted classification with recovery guidance.
+        reason: &'static str,
+    },
+
+    /// Writer contention has a provider-independent recovery path.
+    #[error("credential store is busy; retry shortly")]
+    #[diagnostic(code(bee::auth::store_busy))]
+    AuthStoreBusy,
+
     /// The profile reads its credential from somewhere Bee does not write.
     #[error("provider profile `{profile}` does not use the credential store")]
     #[diagnostic(

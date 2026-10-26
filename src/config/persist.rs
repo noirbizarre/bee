@@ -109,7 +109,7 @@ fn proposed(env: &Environment, cwd: &Path, name: &str) -> Result<(Option<Documen
         .get("providers")
         .and_then(toml::Value::as_table)
         .is_some_and(|table| table.contains_key(name));
-    if !configured && !matches!(name, "openrouter" | "chatgpt") {
+    if !configured && !matches!(name, "openrouter" | "chatgpt" | "github") {
         crate::auth::profile(&providers, name)?;
     }
     let path = env.global_config_path().ok_or_else(|| {

@@ -80,6 +80,29 @@ base_url = "https://api.openai.com/v1"
 catalog_provider = "anthropic"
 credential = { env = "ANTHROPIC_API_KEY" }
 
+# Direct GitHub user-token authentication; device authorization uses a public client.
+# See the Copilot authentication ADR for consent identity and wire-contract provenance.
+[login_flows.github]
+kind = "github"
+
+[presets.github]
+auth = "github"
+discovery = "github"
+discover_models = true
+# Models.dev's external provider ID is independent of Bee's shorter preset name.
+catalog_provider = "github-copilot"
+prefer = ["openai-responses", "anthropic-messages", "openai-chat"]
+credential = { store = true, login = "github" }
+
+[presets.github.protocols.openai-chat]
+base_url = "https://api.githubcopilot.com"
+
+[presets.github.protocols.openai-responses]
+base_url = "https://api.githubcopilot.com"
+
+[presets.github.protocols.anthropic-messages]
+base_url = "https://api.githubcopilot.com"
+
 [presets.anthropic.protocols.anthropic-messages]
 
 # A local server needs no credential, which is what no `credential` means.

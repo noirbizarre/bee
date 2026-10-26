@@ -19,6 +19,7 @@ For supported built-ins, start without a provider declaration or model ID:
 ```sh
 bee auth login openrouter
 bee auth login chatgpt
+bee auth login github
 ```
 
 Explicit login creates a missing connection in user configuration and adds it to the active profile. Existing connection
@@ -27,7 +28,8 @@ if a project or `BEE_CONFIG` file overrides profile membership, update that memb
 in the private credential store. Successful authentication immediately discovers models; discovery failure does not undo
 login. Manual token login uses the same hook. ChatGPT still requires its existing browser OAuth flow.
 
-The OpenRouter and ChatGPT presets enable native discovery automatically. Set `discover_models = false` to disable
+The OpenRouter, ChatGPT and GitHub Copilot presets enable native discovery automatically.
+Set `discover_models = false` to disable
 automatic listing on a connection. `[catalog]` below controls public Models.dev metadata independently of native discovery.
 
 Production ACP starts optional background discovery after initialization. Session creation and inference do not wait
@@ -97,8 +99,9 @@ overrides describe facts; they do not add wire features or automatically suppres
 With `catalog_protocol_hints = true`, resolution is:
 
 1. Exact configured `model_protocols` mapping.
-2. Recognized catalog npm hint, only if that protocol is already configured on the connection.
-3. Existing `prefer` fallback.
+2. GitHub Copilot's exact native `supported_endpoints` declarations, when available.
+3. Recognized catalog npm hint, only if that protocol is already configured on the connection.
+4. Existing `prefer` fallback.
 
 Bee reads model `provider.npm`, falling back to provider-level `npm` only when absent. `@ai-sdk/anthropic` hints Messages;
 `@ai-sdk/openai-compatible` hints Chat; `@ai-sdk/openai` hints Responses, matching the AI SDK's default since v5.
@@ -107,11 +110,15 @@ Hints are approximate: one SDK can expose several APIs. Use an explicit mapping 
 Failures never trigger another protocol attempt.
 
 With `catalog_context_window = true`, capacity resolves as exact `model_context_windows` entry → connection
-`context_window` → valid catalog context capacity → unknown. The existing approximate accounting and transactional
+`context_window` → Copilot native total context capacity → valid catalog context capacity → unknown.
+Copilot native routing and total capacity apply independently of public catalog opt-ins; `max_prompt_tokens`
+remains a separate informational input limit. The existing approximate accounting and transactional
 oldest-whole-turn eviction apply. Input/output catalog limits remain informational. Context reports identify the
 enforced window's provenance in `_meta["bee.dev/context"].window`.
 
-Both routing and budget are frozen for the entire model/tool loop. Configured models do not wait for discovery;
+Both routing and budget are frozen for the entire model/tool loop. Copilot may await its first native listing to resolve
+the exact model route; explicit model/protocol mappings proceed without waiting for optional discovery.
+Other configured models do not wait for discovery;
 first-use authentication without a model can await native discovery before taking the inference snapshot.
 A later protocol change strips native continuation from the next turn's working history while preserving portable
 messages. Only successful non-refused completion commits that history and route; cancellation/failure preserves
@@ -125,7 +132,8 @@ Listing uses existing credentials and never starts browser login; successful bro
 ChatGPT OAuth credentials are renewed when necessary before listing. Missing credentials or unsupported listings do not
 prevent manually configured inference.
 
-Native integration identity is explicit (`discovery = "openrouter"` or `"chatgpt"`, supplied by the relevant preset), separate
+Native integration identity is explicit (`discovery = "openrouter"`, `"chatgpt"` or `"github"`, supplied by the
+relevant preset), separate
 from `catalog_provider` and inference protocols. Arbitrary connection names never select an adapter implicitly.
 OpenRouter requests its authenticated `/models/user` API, preserving returned labels, modalities, supported-parameter
 declarations and context limits. Its scope is user preferences, privacy settings and guardrails: it does not establish
@@ -138,6 +146,12 @@ account-specific `models[]` contract, keeps `visibility = "list"` entries, and p
 `slug` IDs in server order. Its automatic endpoint discovery is enabled by the preset. Account names and IDs remain
 separate from the public Models.dev cache.
 Generic responses advertising more pages are unsupported rather than presented as complete.
+Copilot uses account-authenticated `/models`, preserving native order and capability/limit declarations. Explicitly disabled,
+non-picker, non-tool or non-streaming models are excluded from automatic choices. Exact `/chat/completions`, `/responses`
+and `/v1/messages` declarations select supported protocols in configured preference order. Unknown-only declarations never
+become guessed routes, and a conflicting explicit mapping fails before inference. Bee does not automatically enable model
+policies. Copilot auth mode and target preparation remain active with discovery disabled; see
+[setup](index.md#use-github-copilot) and [ADR-024](adr/024-github-copilot-authentication.md).
 Generic results are sorted/deduplicated; native results preserve server order. Results are bounded to 100000 IDs and kept
 in memory per connection within the runtime's active profile. Same-account transient failures retain the last good catalogue
 with its original successful fetch time, latest attempt/error and stale flag. Account replacement, logout or authorization
@@ -197,6 +211,7 @@ Adapters are incremental; entries marked planned currently use manual connection
 | --- | --- | --- |
 | OpenRouter | Implemented: native authenticated Models API (`/models/user`) | User preferences/privacy/guardrails; no credit, quota or inference guarantee |
 | ChatGPT / Codex OAuth | Implemented: existing official OAuth and account catalogue integration | Separate from OpenAI API keys; visible catalogue metadata is not entitlement |
+| GitHub Copilot | Implemented: direct user-token `/models`, exact protocol declarations and native limits | GitHub.com accounts; private account visibility, no quota or inference guarantee |
 | Anthropic Claude | Planned: native Models API with pagination | API-key/workspace scope; Claude subscription/OAuth is not API access |
 | OpenCode Zen | Planned: documented Zen model catalogue integration | Explicit Zen authentication and catalogue provenance |
 | OpenCode Go | Planned: documented Go model catalogue integration | Distinct catalogue and credentials from Zen |

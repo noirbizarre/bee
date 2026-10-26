@@ -28,6 +28,8 @@ Production ACP requests permission for Bash only, adds `ask_user` for form-capab
 and provides `update_plan` for explicit per-turn ACP item plans. Latest snapshots are durable,
 replayed independently of model context, and unfinished entries are cancelled before terminal idle.
 Bee initiates cancellable provider browser login for missing/expired stored credentials when URL elicitation is supported.
+GitHub.com Copilot supports device OAuth or explicit environment GitHub user tokens, direct bearer inference,
+validated account API targets and native per-model endpoint/context declarations independent of public catalog hints.
 Pending interactions are turn-owned; cleanup precedes terminal idle and direct-close responses.
 Each native backend preserves its own continuation and tool-result semantics.
 Optional Models.dev discovery enriches selection without blocking inference; public cache and account-specific endpoint
