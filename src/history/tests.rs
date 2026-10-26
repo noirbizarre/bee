@@ -117,6 +117,7 @@ async fn plan_replay_reserves_the_entire_budget_before_delivering_messages_or_pl
 
 fn snapshot() -> Snapshot {
     Snapshot {
+        profile: "default".into(),
         cwd: std::env::temp_dir(),
         turns: 0,
         provider: Some("saved".into()),
@@ -245,7 +246,7 @@ async fn incomplete_creations_are_not_published_to_the_session_listing() {
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(first["version"], 2);
+    assert_eq!(first["version"], 3);
     assert_eq!(first["seq"], 0);
     assert_eq!(first["event"]["id"], id);
 }
@@ -532,6 +533,39 @@ async fn deeply_nested_tool_arguments_are_rejected_before_the_journal_becomes_un
     let (restored, _, interrupted) = store.attach(&id).await.unwrap();
     assert!(interrupted);
     assert!(restored.messages.is_empty());
+}
+
+#[tokio::test]
+async fn profile_ownership_round_trips_and_cannot_change_through_settings_or_context() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(root.path().join("history")).unwrap();
+    let mut initial = snapshot();
+    initial.profile = "work".into();
+    let (id, handle) = store.create(initial.clone()).await.unwrap();
+    assert_eq!(store.list().await.unwrap()[0].profile, "work");
+    let mut changed = initial.clone();
+    changed.profile = "personal".into();
+    // Invalid writes intentionally poison an async owner. Exercise the delta
+    // validators directly so this same handle can still verify round-tripping.
+    let projection = journal::Projection::header(
+        Event::SessionCreated {
+            id: id.clone(),
+            created: 1,
+            snapshot: initial,
+        },
+        &id,
+        &handle.0.path,
+    )
+    .unwrap();
+    assert!(projection.settings(&changed, &handle.0.path).is_err());
+    changed.messages = vec![crate::llm::Message::User("question".into())];
+    assert!(projection.context(&changed, &handle.0.path).is_err());
+    changed.profile = "work".into();
+    assert!(projection.context(&changed, &handle.0.path).is_ok());
+    handle.release().await.unwrap();
+    let (restored, handle, _) = store.attach(&id).await.unwrap();
+    assert_eq!(restored.profile, "work");
+    handle.release().await.unwrap();
 }
 
 #[tokio::test]

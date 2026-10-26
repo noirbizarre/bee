@@ -19,6 +19,16 @@ use crate::provider::{Providers, check_model_id};
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum SessionError {
+    /// A durable session cannot import another profile's context or settings.
+    #[error(
+        "session belongs to a different profile; restart Bee with the session's original profile or create a new session"
+    )]
+    ProfileMismatch,
+    /// A removed connection must not silently become another account.
+    #[error(
+        "session's selected connection is outside the active profile; restore its connection membership or create a new session"
+    )]
+    ConnectionMismatch,
     /// Restoration/storage failures are never interpreted as a fresh session.
     #[error(transparent)]
     History(#[from] crate::history::Error),
@@ -594,6 +604,7 @@ impl Sessions {
 
     pub(crate) fn snapshot(&self, id: &str) -> Option<crate::history::Snapshot> {
         self.by_id.get(id).map(|session| crate::history::Snapshot {
+            profile: self.providers.profile_name().to_owned(),
             cwd: session.cwd.clone(),
             turns: session.turns,
             provider: session.provider.clone(),
@@ -602,6 +613,27 @@ impl Sessions {
             messages: session.history.clone(),
             instructions: session.instructions.clone(),
         })
+    }
+
+    pub(crate) fn profile_name(&self) -> &str {
+        self.providers.profile_name()
+    }
+
+    pub(crate) fn validate_snapshot(
+        &self,
+        snapshot: &crate::history::Snapshot,
+    ) -> Result<(), SessionError> {
+        if snapshot.profile != self.providers.profile_name() {
+            return Err(SessionError::ProfileMismatch);
+        }
+        if snapshot
+            .provider
+            .as_ref()
+            .is_some_and(|name| self.providers.get(name).is_none())
+        {
+            return Err(SessionError::ConnectionMismatch);
+        }
+        Ok(())
     }
 
     pub(crate) fn restore(

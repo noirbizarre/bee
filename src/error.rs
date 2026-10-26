@@ -17,6 +17,20 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, Error, Diagnostic)]
 #[non_exhaustive]
 pub enum Error {
+    /// Profile selection must never silently choose another account.
+    #[error("profile configuration in `{path}` {reason}")]
+    #[diagnostic(
+        code(bee::profile::setting),
+        help(
+            "select an existing profile with profile or BEE_PROFILE; define its connections, optional provider, and per-connection models under [profiles]"
+        )
+    )]
+    ProfileSetting {
+        /// Source, never the selector value.
+        path: String,
+        /// Fixed validation classification.
+        reason: &'static str,
+    },
     /// Replay limits are validated without quoting configuration values.
     #[error("history setting in `{path}` {reason}")]
     #[diagnostic(

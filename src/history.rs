@@ -160,6 +160,10 @@ impl ReplayBudget {
 /// Restorable core state, excluding connection-owned execution and authority.
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct Snapshot {
+    // Missing ownership in pre-profile journals always means default, never
+    // whichever profile happens to be selected when the journal is opened.
+    #[serde(default = "default_profile")]
+    pub(crate) profile: String,
     pub(crate) cwd: PathBuf,
     pub(crate) turns: u64,
     pub(crate) provider: Option<String>,
@@ -167,6 +171,10 @@ pub(crate) struct Snapshot {
     pub(crate) protocol: Option<crate::provider::Protocol>,
     pub(crate) messages: Vec<crate::llm::Message>,
     pub(crate) instructions: crate::instructions::State,
+}
+
+fn default_profile() -> String {
+    "default".into()
 }
 
 /// An SDK-free upsert. Original user blocks are validated at the ACP boundary.
@@ -184,6 +192,7 @@ impl std::fmt::Debug for Message {
 }
 
 pub(crate) struct Listing {
+    pub(crate) profile: String,
     pub(crate) id: String,
     pub(crate) cwd: PathBuf,
     created: u64,
@@ -304,6 +313,7 @@ impl Store {
                     .ok_or_else(|| error(&path, "session journal header is unavailable"))?;
                 let projection = journal::Projection::header(header, &id, &path)?;
                 listed.push(Listing {
+                    profile: projection.snapshot.profile,
                     id,
                     cwd: projection.snapshot.cwd,
                     created: projection.created,

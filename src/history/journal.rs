@@ -13,7 +13,7 @@ use super::{Message, Result, Snapshot, error, open_options, open_private_file};
 // A corrupt/malicious line must not allocate the size of the entire journal.
 // This bounds one record, not transcript length or the number of sessions.
 pub(super) const MAX_RECORD_BYTES: usize = 64 * 1024 * 1024;
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -127,7 +127,7 @@ fn decode(line: &[u8], seq: u64, path: &Path) -> Result<Event> {
         serde_json::from_slice(line).map_err(|_| error(path, "invalid complete journal record"))?;
     // Existing journals remain readable; older binaries reject new records by
     // version instead of interpreting an extended event contract as v1.
-    if !matches!(record.version, 1 | VERSION) {
+    if !matches!(record.version, 1 | 2 | VERSION) {
         return Err(error(
             path,
             "unsupported session history version; use a compatible Bee version",
@@ -140,6 +140,18 @@ fn decode(line: &[u8], seq: u64, path: &Path) -> Result<Event> {
     }
     let event = serde_json::from_str(record.event.get())
         .map_err(|_| error(path, "invalid journal event"))?;
+    if let Event::SessionCreated { snapshot, .. } = &event {
+        // A v3 header must bind ownership explicitly. Old binaries reject its
+        // version instead of silently discarding the new isolation boundary.
+        let raw: serde_json::Value = serde_json::from_str(record.event.get())
+            .map_err(|_| error(path, "invalid journal event"))?;
+        if (record.version >= 3 && raw["snapshot"].get("profile").is_none())
+            || (record.version < 3 && snapshot.profile != "default")
+            || snapshot.profile.trim().is_empty()
+        {
+            return Err(error(path, "invalid session profile ownership"));
+        }
+    }
     if record.version == 1 && matches!(event, Event::PlanUpdated { .. }) {
         return Err(error(
             path,
@@ -327,6 +339,7 @@ impl Projection {
 
     pub(super) fn settings(&self, next: &Snapshot, path: &Path) -> Result<Event> {
         if self.snapshot.cwd != next.cwd
+            || self.snapshot.profile != next.profile
             || self.snapshot.turns != next.turns
             || self.snapshot.protocol != next.protocol
             || self.snapshot.instructions != next.instructions
@@ -351,6 +364,7 @@ impl Projection {
     pub(super) fn context(&self, next: &Snapshot, path: &Path) -> Result<Context> {
         let invalid = || error(path, "successful context is not an oldest-whole-turn delta");
         if next.cwd != self.snapshot.cwd
+            || next.profile != self.snapshot.profile
             || next.turns != self.snapshot.turns
             || next.provider != self.snapshot.provider
             || next.model != self.snapshot.model
@@ -662,17 +676,56 @@ mod compatibility_tests {
     use super::*;
 
     #[test]
-    fn legacy_headers_accept_new_plan_records_without_rewriting_the_old_prefix() {
+    fn profile_ownership_requires_a_new_explicit_header_contract() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("journal");
+        for (version, profile, valid) in [
+            (1, None, true),
+            (2, None, true),
+            (3, None, false),
+            (1, Some("work"), false),
+            (2, Some("work"), false),
+            (3, Some("work"), true),
+            (3, Some(""), false),
+        ] {
+            let mut event = serde_json::json!({"type":"session_created","id":"saved","created":1,"snapshot":{
+                "cwd":root.path(),"turns":0,"provider":null,"model":null,"protocol":null,"messages":[],
+                "instructions":serde_json::to_value(crate::instructions::State::default()).unwrap()
+            }});
+            if let Some(profile) = profile {
+                event["snapshot"]["profile"] = profile.into();
+            }
+            let event = serde_json::value::to_raw_value(&event).unwrap();
+            let record = Record {
+                version,
+                seq: 0,
+                checksum: checksum(version, 0, event.get()),
+                event,
+            };
+            assert_eq!(
+                decode(&serde_json::to_vec(&record).unwrap(), 0, &path).is_ok(),
+                valid
+            );
+        }
+    }
+
+    #[rstest::rstest]
+    #[case(1)]
+    #[case(2)]
+    fn legacy_headers_accept_new_plan_records_without_rewriting_the_old_prefix(
+        #[case] version: u32,
+    ) {
         let root = tempfile::tempdir().unwrap();
         let directory = root.path().join("history");
         // Windows files inherit their parent's ACL; a generic temp directory
         // does not provide the user-only permissions required by journal opens.
         super::super::private_directory(&directory).unwrap();
         let path = directory.join("session.jsonl");
-        let event = serde_json::value::to_raw_value(&Event::SessionCreated {
+        let mut event = serde_json::to_value(Event::SessionCreated {
             id: "saved".into(),
             created: 1,
             snapshot: Snapshot {
+                profile: "default".into(),
                 cwd: root.path().into(),
                 turns: 0,
                 provider: None,
@@ -683,12 +736,15 @@ mod compatibility_tests {
             },
         })
         .unwrap();
-        // Construct the actual v1 framing/checksum, not a v2 record whose version
-        // was edited without updating its integrity check.
+        // Historical creation snapshots did not carry grouping ownership.
+        event["snapshot"].as_object_mut().unwrap().remove("profile");
+        let event = serde_json::value::to_raw_value(&event).unwrap();
+        // Construct historical framing/checksum rather than editing a new
+        // record's version without updating its integrity check.
         let record = Record {
-            version: 1,
+            version,
             seq: 0,
-            checksum: checksum(1, 0, event.get()),
+            checksum: checksum(version, 0, event.get()),
             event,
         };
         let mut prefix = serde_json::to_vec(&record).unwrap();
@@ -698,6 +754,7 @@ mod compatibility_tests {
         file.sync_all().unwrap();
         drop(file);
         let mut journal = Journal::open(&path, "saved").unwrap();
+        assert_eq!(journal.projection.snapshot.profile, "default");
         journal
             .append(Event::TurnAccepted {
                 turn: 1,

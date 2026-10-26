@@ -32,6 +32,8 @@ Pending interactions are turn-owned; cleanup precedes terminal idle and direct-c
 Each native backend preserves its own continuation and tool-result semantics.
 Optional Models.dev discovery enriches selection without blocking inference; public cache and account-specific endpoint
 listings stay separate. Explicit configuration wins over opted-in catalog protocol hints/context budgets, frozen per turn.
+Named profiles scope connection references, model preferences and durable sessions; existing connections migrate into
+the default profile in memory. Selector precedence is global, BEE_PROFILE, BEE_CONFIG file, then project configuration.
 Project/nested AGENTS.md and additive user instructions feed a separate counted system payload. Standard Agent Skills
 use metadata-first discovery and read-based activation; semantic snapshots commit with successful history and survive
 whole-turn eviction. Typed native targets defer calls when new scoped guidance must first reach the model.
@@ -70,6 +72,7 @@ src/
 ├── history.rs  private durable sessions, ordered JSONL journals and successful-context projections, free of the SDK
 ├── config.rs   layered XDG configuration (ADR-006), free of the SDK
 ├── provider.rs provider profiles from the configuration (ADR-007), free of the SDK
+├── profile.rs  named grouping profiles over connections and model defaults (ADR-022), free of the SDK
 ├── auth.rs     credential sources, transactional 0600 store and secret handling (ADR-008), free of the SDK
 ├── auth/chatgpt.rs official local/OSS ChatGPT OAuth, verified identity, renewal and revocation (ADR-020)
 ├── login.rs    the `pkce-key` browser sign-in, driven by a `LoginSpec`, free of the SDK

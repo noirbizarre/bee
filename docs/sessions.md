@@ -5,6 +5,12 @@ discover an existing native session ID and restore its conversation without keep
 
 ## Storage and retention
 
+Each session belongs to the [profile](profiles.md) selected when it was created. Listing returns only that profile's
+sessions. Resume under another profile fails before recovery or replay, even if both reference the same connection.
+An explicitly selected connection that has since been removed from the owning profile also prevents resume, rather
+than silently choosing a different account. Legacy sessions belong to `default`. Select that profile and include the
+original connections to resume them; Bee does not migrate session ownership between profiles.
+
 Sessions live under `$XDG_STATE_HOME/bee/sessions`, falling back to `~/.local/state/bee/sessions`.
 An empty or relative `XDG_STATE_HOME` is ignored. On Windows, USERPROFILE supplies home when HOME is unset.
 If neither a state root nor home is available,
@@ -42,14 +48,20 @@ The version 1 event types are:
 - `turn_finished`: terminal outcome and, only on success, new context messages, oldest-whole-turn eviction,
   protocol and changed instruction/skill payloads.
 
+Version 2 adds `plan_updated` events. Version 3 makes profile ownership explicit in the immutable `session_created`
+snapshot. Writers emit version 3; readers also accept versions 1 and 2, whose missing profile means `default`.
+New records can append to legacy journals without rewriting their prefix. Older binaries reject version 3 rather than
+ignoring profile ownership.
+
 The terminal outcome and successful-context delta share one record. Unchanged retained context and guidance are not
 copied into the journal after every turn. Full visible history remains available after model-context eviction.
 
 The owner appends and synchronizes acceptance before acknowledging the prompt, text batches before emitting chunks,
 and terminal commits before idle. On reopening, Bee reconstructs state by streaming complete records. Only an incomplete
-final line may be truncated, after ownership and cwd validation. Invalid complete records, checksum failures, sequence
+final line may be truncated, after profile, connection-membership, exclusive ownership and cwd validation.
+Invalid complete records, checksum failures, sequence
 gaps and unsupported versions fail explicitly; Bee never skips them to fabricate an empty session.
-After cwd validation, Bee synchronizes the accepted prefix before publishing restored state, even when the last
+After validation, Bee synchronizes the accepted prefix before publishing restored state, even when the last
 complete record looks clean: its previous writer may have died before synchronizing it.
 
 One serialized record is limited to **64 MiB**, including framing, to bound recovery allocations. This is not a total

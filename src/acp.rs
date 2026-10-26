@@ -737,6 +737,7 @@ where
                         let mcp = Arc::clone(&mcp);
                         return connection.spawn(async move {
                             let snapshot = crate::history::Snapshot {
+                                profile: lock(&sessions).profile_name().to_owned(),
                                 cwd: request.cwd.into_inner(), turns: 0, provider: None, model: None,
                                 protocol: None, messages: Vec::new(), instructions: Default::default(),
                             };
@@ -778,12 +779,14 @@ where
                         ));
                     }
                     if let Some(store) = history.clone() {
+                        let profile = lock(&sessions).profile_name().to_owned();
                         return connection.spawn(async move {
                             let listed = match store.list().await {
                                 Ok(listed) => listed,
                                 Err(error) => return responder.respond_with_error(history_error(error)),
                             };
                             responder.respond(v2::ListSessionsResponse::new(listed.into_iter()
+                                .filter(|session| session.profile == profile)
                                 .filter(|session| request.cwd.as_ref().is_none_or(|cwd| AsRef::<Path>::as_ref(cwd) == session.cwd))
                                 .map(|session| v2::SessionInfo::new(session.id, session.cwd)).collect()))
                         });
@@ -843,6 +846,15 @@ where
                                     Ok(loaded) => loaded,
                                     Err(error) => return responder.respond_with_error(history_error(error)),
                                 };
+                                let validation = lock(&sessions).validate_snapshot(&snapshot);
+                                if let Err(error) = validation {
+                                    // Release before responding so the owning profile can
+                                    // immediately retry; rejected resumes must not repair history.
+                                    if let Err(error) = handle.release().await {
+                                        return responder.respond_with_error(history_error(error));
+                                    }
+                                    return responder.respond_with_error(session_error(error));
+                                }
                                 if snapshot.cwd != AsRef::<Path>::as_ref(&request.cwd) {
                                     // Release before rejecting, so a corrected
                                     // request does not race this worker's Drop.

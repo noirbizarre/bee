@@ -131,6 +131,7 @@ fn isolated(dir: &std::path::Path) -> Command {
         .env("XDG_CACHE_HOME", dir.join("cache"))
         .env("XDG_STATE_HOME", dir.join("state"))
         .env_remove("BEE_CONFIG")
+        .env_remove("BEE_PROFILE")
         .env_remove("BEE_TEST_KEY")
         .current_dir(dir);
     command
@@ -297,6 +298,75 @@ fn configured() -> tempfile::TempDir {
 }
 
 // These commands exercise the real private-file store, which is Unix-only.
+#[cfg(unix)]
+#[test]
+fn named_profiles_scope_auth_and_models_without_changing_connection_credential_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join(".config/bee.toml");
+    std::fs::create_dir_all(project.parent().unwrap()).unwrap();
+    std::fs::write(&project, "[catalog]\nenabled=false\n[providers.work-api]\npreset='openai'\ncredential={store=true}\nmodel='base-work'\n[providers.personal-api]\npreset='openai'\ncredential={store=true}\nmodel='base-personal'\n[profiles.work]\nconnections=['work-api']\n[profiles.work.models.work-api]\nmodel='profile-work'\n[profiles.personal]\nconnections=['personal-api']\n").unwrap();
+    for (profile, token) in [("work", "work-secret"), ("personal", "personal-secret")] {
+        isolated(dir.path())
+            .env("BEE_PROFILE", profile)
+            .args(["auth", "login", "--with-token"])
+            .write_stdin(token)
+            .assert()
+            .success()
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::contains(token).not());
+    }
+    let stored: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(dir.path().join("data/bee/credentials.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(stored["providers"].get("work-api").is_some());
+    assert!(stored["providers"].get("personal-api").is_some());
+    assert!(stored["providers"].get("work").is_none());
+    isolated(dir.path())
+        .env("BEE_PROFILE", "work")
+        .args(["auth", "status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("work-api"))
+        .stdout(predicate::str::contains("personal-api").not());
+    for args in [
+        vec!["auth", "status", "personal-api"],
+        vec!["auth", "logout", "personal-api"],
+        vec!["models", "list", "personal-api"],
+    ] {
+        isolated(dir.path())
+            .env("BEE_PROFILE", "work")
+            .args(args)
+            .assert()
+            .failure();
+    }
+    isolated(dir.path())
+        .env("BEE_PROFILE", "work")
+        .args(["models", "list", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("profile-work"))
+        .stdout(predicate::str::contains("base-personal").not());
+    isolated(dir.path())
+        .env("BEE_PROFILE", "personal")
+        .args(["models", "list", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("base-personal"))
+        .stdout(predicate::str::contains("profile-work").not());
+    isolated(dir.path())
+        .env("BEE_PROFILE", "work")
+        .args(["auth", "logout"])
+        .assert()
+        .success();
+    isolated(dir.path())
+        .env("BEE_PROFILE", "personal")
+        .args(["auth", "status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("stored credential present"));
+}
+
 #[cfg(unix)]
 #[test]
 fn a_token_can_be_stored_checked_and_forgotten_without_it_ever_being_printed() {

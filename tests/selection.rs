@@ -117,6 +117,31 @@ fn invalid_params(error: &Error) -> bool {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn an_active_profile_exposes_only_its_connections_and_model_preferences() {
+    let config = format!(
+        "profile='work-context'\n{TWO_PROFILES}\n[profiles.work-context]\nconnections=['work']\n[profiles.work-context.models.work]\nmodel='profile-model'\nmodels=[]\n"
+    );
+    run(providers(&config), async |connection| {
+        let session = new_session(&connection).await?;
+        assert_eq!(
+            selector(&session.config_options, "provider"),
+            ("work".into(), vec!["work".into()])
+        );
+        assert_eq!(
+            selector(&session.config_options, "model"),
+            ("profile-model".into(), vec!["profile-model".into()])
+        );
+        assert!(invalid_params(
+            &set(&connection, &session.session_id, "provider", "local")
+                .await
+                .unwrap_err()
+        ));
+        Ok(())
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn without_providers_no_option_is_offered() {
     run(Providers::default(), async |connection| {
         let session = new_session(&connection).await?;

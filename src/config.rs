@@ -1,11 +1,14 @@
 //! Layered configuration, free of the ACPv2 SDK.
 //!
-//! Three optional layers are merged, lowest precedence first:
+//! File layers are merged, lowest precedence first:
 //!
 //! 1. the global file, `$XDG_CONFIG_HOME/bee/config.toml` (or
 //!    `~/.config/bee/config.toml`);
 //! 2. the file named by the `BEE_CONFIG` environment variable;
 //! 3. the project file, `<project>/.config/bee.toml`.
+//!
+//! `BEE_PROFILE` supplies a selector between the global and intermediate files
+//! using the same merge rules (ADR-022).
 //!
 //! The result is a merged TOML table, not a typed schema: the settings that
 //! give it meaning (providers, models) belong to the code that consumes them,
@@ -26,6 +29,9 @@ use crate::error::{Error, Result};
 
 /// The environment variable that selects the intermediate configuration file.
 pub const BEE_CONFIG_VAR: &str = "BEE_CONFIG";
+
+/// The profile selector applied after global configuration and before override files.
+pub const BEE_PROFILE_VAR: &str = "BEE_PROFILE";
 
 /// The process environment that decides where configuration lives.
 ///
@@ -179,14 +185,14 @@ impl Environment {
             .map(|root| root.join("bee/models.dev.json"))
     }
 
-    /// Look credential variables up in the process environment.
+    /// Look credential and profile-selector variables up in the process environment.
     #[must_use]
     pub fn with_process_variables(mut self) -> Self {
         self.variables = Variables::Process;
         self
     }
 
-    /// Define a credential variable. Switches to a fixed set of variables,
+    /// Define an environment variable. Switches to a fixed set of variables,
     /// dropping any lookup in the process environment.
     #[must_use]
     pub fn with_variable(mut self, name: &str, value: &str) -> Self {
@@ -295,7 +301,7 @@ impl fmt::Debug for Config {
 }
 
 impl Config {
-    /// Load and merge the three layers.
+    /// Load and merge the file layers, inserting `BEE_PROFILE` after global configuration.
     ///
     /// The global and project files are optional: a missing one is skipped.
     /// The `BEE_CONFIG` file was asked for by name, so a missing one is an
@@ -323,13 +329,36 @@ impl Config {
             project: Some(project_config_path(project_dir)),
             ..Self::default()
         };
-        for (path, required) in layers {
+        if environment.global_config_path().is_none() {
+            config.merge_profile_environment(environment)?;
+        }
+        for (index, (path, required)) in layers.into_iter().enumerate() {
             if let Some(table) = read_layer(&path, required)? {
                 config.sources.push(path.clone());
                 merge(&mut config.table, table, "", &path, &mut config.origins)?;
             }
+            if index == 0 && environment.global_config_path().is_some() {
+                config.merge_profile_environment(environment)?;
+            }
         }
         Ok(config)
+    }
+
+    fn merge_profile_environment(&mut self, environment: &Environment) -> Result<()> {
+        // Use the ordinary merge rules so later files can override the selector
+        // without introducing a second precedence or type-conflict mechanism.
+        if let Some(profile) = environment.variable(BEE_PROFILE_VAR) {
+            let mut table = Table::new();
+            table.insert("profile".into(), Value::String(profile));
+            merge(
+                &mut self.table,
+                table,
+                "",
+                Path::new("<environment BEE_PROFILE>"),
+                &mut self.origins,
+            )?;
+        }
+        Ok(())
     }
 
     /// The merged table, for the consumer to deserialize from.

@@ -21,6 +21,7 @@ Copyright &copy; 2026 Axel H. — MIT licensed
 # meaningfully conflict with additions here.
 nav = [
   { "Home" = "index.md" },
+  { "Profiles" = "profiles.md" },
   { "Tools" = "tools.md" },
   { "Session history" = "sessions.md" },
   { "Model discovery" = "models.md" },
