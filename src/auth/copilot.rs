@@ -28,6 +28,7 @@ pub(crate) fn unauthorized(error: &Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use crate::auth::CredentialStore;
     use crate::http::{HttpResponse, Unreachable};
     use std::collections::VecDeque;
@@ -133,6 +134,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test(start_paused = true)]
     async fn device_polling_respects_pending_slow_down_and_the_first_interval() {
         let root = tempfile::tempdir().unwrap();
@@ -157,6 +159,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test(start_paused = true)]
     async fn denial_expiration_and_unsupported_renewal_leave_prior_authority_untouched() {
         let root = tempfile::tempdir().unwrap();
@@ -186,6 +189,7 @@ mod tests {
         assert_eq!(http.polls.lock().unwrap().len(), 1);
     }
 
+    #[cfg(unix)]
     #[tokio::test(start_paused = true)]
     async fn logout_replacement_and_cancelled_turns_prevent_late_device_commits() {
         let root = tempfile::tempdir().unwrap();
@@ -236,6 +240,7 @@ mod tests {
         assert_eq!(target(&secret, &http).await.unwrap(), DEFAULT_TARGET);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_turn_rejects_logout_even_if_the_same_token_is_reinstalled() {
         let root = tempfile::tempdir().unwrap();
@@ -263,6 +268,45 @@ mod tests {
             .put(Audience::Provider("copilot"), &credential)
             .unwrap();
         assert!(session.check(&profile).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn environment_authentication_needs_no_private_store_or_platform_specific_backend() {
+        let root = tempfile::tempdir().unwrap();
+        let store = FileStore::new(root.path().join("unused-credentials.json"));
+        let profile = crate::test_support::configured_providers(
+            "[providers.github]\npreset='github'\ncredential={env='TOKEN'}",
+        )
+        .get("github")
+        .unwrap()
+        .clone();
+        let env =
+            crate::config::Environment::default().with_variable("TOKEN", "environment-secret");
+        let credential = super::super::resolve(&profile, &env, &store, super::super::unix_now())
+            .unwrap()
+            .unwrap();
+        assert_eq!(credential.secret().expose(), "environment-secret");
+        let session = Session::prepare(
+            &profile,
+            credential,
+            None,
+            "environment-interaction".into(),
+            &Device::new(vec![]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(session.target, "https://api.business.githubcopilot.com");
+        session.check(&profile).await.unwrap();
+        assert!(matches!(
+            super::super::resolve(
+                &profile,
+                &crate::config::Environment::default(),
+                &store,
+                super::super::unix_now()
+            ),
+            Err(Error::AuthMissingEnv { .. })
+        ));
+        assert!(!store.path().exists());
     }
 }
 

@@ -437,6 +437,7 @@ mod tests {
 
     const KEY: &str = "sk-or-test-key";
 
+    #[cfg(unix)]
     #[test]
     fn copilot_cli_onboards_with_device_instructions_and_never_prints_the_token() {
         struct Device;

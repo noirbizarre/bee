@@ -289,6 +289,8 @@ and waits for authorization. `--no-browser` prints instructions without opening 
 enter the code on GitHub, rather than pasting it into Bee. Bee uses the existing public OAuth client
 `Ov23li8tweQw6odWQebz`, also used by OpenCode; the consent application is not a Bee-owned registration.
 Successful login discovers account-visible models and can initialize the first session's model selection.
+Stored device login currently requires Bee's Unix private credential backend. On Windows, configure an environment
+token as shown below; it does not require that backend.
 
 To use a GitHub user token from an explicitly selected environment variable instead:
 

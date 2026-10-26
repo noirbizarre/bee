@@ -46,6 +46,7 @@ Persist the upstream GitHub user token privately under the selected connection. 
 locally known expiration; Bee does not invent refresh semantics. A response requiring token renewal fails explicitly
 instead of dropping refresh metadata. An environment token is never persisted. Missing or rejected environment
 credentials cannot start store-backed browser login. Local status is not an entitlement check.
+The existing private credential backend supports Unix; Windows uses explicit environment-token authentication.
 
 Use provider revisions independent of ChatGPT host registration. Revision tombstones survive empty logout so a
 pending initial login cannot resurrect authority. Compare prior credential and revision under the store lock, then
