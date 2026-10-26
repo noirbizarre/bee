@@ -38,6 +38,12 @@ impl crate::models::Http for DiscoveryHttp {
                 .await
                 .map_err(|_| Error::Transport)?;
             if !response.status().is_success() {
+                if matches!(response.status().as_u16(), 401 | 403) {
+                    return Err(Error::Unauthorized);
+                }
+                if response.status().is_server_error() || response.status().as_u16() == 429 {
+                    return Err(Error::Transport);
+                }
                 return Err(Error::Rejected);
             }
             if response

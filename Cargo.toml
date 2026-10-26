@@ -133,9 +133,10 @@ tempfile = "3"
 fs2 = "0.4"
 
 # Layered configuration (ADR-006). Only the generic `Table`/`Value` types are
-# used, which sit behind the `serde` feature; `display` (serialization) is not
-# needed because Bee never writes configuration.
+# used, which sit behind the `serde` feature. The narrow onboarding writer uses
+# toml_edit separately so unrelated user comments and formatting survive login.
 toml = { version = "1", default-features = false, features = ["std", "serde", "parse"] }
+toml_edit = "0.25"
 
 # Provider authentication (ADR-008). Login retains its blocking HTTP seam;
 # model streaming uses the async client above (ADR-012). `rustls` rather than

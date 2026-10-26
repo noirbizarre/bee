@@ -36,9 +36,19 @@ remain informational. Stale validated data can continue informing opted-in routi
 Freeze both decisions for a whole turn. If the next turn changes protocol, make its working history portable before
 inference. Commit the route and history transactionally only on successful non-refused completion.
 
-Automatic endpoint listing is opt-in, uses configured OpenAI-compatible URLs and existing credentials, and never starts
-browser login. Clear previous visibility before refreshing and after Bee's login. External credential changes are
-observed on the next periodic refresh. ACP option updates and CLI queries share the same metadata projection.
+Automatic generic endpoint listing is opt-in and never starts browser login. Supported native presets enable their own
+adapter automatically, independently of public catalogue policy. Native OpenRouter user-filtered discovery and the official
+ChatGPT OAuth catalogue preserve provider-specific semantics. See the [coverage matrix](../models.md#native-adapter-coverage).
+
+Amendment for issue #64: ordinary refresh retains same-account last-good visibility on transient failure, reporting stale
+data, the last successful fetch, latest attempt and sanitized error separately. Credential/account replacement, logout and
+authorization rejection invalidate private visibility; token renewal alone does not. Publication generations reject late
+obsolete responses. Private results are never persisted in the public cache. External credential changes are observed on
+refresh. ACP options and CLI queries share the projection without implying that listed models can be invoked.
+
+Explicit built-in login may create a missing user-owned connection and add active-profile membership. Native ordering can
+initialize a missing model selection, below session/configured defaults; this selection is pinned and durably saved before
+publication. Public catalogues still cannot create connections or choose defaults. Existing selections survive refresh.
 
 ## Consequences
 

@@ -266,20 +266,24 @@ open-source, locally hosted applications. Paid or remotely hosted offerings requ
 [separate approval path](https://openai.com/form/sign-in-with-chatgpt-interest/).
 Use is subject to the applicable [OpenAI terms and policies](https://openai.com/policies).
 
-Configure a named connection in your Bee configuration:
+Start with `bee auth login chatgpt`: Bee creates the built-in connection in user configuration, adds it to the active
+profile and discovers its catalogue after authentication. No model IDs are required; native provider ordering initializes
+an otherwise unselected model. Listing is not proof of account entitlement. See [model discovery](models.md).
+
+For a custom account label, configure a named connection:
 
 ```toml
 provider = "personal"
 
 [providers.personal]
 preset = "chatgpt"
-# Select an available model after login, or configure its exact slug here.
+# Optionally override the native initial choice with an exact model slug.
 ```
 
 ```sh
 bee auth login personal
 bee auth status personal
-bee models list personal --endpoint
+bee models list personal
 ```
 
 Login displays **Continue with ChatGPT**, opens the browser, and receives authorization at a temporary
@@ -349,8 +353,9 @@ bee auth status [CONNECTION]                # where each credential comes from, 
 ```
 
 `CONNECTION` defaults to the active profile's default connection for login/logout; status lists its member connections.
-Explicit targets must be members. `--no-browser` prints the sign-in URL without trying to open it. Prompts and
-URLs go to stderr; only `status` writes to stdout. Bare `bee` still serves ACPv2.
+Explicit targets must be members, except explicit login can add a connection to the active profile. Missing built-in
+`openrouter` and `chatgpt` connections are created on login. `--no-browser` prints the sign-in URL without opening it.
+Prompts and URLs go to stderr; only `status` writes to stdout. Bare `bee` still serves ACPv2.
 
 ### OAuth sign-in, API tokens, inference credentials and MCP authorization
 
@@ -363,11 +368,14 @@ These are different things and Bee keeps them apart:
   returns renewable OAuth tokens tied to a verified account/workspace registration.
 - **API tokens** are pasted (`--with-token`) or read from a variable. API-key connections support them, and they are the
   only option for providers with no browser flow.
-- **Cloudflare** (Workers AI, AI Gateway) uses a *scoped API token* from the environment or the store. Bee does not
+- **Cloudflare Workers AI** uses a *scoped API token* from the environment or the store. Bee does not
   read or reuse Wrangler's browser-login token: it belongs to Wrangler and is not interchangeable with an API token's
   scopes. Put the account id in `base_url`, for example
   `https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/ai/v1` under `protocols.openai-chat`; a provider that also
   serves the Anthropic protocol lists it beside it, with `prefer`.
+- **Cloudflare AI Gateway** is a routing integration configured with its gateway URL, upstream provider/model identities
+  and required authentication. The Workers AI URL above is not an AI Gateway catalogue endpoint. Configure models
+  manually until gateway-native discovery is implemented; not every upstream model is usable through a given gateway.
 - **Inference credentials** (everything above) authenticate Bee to an *LLM provider*. **MCP server authorization**
   (OAuth 2.1 for a remote tool server) is a separate audience: the credential store keeps the two in separate tables so
   one can never be offered for the other. The MCP authorization flow itself is not implemented; MCP configuration stays

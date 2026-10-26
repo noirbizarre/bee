@@ -1291,11 +1291,8 @@ fn an_unconfigured_prompt_over_stdio_is_accepted_and_reports_an_actionable_failu
     assert!(accepted.is_some_and(|response| response["result"]["messageId"].is_string()));
     assert_eq!(states[0]["state"], "running");
     assert_eq!(states[1]["stopReason"], "error");
-    assert!(
-        states[1]
-            .to_string()
-            .contains("configure a provider and model")
-    );
+    assert!(states[1].to_string().contains("configure a connection"));
+    assert!(states[1].to_string().contains("bee auth login openrouter"));
     let (status, stderr) = agent.finish();
     assert!(status.success(), "exit status was {status}");
     assert_eq!(stderr, "", "a prompt writes nothing to stderr");

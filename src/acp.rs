@@ -223,6 +223,9 @@ pub struct Reply {
     message_id: String,
     token: u64,
     input: Option<crate::session::InferenceInput>,
+    prompt: String,
+    protocol: Arc<Mutex<Option<crate::provider::Protocol>>>,
+    tasks: Tasks,
     completed: Arc<Mutex<Option<crate::agent::Outcome>>>,
     plan: Arc<Mutex<Option<crate::plan::Entries>>>,
     mcp: Arc<Mutex<mcp::Bindings>>,
@@ -292,10 +295,11 @@ impl Reply {
 }
 
 /// Credentials are resolved at request time, not while loading configuration.
-async fn inference(reply: Reply, runtime: Arc<Runtime>) -> std::result::Result<(), TurnFailure> {
-    let crate::session::InferenceInput { profile, model, messages, cwd, instructions, selection } = reply.input.clone().ok_or_else(|| TurnFailure::new(
-        "configure a provider and model in Bee's configuration or select a model over ACP before prompting"
-    ))?;
+async fn inference(
+    mut reply: Reply,
+    runtime: Arc<Runtime>,
+) -> std::result::Result<(), TurnFailure> {
+    let profile = reply.input.as_ref().map(|input| input.profile.clone()).or_else(|| lock(&reply.sessions).selected_profile(&reply.id)).ok_or_else(|| TurnFailure::new("configure a connection or run `bee auth login openrouter` or `bee auth login chatgpt` before prompting"))?;
     let env = runtime
         .auth_environment
         .clone()
@@ -331,6 +335,27 @@ async fn inference(reply: Reply, runtime: Arc<Runtime>) -> std::result::Result<(
                 .await?;
             if let Some(discovery) = &runtime.discovery {
                 discovery.invalidate_endpoint(profile.name());
+                if profile.discover_models() {
+                    if reply.input.is_none() {
+                        let _ = discovery.list_endpoint(&profile, &env).await;
+                    } else {
+                        // A configured model can infer immediately; optional discovery belongs to the connection.
+                        let discovery = Arc::clone(discovery);
+                        let profile = profile.clone();
+                        let env = env.clone();
+                        reply
+                            .connection
+                            .spawn(async move {
+                                let _ = discovery.list_endpoint(&profile, &env).await;
+                                Ok(())
+                            })
+                            .map_err(|_| {
+                                TurnFailure::new(
+                                    "cannot start post-login model discovery; reconnect and retry",
+                                )
+                            })?;
+                    }
+                }
             }
             crate::auth::resolve(&profile, &env, &store, crate::auth::unix_now()).map_err(
                 |error| {
@@ -348,6 +373,37 @@ async fn inference(reply: Reply, runtime: Arc<Runtime>) -> std::result::Result<(
             ));
         }
     };
+    if let Some(discovery) = &runtime.discovery {
+        discovery.observe_account(&profile, credential.as_ref());
+    }
+    if reply.input.is_none() {
+        if let Some(discovery) = &runtime.discovery
+            && profile.discover_models()
+            && discovery.snapshot().native_default(&profile).is_none()
+        {
+            discovery
+                .list_endpoint(&profile, &env)
+                .await
+                .map_err(|error| TurnFailure::new(error.to_string()))?;
+        }
+        initialize_native(&reply.sessions, &reply.tasks, &reply.id, Some(reply.token))
+            .await
+            .map_err(|error| TurnFailure::new(error.to_string()))?;
+        reply.input = lock(&reply.sessions).inference(&reply.id);
+        if let Some(input) = &mut reply.input {
+            input
+                .messages
+                .push(crate::llm::Message::User(reply.prompt.clone()));
+        }
+        let options = config_options(lock(&reply.sessions).settings(&reply.id).ok().flatten());
+        let _ = send_update(
+            &reply.connection,
+            &reply.session_id,
+            v2::SessionUpdate::ConfigOptionUpdate(v2::ConfigOptionUpdate::new(options)),
+        );
+    }
+    let crate::session::InferenceInput { profile, model, messages, cwd, instructions, selection } = reply.input.clone().ok_or_else(|| TurnFailure::new("no native model is available; refresh the connection catalogue or select a model over ACP"))?;
+    *lock(&reply.protocol) = Some(selection.protocol);
     let session = if chatgpt {
         Some(
             crate::auth::chatgpt::Session::new(
@@ -363,6 +419,9 @@ async fn inference(reply: Reply, runtime: Arc<Runtime>) -> std::result::Result<(
     } else {
         None
     };
+    let observed_credential = credential.clone();
+    let observed_profile = profile.clone();
+    let observed_model = model.clone();
     let credential = credential.map(|value| value.secret().clone());
     let mut model = crate::llm::Model::new(profile, model, credential)
         .map_err(|error| TurnFailure::new(error.to_string()))?
@@ -440,6 +499,13 @@ async fn inference(reply: Reply, runtime: Arc<Runtime>) -> std::result::Result<(
     )
     .await
     .map_err(|error| TurnFailure::new(error.to_string()))?;
+    if let Some(discovery) = &runtime.discovery {
+        discovery.record_inference_success(
+            &observed_profile,
+            observed_credential.as_ref(),
+            &observed_model,
+        );
+    }
     *lock(&reply.completed) = Some(outcome);
     Ok(())
 }
@@ -630,11 +696,15 @@ where
                 let interactions = Arc::clone(&interactions);
                 let discovery = discovery.clone();
                 let sessions = Arc::clone(&sessions);
+                let gates = Arc::clone(&gates);
+                let tasks = Arc::clone(&tasks);
                 async move |request: v2::InitializeRequest,
                             responder: Responder<v2::InitializeResponse>,
                             connection: V2ConnectionTo<Client>| {
                     let discovery = discovery.clone();
                     let sessions = Arc::clone(&sessions);
+                    let gates = Arc::clone(&gates);
+                    let tasks = Arc::clone(&tasks);
                     let endpoint_profiles = endpoint_profiles.clone();
                     let environment = environment.clone();
                     {
@@ -676,26 +746,25 @@ where
                             worker.run().await;
                             Ok(())
                         })?;
-                        if !endpoint_profiles.is_empty() {
+                        for profile in endpoint_profiles {
                             let worker = Arc::clone(&discovery);
+                            let environment = environment.clone();
                             connection.spawn(async move {
-                                loop {
-                                    // Sequential requests bound concurrency and never start login.
-                                    for profile in &endpoint_profiles {
-                                        let _ = worker.list_endpoint(profile, &environment).await;
-                                    }
-                                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-                                }
+                                worker.run_endpoint(&profile, &environment).await;
+                                Ok(())
                             })?;
                         }
                         let updates = connection.clone();
                         connection.spawn(async move {
                             let mut sent = BTreeMap::new();
                             while changes.changed().await.is_ok() {
-                                // Snapshot/send share the selection/close lock; old refreshes
-                                // cannot resurrect a closed session or its previous selection.
-                                let sessions = lock(&sessions);
-                                for (id, settings) in sessions.open_settings() {
+                                let ids = lock(&sessions).open_ids();
+                                for id in ids {
+                                    let Ok(_gate) = session_gate(&gates, &id).try_enter() else { continue; };
+                                    // Hold through publication so pending settings saves never leak a choice.
+                                    if initialize_native(&sessions, &tasks, &id, None).await.is_err() { continue; }
+                                    let sessions = lock(&sessions);
+                                    let Some(settings) = sessions.open_settings_for(&id) else { continue; };
                                     let options = config_options(Some(settings));
                                     let encoded =
                                         serde_json::to_value(&options).unwrap_or_default();
@@ -725,6 +794,8 @@ where
                 let sessions = Arc::clone(&sessions);
                 let mcp = Arc::clone(&mcp);
                 let history = history.clone();
+                let gates = Arc::clone(&gates);
+                let tasks = Arc::clone(&tasks);
                 async move |request: v2::NewSessionRequest,
                             responder: Responder<v2::NewSessionResponse>,
                             connection: V2ConnectionTo<Client>| {
@@ -735,6 +806,8 @@ where
                     if let Some(store) = history.clone() {
                         let sessions = Arc::clone(&sessions);
                         let mcp = Arc::clone(&mcp);
+                        let gates = Arc::clone(&gates);
+                        let tasks = Arc::clone(&tasks);
                         return connection.spawn(async move {
                             let snapshot = crate::history::Snapshot {
                                 profile: lock(&sessions).profile_name().to_owned(),
@@ -745,18 +818,25 @@ where
                                 Ok(created) => created,
                                 Err(error) => return responder.respond_with_error(history_error(error)),
                             };
-                            let options = {
+                            // Reserve before exposing the new registry entry to discovery publications.
+                            let _gate = session_gate(&gates, &id).try_enter().expect("new session gate");
+                            {
                                 let mut sessions = lock(&sessions);
                                 sessions.restore(id.clone(), snapshot, handle);
                                 lock(&mcp).sessions.insert(id.clone(), servers);
-                                config_options(sessions.settings(&id).ok().flatten())
-                            };
+                            }
+                            if let Err(error) = initialize_native(&sessions, &tasks, &id, None).await {
+                                return responder.respond_with_error(history_error(error));
+                            }
+                            let options = config_options(lock(&sessions).settings(&id).ok().flatten());
+                            drop(_gate);
                             responder.respond(v2::NewSessionResponse::new(id).config_options(options))
                         });
                     }
                     // One guard, so the options describe the session just made.
                     let mut sessions = lock(&sessions);
                     let id = sessions.create(request.cwd.into_inner());
+                    sessions.initialize_native(&id, None);
                     lock(&mcp).sessions.insert(id.clone(), servers);
                     let options = config_options(sessions.settings(&id).ok().flatten());
                     responder.respond(v2::NewSessionResponse::new(id).config_options(options))
@@ -883,6 +963,9 @@ where
                                 }
                                 sessions.history(&id).expect("durable attachment")
                             };
+                            if let Err(error) = initialize_native(&sessions, &tasks, &id, None).await {
+                                return responder.respond_with_error(history_error(error));
+                            }
                             if matches!(request.replay_from, Some(v2::ReplayFrom::Start(_))) {
                                 let replay_connection = updates.clone();
                                 let replay_id = request.session_id.clone();
@@ -918,6 +1001,9 @@ where
                         let mut sessions = lock(&sessions);
                         if let Err(error) = sessions.resume(&id, cwd) {
                             return responder.respond_with_error(session_error(error));
+                        }
+                        if !lock(&tasks).contains_key(&id) {
+                            sessions.initialize_native(&id, None);
                         }
                         // Always replace, including an empty list: old routes are not authorization.
                         lock(&mcp).sessions.insert(id.clone(), servers);
@@ -1119,6 +1205,7 @@ where
                     let updates = connection.clone();
                     connection.spawn(async move {
                     let connection = updates;
+                    let pending_prompt = prompt_text(&request.prompt);
                     let content = match serde_json::to_value(&request.prompt) {
                         Ok(content) => content,
                         Err(_) => {
@@ -1190,6 +1277,9 @@ where
                         session_id,
                         message_id: turn.agent_message_id,
                         token: turn.token,
+                        protocol: Arc::new(Mutex::new(input.as_ref().map(|input| input.selection.protocol))),
+                        prompt: pending_prompt,
+                        tasks: Arc::clone(&tasks),
                         input,
                         completed: Arc::new(Mutex::new(None)),
                         plan: Arc::new(Mutex::new(None)),
@@ -1227,6 +1317,45 @@ where
             },
             agent_client_protocol::on_receive_notification!(),
         )
+}
+
+/// Caller owns either the settings gate or the current turn's busy barrier.
+async fn initialize_native(
+    sessions: &Arc<Mutex<Sessions>>,
+    tasks: &Tasks,
+    id: &str,
+    active_token: Option<u64>,
+) -> std::result::Result<(), crate::history::Error> {
+    let pending = {
+        let mut registry = lock(sessions);
+        // Cancellation revokes model output before the terminal journal write.
+        // The task remains busy until idle, even when Session::active is already empty.
+        if active_token.is_none() && lock(tasks).contains_key(id) {
+            return Ok(());
+        }
+        let previous = registry.snapshot(id);
+        if !registry.initialize_native(id, active_token) {
+            return Ok(());
+        }
+        registry.history(id).map(|handle| {
+            (
+                handle,
+                registry.snapshot(id).expect("existing session"),
+                previous.expect("existing session"),
+            )
+        })
+    };
+    if let Some((handle, snapshot, previous)) = pending {
+        let result = match active_token {
+            Some(turn) => handle.initialize_model(turn, snapshot).await,
+            None => handle.save(snapshot).await,
+        };
+        if let Err(error) = result {
+            lock(sessions).rollback(id, previous);
+            return Err(error);
+        }
+    }
+    Ok(())
 }
 
 async fn close_session(
@@ -1374,7 +1503,7 @@ where
     let token = reply.token;
     let completed = Arc::clone(&reply.completed);
     let plan = Arc::clone(&reply.plan);
-    let protocol = reply.input.as_ref().map(|input| input.selection.protocol);
+    let selected_protocol = Arc::clone(&reply.protocol);
     let interactions = Arc::clone(&reply.interactions);
     let history = lock(&sessions).history(&id);
 
@@ -1411,6 +1540,7 @@ where
     // Claim finalization before awaiting disk: a later cancel cannot invalidate
     // an already durable successful context snapshot.
     let mut outcome = lock(&completed).take();
+    let protocol = *lock(&selected_protocol);
     if let Some(history) = &history {
         let snapshot = {
             let mut sessions = lock(&sessions);
@@ -1635,6 +1765,97 @@ fn invalid_params(reason: impl ToString) -> agent_client_protocol::Error {
 #[cfg(test)]
 mod gate_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cancelled_turns_defer_native_initialization_until_the_terminal_journal_write() {
+        struct Catalogue;
+        impl crate::models::Http for Catalogue {
+            fn get<'a>(
+                &'a self,
+                _: &'a str,
+                _: reqwest::header::HeaderMap,
+                _: usize,
+            ) -> BoxFuture<'a, std::result::Result<Vec<u8>, crate::models::Error>> {
+                Box::pin(async { Ok(br#"{"data":[{"id":"native-model"}]}"#.to_vec()) })
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let config_path = root.path().join("config.toml");
+        std::fs::write(&config_path, "[providers.account]\npreset='openrouter'\ncredential={env='KEY'}\ndiscover_models=false").unwrap();
+        let env = crate::config::Environment::new(None, None, Some(config_path))
+            .with_variable("KEY", "fixture");
+        let providers =
+            Providers::from_config(&crate::config::Config::load(&env, root.path()).unwrap())
+                .unwrap();
+        let discovery = Arc::new(crate::models::Service::new(
+            crate::models::Settings {
+                enabled: false,
+                ..Default::default()
+            },
+            Arc::new(Catalogue),
+            Arc::new(crate::models::FileCache(None)),
+            Arc::new(crate::models::SystemClock),
+        ));
+        discovery
+            .list_endpoint(providers.get("account").unwrap(), &env)
+            .await
+            .unwrap();
+        let sessions = Arc::new(Mutex::new(
+            Sessions::with_providers(providers).with_discovery(Some(discovery)),
+        ));
+        let snapshot = crate::history::Snapshot {
+            profile: "default".into(),
+            cwd: root.path().into(),
+            turns: 0,
+            provider: None,
+            model: None,
+            protocol: None,
+            messages: Vec::new(),
+            instructions: Default::default(),
+        };
+        let store = crate::history::Store::open(root.path().join("state")).unwrap();
+        let (id, history) = store.create(snapshot.clone()).await.unwrap();
+        lock(&sessions).restore(id.clone(), snapshot, history.clone());
+        let turn = lock(&sessions).begin_turn(&id, || {}).unwrap();
+        history
+            .accept(turn.token, serde_json::json!([]))
+            .await
+            .unwrap();
+        let tasks = Tasks::default();
+        lock(&tasks).insert(
+            id.clone(),
+            futures::future::pending::<()>().boxed().shared(),
+        );
+        assert!(lock(&sessions).cancel(&id));
+        initialize_native(&sessions, &tasks, &id, None)
+            .await
+            .unwrap();
+        assert!(
+            lock(&sessions)
+                .settings(&id)
+                .unwrap()
+                .unwrap()
+                .model
+                .is_none()
+        );
+        assert!(history.healthy().is_ok());
+        history.finish(turn.token, "cancelled", None).await.unwrap();
+        lock(&sessions).finish_turn(&id, turn.token);
+        lock(&tasks).remove(&id);
+        initialize_native(&sessions, &tasks, &id, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            lock(&sessions)
+                .settings(&id)
+                .unwrap()
+                .unwrap()
+                .model
+                .as_deref(),
+            Some("native-model")
+        );
+        assert!(history.healthy().is_ok());
+    }
 
     #[test]
     fn an_unpolled_close_blocks_later_mutations_even_when_the_gate_was_occupied() {

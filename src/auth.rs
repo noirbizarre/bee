@@ -108,6 +108,13 @@ impl Credential {
     pub fn chatgpt_plan_enabled(&self) -> Option<bool> {
         self.oauth.as_ref().map(chatgpt::Registration::plan_enabled)
     }
+    pub(crate) fn same_discovery_account(&self, other: &Self) -> bool {
+        match (&self.oauth, &other.oauth) {
+            (Some(a), Some(b)) => a.same_discovery_account(b),
+            (None, None) => self.secret == other.secret,
+            _ => false,
+        }
+    }
 
     /// Whether it has stopped working at `now` (Unix seconds).
     #[must_use]

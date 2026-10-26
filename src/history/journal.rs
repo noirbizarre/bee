@@ -28,6 +28,11 @@ pub(super) enum Event {
         model: Option<String>,
         portable: bool,
     },
+    InitialModelSelected {
+        turn: u64,
+        provider: String,
+        model: String,
+    },
     TurnAccepted {
         turn: u64,
         content: serde_json::Value,
@@ -264,6 +269,27 @@ impl Projection {
                 if *clear_native {
                     portable(&mut self.snapshot.messages);
                 }
+            }
+            Event::InitialModelSelected {
+                turn,
+                provider,
+                model,
+            } => {
+                // First-use auth can discover a model after acceptance, but may never
+                // replace a selected account/model or rewrite committed context.
+                if self.active != Some(*turn)
+                    || self.snapshot.model.is_some()
+                    || self
+                        .snapshot
+                        .provider
+                        .as_ref()
+                        .is_some_and(|old| old != provider)
+                    || crate::provider::check_model_id(model).is_err()
+                {
+                    return Err(invalid());
+                }
+                self.snapshot.provider = Some(provider.clone());
+                self.snapshot.model = Some(model.clone());
             }
             Event::TurnAccepted { turn, content } => {
                 if self.active.is_some() || *turn <= self.snapshot.turns || !content.is_array() {

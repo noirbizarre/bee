@@ -17,6 +17,20 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, Error, Diagnostic)]
 #[non_exhaustive]
 pub enum Error {
+    /// Onboarding only writes user configuration, never a project-owned override.
+    #[error("cannot update login configuration at `{path}`: {reason}")]
+    #[diagnostic(
+        code(bee::config::write),
+        help(
+            "check user configuration permissions and active-profile membership; if authentication already completed, the credential remains stored"
+        )
+    )]
+    ConfigWrite {
+        /// File needing attention, without its contents.
+        path: String,
+        /// Fixed classification, never a parser or provider response.
+        reason: &'static str,
+    },
     /// Profile selection must never silently choose another account.
     #[error("profile configuration in `{path}` {reason}")]
     #[diagnostic(

@@ -128,6 +128,29 @@ fn snapshot() -> Snapshot {
     }
 }
 
+#[tokio::test]
+async fn a_turn_owned_initial_model_survives_interruption_without_committing_model_context() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(root.path().join("history")).unwrap();
+    let mut snapshot = snapshot();
+    snapshot.model = None;
+    let (id, handle) = store.create(snapshot.clone()).await.unwrap();
+    handle.accept(1, json!([])).await.unwrap();
+    snapshot.turns = 1;
+    snapshot.model = Some("discovered".into());
+    handle.initialize_model(1, snapshot).await.unwrap();
+    handle.release().await.unwrap();
+    let (snapshot, restored, interrupted) = store.attach(&id).await.unwrap();
+    assert!(interrupted);
+    assert_eq!(snapshot.model.as_deref(), Some("discovered"));
+    assert!(snapshot.messages.is_empty());
+    restored.recover().await.unwrap();
+    restored.release().await.unwrap();
+    let (snapshot, _, interrupted) = store.attach(&id).await.unwrap();
+    assert!(!interrupted);
+    assert_eq!(snapshot.model.as_deref(), Some("discovered"));
+}
+
 fn budget() -> Arc<ReplayBudget> {
     Arc::new(ReplayBudget::new(Settings::default()))
 }

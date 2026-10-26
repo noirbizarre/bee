@@ -110,6 +110,150 @@ fn defaults() -> (Arc<MemoryCache>, Arc<Time>) {
 }
 
 #[tokio::test]
+async fn openrouter_native_pages_preserve_metadata_and_last_good_account_catalogue() {
+    let profile = support::configured_providers(
+        "[providers.test]\npreset='openrouter'\ncredential={env='KEY'}",
+    )
+    .get("test")
+    .unwrap()
+    .clone();
+    let env = Environment::default().with_variable("KEY", "private-key");
+    let (cache, clock) = defaults();
+    let http = Arc::new(FakeHttp::new(vec![
+        Ok(json!({"data":[{"id":"z-model","name":"Native label","context_length":12000,"architecture":{"input_modalities":["text","image"],"output_modalities":["text"]},"supported_parameters":["tools"],"top_provider":{"max_completion_tokens":2000}}],"links":{"next":"/api/v1/models/user?offset=1"}}).to_string().into_bytes()),
+        Ok(br#"{"data":[{"id":"a-model"}],"links":{"next":null}}"#.to_vec()),
+        Err(Error::Transport),
+        Err(Error::Transport),
+    ]));
+    let service = service(
+        Settings {
+            enabled: false,
+            ..Default::default()
+        },
+        http.clone(),
+        cache.clone(),
+        clock.clone(),
+    );
+    let listing = service.list_endpoint(&profile, &env).await.unwrap();
+    assert_eq!(listing.models, ["z-model", "a-model"]);
+    assert_eq!(listing.provenance, "native_api");
+    assert_eq!(listing.scope, "user_preferences_filtered");
+    assert!(listing.inference_succeeded_at.is_empty());
+    let snapshot = service.snapshot();
+    assert_eq!(snapshot.native_default(&profile), Some("z-model"));
+    let info = snapshot.info(&profile, "z-model");
+    assert_eq!(info.facts["tool_call"].value, true);
+    assert_eq!(info.facts["structured_output"].value, false);
+    assert_eq!(info.facts["context_window"].value, 12000);
+    assert_eq!(info.facts["context_window"].source, "native_api");
+    assert!(
+        !snapshot
+            .info(&profile, "a-model")
+            .facts
+            .contains_key("tool_call")
+    );
+    clock.0.store(1400, Ordering::SeqCst);
+    assert_eq!(
+        service.list_endpoint(&profile, &env).await.err(),
+        Some(Error::Transport)
+    );
+    let snapshot = service.snapshot();
+    let retained = &snapshot.endpoints["test"];
+    assert_eq!(retained.models, ["z-model", "a-model"]);
+    assert_eq!(retained.fetched_at, Some(1000));
+    assert_eq!(retained.attempted_at, 1400);
+    assert!(retained.stale);
+    assert!(snapshot.info(&profile, "z-model").facts["context_window"].stale);
+    assert!(
+        snapshot
+            .suggestions(&profile, None)
+            .iter()
+            .any(|model| model.id == "z-model")
+    );
+    assert_eq!(
+        service
+            .list_endpoint(&profile, &env.with_variable("KEY", "other-account"))
+            .await
+            .err(),
+        Some(Error::Transport)
+    );
+    assert!(service.snapshot().endpoints["test"].models.is_empty());
+    assert!(cache.bytes.lock().unwrap().is_none());
+    let requests = http.requests.lock().unwrap();
+    assert_eq!(requests[0].0, "https://openrouter.ai/api/v1/models/user");
+    assert_eq!(
+        requests[1].0,
+        "https://openrouter.ai/api/v1/models/user?offset=1"
+    );
+    assert_eq!(requests[1].1["authorization"], "Bearer private-key");
+}
+
+#[tokio::test]
+async fn provider_pagination_cannot_send_credentials_to_another_origin_or_path() {
+    for next in [
+        "https://attacker.example/models/user",
+        "/api/v1/auth/keys",
+        "?offset=0#fragment",
+        "https://user@openrouter.ai/api/v1/models/user",
+    ] {
+        let profile = support::configured_providers(
+            "[providers.test]\npreset='openrouter'\ncredential={env='KEY'}",
+        )
+        .get("test")
+        .unwrap()
+        .clone();
+        let http = Arc::new(FakeHttp::new(vec![Ok(
+            json!({"data":[{"id":"partial"}],"links":{"next":next}})
+                .to_string()
+                .into_bytes(),
+        )]));
+        let (cache, clock) = defaults();
+        let service = service(Settings::default(), http.clone(), cache, clock);
+        assert_eq!(
+            service
+                .list_endpoint(
+                    &profile,
+                    &Environment::default().with_variable("KEY", "credential-canary")
+                )
+                .await
+                .err(),
+            Some(Error::Malformed)
+        );
+        assert_eq!(http.requests.lock().unwrap().len(), 1);
+        assert!(service.snapshot().endpoints["test"].models.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn lost_authorization_removes_account_models_instead_of_offering_stale_access() {
+    let (cache, clock) = defaults();
+    let http = Arc::new(FakeHttp::new(vec![
+        Ok(br#"{"data":[{"id":"private"}]}"#.to_vec()),
+        Err(Error::Unauthorized),
+    ]));
+    let service = service(Settings::default(), http, cache, clock);
+    let profile = support::profile("openai-chat", "https://example.test/v1", "");
+    service
+        .list_endpoint(&profile, &Environment::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        service
+            .list_endpoint(&profile, &Environment::default())
+            .await
+            .err(),
+        Some(Error::Unauthorized)
+    );
+    assert!(
+        !service
+            .snapshot()
+            .suggestions(&profile, None)
+            .iter()
+            .any(|model| model.id == "private")
+    );
+}
+
+#[tokio::test]
 async fn successful_refresh_persists_only_the_public_catalog_and_resolves_declared_facts() {
     let (cache, clock) = defaults();
     let http = Arc::new(FakeHttp::new(vec![Ok(catalog("@ai-sdk/anthropic"))]));
@@ -454,6 +598,58 @@ async fn chatgpt_models_keep_visible_server_order_and_names_out_of_the_public_ca
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn failed_renewal_retains_only_the_same_stored_accounts_catalogue() {
+    use bee::auth::{Audience, Credential, CredentialStore, FileStore, Secret};
+    struct Offline;
+    impl bee::http::LoginHttp for Offline {
+        fn post_json<'a>(
+            &'a self,
+            _: &'a str,
+            _: String,
+        ) -> BoxFuture<'a, Result<bee::http::HttpResponse, bee::http::Unreachable>> {
+            Box::pin(async { Err(bee::http::Unreachable) })
+        }
+    }
+    for replacement in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let env = Environment::new(None, Some(root.path().into()), None);
+        let store = FileStore::from_environment(&env).unwrap();
+        store
+            .put(
+                Audience::Provider("test"),
+                &Credential::new(Secret::new("fixture")),
+            )
+            .unwrap();
+        let mut document = json!({"version":2,"providers":{"test":{"secret":"access-secret","expires_at":bee::auth::unix_now()+3600,"oauth":{"issuer":"https://auth.openai.com","client_id":"client","subject":"first-account","refresh_token":"refresh-secret","id_token":"id-secret","scopes":["chatgpt.tokens.use.direct"]}}}});
+        std::fs::write(store.path(), document.to_string()).unwrap();
+        let profile = support::configured_providers("[providers.test]\npreset='chatgpt'")
+            .get("test")
+            .unwrap()
+            .clone();
+        let (cache, clock) = defaults();
+        let service = Service::new(Settings::default(), Arc::new(FakeHttp::new(vec![Ok(br#"{"models":[{"slug":"private-model","display_name":"Private name","visibility":"list"}]}"#.to_vec())])), cache, clock).with_login_http(Arc::new(Offline));
+        service.list_endpoint(&profile, &env).await.unwrap();
+        document["providers"]["test"]["expires_at"] = json!(1);
+        if replacement {
+            document["providers"]["test"]["oauth"]["subject"] = json!("replacement-account");
+        }
+        std::fs::write(store.path(), document.to_string()).unwrap();
+        assert_eq!(
+            service.list_endpoint(&profile, &env).await.err(),
+            Some(Error::Credentials)
+        );
+        let snapshot = service.snapshot();
+        assert_eq!(snapshot.endpoints["test"].models.is_empty(), replacement);
+        assert_eq!(
+            snapshot.endpoints["test"].display_names.is_empty(),
+            replacement
+        );
+        assert_eq!(snapshot.native_default(&profile).is_none(), replacement);
+    }
+}
+
 #[test]
 fn account_display_names_override_public_labels_but_not_explicit_configuration() {
     let profile = profile("");
@@ -466,8 +662,9 @@ fn account_display_names_override_public_labels_but_not_explicit_configuration()
         models::EndpointListing {
             models: vec!["known".into()],
             display_names: [("known".into(), "Account label".into())].into(),
-            fetched_at: 123,
+            fetched_at: Some(123),
             error: None,
+            ..Default::default()
         },
     );
     let info = snapshot.info(&profile, "known");
@@ -520,7 +717,7 @@ async fn unsupported_or_incomplete_endpoint_listings_do_not_claim_complete_visib
     let missing = profile("credential={env='MISSING'}");
     assert_eq!(
         models::endpoint_models(&http, &missing, &Environment::default()).await,
-        Err(Error::Credentials)
+        Err(Error::Unauthorized)
     );
     assert_eq!(http.requests.lock().unwrap().len(), 1);
 }
@@ -574,8 +771,9 @@ async fn maximum_endpoint_listings_project_without_quadratic_membership_scans() 
                 models: (0..100_000)
                     .map(|index| format!("account/model-{index:06}"))
                     .collect(),
-                fetched_at: 1000,
+                fetched_at: Some(1000),
                 error: None,
+                ..Default::default()
             },
         );
         let infos = snapshot.suggestions(&profile, Some("selected/custom"));
@@ -779,6 +977,77 @@ async fn endpoint_invalidation_prevents_an_in_flight_old_account_response_from_p
 }
 
 #[tokio::test]
+async fn concurrent_native_refreshes_share_only_the_same_accounts_request() {
+    struct Gated {
+        calls: AtomicUsize,
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+    impl Http for Gated {
+        fn get<'a>(
+            &'a self,
+            _: &'a str,
+            headers: reqwest::header::HeaderMap,
+            _: usize,
+        ) -> BoxFuture<'a, Result<Vec<u8>, Error>> {
+            Box::pin(async move {
+                if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    self.entered.notify_one();
+                    self.release.notified().await;
+                }
+                let id = if headers["authorization"] == "Bearer account-one" {
+                    "one"
+                } else {
+                    "two"
+                };
+                Ok(json!({"data":[{"id":id}]}).to_string().into_bytes())
+            })
+        }
+    }
+    for replacement in [false, true] {
+        let http = Arc::new(Gated {
+            calls: AtomicUsize::new(0),
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        let (cache, clock) = defaults();
+        let service = service(Settings::default(), http.clone(), cache, clock);
+        let profile = support::configured_providers(
+            "[providers.test]\npreset='openrouter'\ncredential={env='KEY'}",
+        )
+        .get("test")
+        .unwrap()
+        .clone();
+        let one = Environment::default().with_variable("KEY", "account-one");
+        let two = Environment::default().with_variable(
+            "KEY",
+            if replacement {
+                "account-two"
+            } else {
+                "account-one"
+            },
+        );
+        let (first, second, ()) = tokio::join!(
+            service.list_endpoint(&profile, &one),
+            service.list_endpoint(&profile, &two),
+            async {
+                http.entered.notified().await;
+                http.release.notify_one();
+            }
+        );
+        assert_eq!(first.unwrap().models, ["one"]);
+        assert_eq!(
+            second.unwrap().models,
+            [if replacement { "two" } else { "one" }]
+        );
+        assert_eq!(
+            http.calls.load(Ordering::SeqCst),
+            if replacement { 2 } else { 1 }
+        );
+    }
+}
+
+#[tokio::test]
 async fn concurrent_refresh_callers_share_one_request_but_endpoint_notifications_do_not_skip_it() {
     struct Gated {
         calls: AtomicUsize,
@@ -979,6 +1248,100 @@ async fn catalog_models_never_become_a_profiles_implicit_default() {
     .await
     .unwrap()
     .unwrap();
+}
+
+#[tokio::test]
+async fn native_initial_selection_is_sticky_and_survives_a_durable_restart() {
+    let root = tempfile::tempdir().unwrap();
+    let env = Environment::default().with_variable("KEY", "fixture-key");
+    // Explicit refreshes make the ordering change deterministic without a background request.
+    let profiles = support::configured_providers(
+        "[providers.test]\npreset='openrouter'\ncredential={env='KEY'}\ndiscover_models=false",
+    );
+    let (cache, clock) = defaults();
+    let service = service(
+        Settings {
+            enabled: false,
+            ..Default::default()
+        },
+        Arc::new(FakeHttp::new(vec![
+            Ok(br#"{"data":[{"id":"z-native"},{"id":"a-native"}]}"#.to_vec()),
+            Ok(br#"{"data":[{"id":"a-native"}]}"#.to_vec()),
+        ])),
+        cache,
+        clock,
+    );
+    service
+        .list_endpoint(profiles.get("test").unwrap(), &env)
+        .await
+        .unwrap();
+    let saved = Arc::new(Mutex::new(None));
+    for restart in [false, true] {
+        let runtime = bee::acp::Runtime::new(
+            bee::agent::Limits::default(),
+            bee::tool::Registry::default(),
+        )
+        .with_discovery(service.clone())
+        .with_history(bee::history::Store::open(root.path().join("state")).unwrap());
+        let saved = saved.clone();
+        let service = service.clone();
+        let profiles_for_request = profiles.clone();
+        let env = env.clone();
+        let cwd = root.path().to_path_buf();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            Client.v2().connect_with(
+                bee::acp::agent_with_runtime(profiles.clone(), runtime),
+                async move |connection| {
+                    connection
+                        .send_request(v2::InitializeRequest::new(
+                            ProtocolVersion::V2,
+                            v2::Implementation::new("test", "0"),
+                        ))
+                        .block_task()
+                        .await?;
+                    let (id, options) = if restart {
+                        let id: v2::SessionId = saved.lock().unwrap().clone().unwrap();
+                        let response = connection
+                            .send_request(v2::ResumeSessionRequest::new(id.clone(), cwd))
+                            .block_task()
+                            .await?;
+                        (id, response.config_options)
+                    } else {
+                        let response = connection
+                            .send_request(v2::NewSessionRequest::new(cwd))
+                            .block_task()
+                            .await?;
+                        *saved.lock().unwrap() = Some(response.session_id.clone());
+                        (response.session_id, response.config_options)
+                    };
+                    let selected = options
+                        .iter()
+                        .find(|option| option.config_id.to_string() == "model")
+                        .unwrap();
+                    let v2::SessionConfigKind::Select(select) = &selected.kind else {
+                        panic!("model selector");
+                    };
+                    assert_eq!(select.current_value.to_string(), "z-native");
+                    if !restart {
+                        service
+                            .list_endpoint(profiles_for_request.get("test").unwrap(), &env)
+                            .await
+                            .unwrap();
+                    }
+                    // Resume after refresh/restart must retain the selected opaque ID even when absent.
+                    connection
+                        .send_request(v2::CloseSessionRequest::new(id))
+                        .block_task()
+                        .await?;
+                    Ok(())
+                },
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    }
 }
 
 #[test]

@@ -48,7 +48,7 @@ pub async fn execute(
     let json_output = match &command {
         ModelsCommand::Providers { json }
         | ModelsCommand::List { json, .. }
-        | ModelsCommand::Refresh { json } => *json,
+        | ModelsCommand::Refresh { json, .. } => *json,
     };
     // Explicit endpoint enumeration does not need a public-catalog request.
     if matches!(
@@ -68,10 +68,17 @@ pub async fn execute(
             }
             json!({"providers": snapshot.providers.iter().map(|(id, provider)| json!({"id":id,"name":provider.name,"model_count":provider.models.len()})).collect::<Vec<_>>()})
         }
-        ModelsCommand::Refresh { .. } => {
-            refresh_error = service.refresh().await.err();
-            snapshot = service.snapshot();
-            json!({"refreshed":refresh_error.is_none(),"provider_count":snapshot.providers.len()})
+        ModelsCommand::Refresh { profile, .. } => {
+            if let Some(name) = profile {
+                let profile = bee::auth::profile(providers, &name)?;
+                refresh_error = service.list_endpoint(profile, environment).await.err();
+                snapshot = service.snapshot();
+                json!({"refreshed":refresh_error.is_none(),"profile":name,"endpoint":snapshot.endpoints.get(&name)})
+            } else {
+                refresh_error = service.refresh().await.err();
+                snapshot = service.snapshot();
+                json!({"refreshed":refresh_error.is_none(),"provider_count":snapshot.providers.len()})
+            }
         }
         ModelsCommand::List {
             profile,
@@ -90,10 +97,10 @@ pub async fn execute(
                         .or_else(|| providers.default_name())
                         .unwrap_or("<default>"),
                 )?;
-                let endpoint_info = if endpoint {
-                    let listing = service.list_endpoint(profile, environment).await?;
+                let endpoint_info = if endpoint || profile.discover_models() {
+                    refresh_error = service.list_endpoint(profile, environment).await.err();
                     snapshot = service.snapshot();
-                    Some(listing)
+                    snapshot.endpoints.get(profile.name()).cloned()
                 } else {
                     None
                 };
@@ -127,6 +134,9 @@ pub async fn execute(
             "Models.dev: {freshness}; catalog declarations are not endpoint verification."
         )
         .map_err(write_error)?;
+        if let Some(endpoint) = data.get("endpoint").filter(|value| !value.is_null()) {
+            writeln!(err, "Connection catalogue: {}; last success: {}; stale: {}; discovery error: {}. Listed models are not verified inference access.", text(&endpoint["provenance"]), endpoint["fetched_at"], endpoint["stale"], endpoint["error"]).map_err(write_error)?;
+        }
         if let Some(providers) = data["providers"].as_array() {
             for provider in providers {
                 writeln!(
@@ -180,5 +190,102 @@ fn write_error(source: io::Error) -> bee::Error {
     bee::Error::Io {
         path: "<terminal>".into(),
         source,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    struct NativeHttp(AtomicUsize);
+    impl bee::models::Http for NativeHttp {
+        fn get<'a>(
+            &'a self,
+            url: &'a str,
+            _: reqwest::header::HeaderMap,
+            _: usize,
+        ) -> futures::future::BoxFuture<'a, Result<Vec<u8>, Error>> {
+            assert_eq!(url, "https://openrouter.ai/api/v1/models/user");
+            let first = self.0.fetch_add(1, Ordering::SeqCst) == 0;
+            Box::pin(async move {
+                if first {
+                    Ok(br#"{"data":[{"id":"native-model","name":"Native name"}]}"#.to_vec())
+                } else {
+                    Err(Error::Transport)
+                }
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn native_list_is_automatic_and_explicit_refresh_reports_stale_data_before_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[providers.account]\npreset='openrouter'\ncredential={env='KEY'}",
+        )
+        .unwrap();
+        let env =
+            Environment::new(None, None, Some(path)).with_variable("KEY", "credential-canary");
+        let providers = Providers::from_config(&Config::load(&env, root.path()).unwrap()).unwrap();
+        let service = Service::new(
+            Settings {
+                enabled: false,
+                ..Default::default()
+            },
+            Arc::new(NativeHttp(AtomicUsize::new(0))),
+            Arc::new(bee::models::FileCache(None)),
+            Arc::new(bee::models::SystemClock),
+        );
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        execute(
+            ModelsCommand::List {
+                profile: Some("account".into()),
+                catalog_provider: None,
+                endpoint: false,
+                json: true,
+            },
+            &service,
+            &providers,
+            &env,
+            &mut out,
+            &mut err,
+        )
+        .await
+        .unwrap();
+        let initial: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(initial["result"]["endpoint"]["provenance"], "native_api");
+        assert_eq!(initial["result"]["models"][0]["id"], "native-model");
+        out.clear();
+        assert!(
+            execute(
+                ModelsCommand::Refresh {
+                    profile: Some("account".into()),
+                    json: true
+                },
+                &service,
+                &providers,
+                &env,
+                &mut out,
+                &mut err
+            )
+            .await
+            .is_err()
+        );
+        let stale: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(stale["result"]["endpoint"]["models"][0], "native-model");
+        assert_eq!(stale["result"]["endpoint"]["stale"], true);
+        assert_eq!(stale["result"]["endpoint"]["error"], "transport");
+        assert!(
+            !String::from_utf8(out)
+                .unwrap()
+                .contains("credential-canary")
+        );
+        assert!(err.is_empty());
     }
 }
