@@ -154,10 +154,14 @@ the file and never the value. A `credential` only *names* where the secret lives
 When a provider is configured, Bee offers each ACPv2 session a `provider` and a `model` configuration option and
 handles `session/set_config_option`. These are session settings and differ from the configuration above: the client
 chooses among connections in the active profile and can name any model id, but cannot change a connection's endpoint,
-headers or credential. The provider is the client's choice, else the active profile's default connection; the model is
-the client's choice, else the effective `model`, else the first effective `models` entry. Profile model fields override
-connection defaults independently. Choosing another provider resets the model, and
-settings cannot change while a turn is running. See [ADR-007](adr/007-provider-profiles-and-model-selection.md).
+headers or credential. Explicit client selection takes precedence. New sessions otherwise prefer the active profile's
+usable account-bound last-used connection/model, even over project-configured defaults. Without a remembered choice,
+Bee uses the profile's default connection and its effective `model`, else its first effective `models` entry;
+eligible native discovery can initialize an otherwise unselected model. Profile model fields override connection
+defaults independently. An unavailable remembered choice can require explicit selection rather than switching accounts;
+see the [profile resolution rules](profiles.md#configured-default-and-last-used-model).
+Choosing another provider resets the model, and settings cannot change while a turn is running.
+See [ADR-007](adr/007-provider-profiles-and-model-selection.md).
 
 Protocol resolution uses that effective model ID for every prompt, whether selected by the client or supplied by a
 default. Changing models resolves the endpoint again, retains portable history and drops native continuation.
