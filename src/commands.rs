@@ -29,6 +29,8 @@ pub struct Context<'a> {
     pub store: &'a dyn CredentialStore,
     pub http: &'a dyn Http,
     pub login_http: &'a dyn bee::http::LoginHttp,
+    /// Optional injected discovery; authentication success does not depend on it.
+    pub discovery: Option<&'a bee::models::Service>,
     /// How long to wait for the browser.
     pub timeout: Duration,
     /// Try to open a URL in a browser. Best effort.
@@ -48,7 +50,22 @@ pub fn run_auth(command: AuthCommand) -> Result<()> {
         path: ".".to_owned(),
         source,
     })?;
-    let providers = Providers::from_config(&Config::load(&env, &project_dir)?)?;
+    let config = Config::load(&env, &project_dir)?;
+    let configured = Providers::from_config(&config)?;
+    let onboarding = match &command {
+        AuthCommand::Login(LoginArgs {
+            profile: Some(name),
+            ..
+        }) if configured.get(name).is_none() => {
+            Some(bee::config::persist::prepare(&env, &project_dir, name)?)
+        }
+        _ => None,
+    };
+    let providers = onboarding
+        .as_ref()
+        .map_or(&configured, |plan| plan.providers());
+    let discovery =
+        bee::models::Service::production(bee::models::Settings::from_config(&config)?, &env);
     let store = FileStore::from_environment(&env)?;
     let http = UreqHttp::new(HTTP_TIMEOUT);
     let stdin = io::stdin();
@@ -60,10 +77,11 @@ pub fn run_auth(command: AuthCommand) -> Result<()> {
         command,
         &mut Context {
             env: &env,
-            providers: &providers,
+            providers,
             store: &store,
             http: &http,
             login_http: &bee::http::AsyncLoginHttp,
+            discovery: Some(&discovery),
             timeout: login::DEFAULT_TIMEOUT,
             open: &open_browser,
             interactive,
@@ -71,13 +89,44 @@ pub fn run_auth(command: AuthCommand) -> Result<()> {
             err: &mut err,
             input: &mut input,
         },
-    )
+    )?;
+    if let Some(plan) = onboarding {
+        plan.commit(&env, &project_dir)?;
+    }
+    Ok(())
 }
 
 /// Run one `bee auth` command.
 pub fn execute(command: AuthCommand, context: &mut Context<'_>) -> Result<()> {
     match command {
-        AuthCommand::Login(args) => login(&args, context),
+        AuthCommand::Login(args) => {
+            login(&args, context)?;
+            let profile = chosen(context.providers, args.profile.as_deref())?;
+            if profile.discover_models()
+                && let Some(discovery) = context.discovery
+            {
+                discovery.invalidate_endpoint(profile.name());
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|source| Error::Io {
+                        path: "<async runtime>".into(),
+                        source,
+                    })?;
+                match runtime.block_on(discovery.list_endpoint(profile, context.env)) {
+                    Ok(listing) => writeln!(
+                        context.err,
+                        "Discovered {} models ({}); listing does not verify inference access.",
+                        listing.models.len(),
+                        listing.scope
+                    )
+                    .map_err(write_error)?,
+                    Err(error) => writeln!(context.err, "Signed in; model discovery: {error}")
+                        .map_err(write_error)?,
+                }
+            }
+            Ok(())
+        }
         AuthCommand::Logout { profile } => logout(profile.as_deref(), context),
         AuthCommand::Status { profile } => status(profile.as_deref(), context),
     }
@@ -352,6 +401,95 @@ mod tests {
 
     const KEY: &str = "sk-or-test-key";
 
+    #[cfg(unix)]
+    #[test]
+    fn token_login_discovers_its_connection_without_making_authentication_depend_on_discovery() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        struct Listing {
+            calls: AtomicUsize,
+            fail: bool,
+        }
+        impl bee::models::Http for Listing {
+            fn get<'a>(
+                &'a self,
+                url: &'a str,
+                headers: reqwest::header::HeaderMap,
+                _: usize,
+            ) -> futures::future::BoxFuture<'a, std::result::Result<Vec<u8>, bee::models::Error>>
+            {
+                assert_eq!(url, "https://openrouter.ai/api/v1/models/user");
+                assert_eq!(headers["authorization"], format!("Bearer {KEY}"));
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move {
+                    if self.fail {
+                        Err(bee::models::Error::Transport)
+                    } else {
+                        Ok(br#"{"data":[{"id":"native-model"}]}"#.to_vec())
+                    }
+                })
+            }
+        }
+        for fail in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let env = Environment::new(None, Some(root.path().into()), None);
+            let plan = bee::config::persist::prepare(&env, root.path(), "openrouter").unwrap();
+            let store = FileStore::from_environment(&env).unwrap();
+            let http = Arc::new(Listing {
+                calls: AtomicUsize::new(0),
+                fail,
+            });
+            let service = bee::models::Service::new(
+                bee::models::Settings::default(),
+                http.clone(),
+                Arc::new(bee::models::FileCache(None)),
+                Arc::new(bee::models::SystemClock),
+            );
+            let (mut out, mut err) = (Vec::new(), Vec::new());
+            let input = format!("{KEY}\n");
+            execute(
+                AuthCommand::Login(LoginArgs {
+                    profile: Some("openrouter".into()),
+                    with_token: true,
+                    paste_code: false,
+                    no_browser: false,
+                }),
+                &mut Context {
+                    env: &env,
+                    providers: plan.providers(),
+                    store: &store,
+                    http: &KeyGiver,
+                    login_http: &bee::http::AsyncLoginHttp,
+                    discovery: Some(&service),
+                    timeout: Duration::from_secs(1),
+                    open: &|_| {},
+                    interactive: false,
+                    out: &mut out,
+                    err: &mut err,
+                    input: &mut input.as_bytes(),
+                },
+            )
+            .unwrap();
+            assert_eq!(http.calls.load(Ordering::SeqCst), 1);
+            assert!(
+                store
+                    .get(Audience::Provider("openrouter"))
+                    .unwrap()
+                    .is_some()
+            );
+            assert!(out.is_empty());
+            let message = String::from_utf8(err).unwrap();
+            assert!(!message.contains(KEY));
+            assert!(message.contains(if fail {
+                "Signed in; model discovery:"
+            } else {
+                "Discovered 1 models"
+            }));
+        }
+    }
+
     /// Answers the exchange with a key, whatever it is asked.
     struct KeyGiver;
 
@@ -418,6 +556,7 @@ mod tests {
                     timeout: Duration::from_secs(5),
                     open,
                     interactive: false,
+                    discovery: None,
                     out: &mut out,
                     err: &mut err,
                     input: &mut input,
@@ -508,6 +647,7 @@ mod tests {
                 timeout: Duration::from_millis(100),
                 open: &open,
                 interactive: false,
+                discovery: None,
                 out: &mut out,
                 err: &mut err,
                 input: &mut input,
@@ -671,6 +811,7 @@ mod tests {
                 timeout: Duration::from_secs(10),
                 open: &open,
                 interactive: false,
+                discovery: None,
                 out: &mut out,
                 err: &mut err,
                 input: &mut input,

@@ -1,13 +1,13 @@
 # The profiles and browser sign-ins Bee ships (ADR-009).
 #
 # Data, not code: a user adds to this catalogue, or overrides an entry by name,
-# in the `presets` and `login_flows` tables of their own configuration. Only
-# what is generic to every provider lives in Bee's Rust.
+# in the `presets` and `login_flows` tables of their own configuration. Native
+# discovery adapters remain separate from these declarative sign-in mechanisms.
 #
 # Deliberately absent:
 #
 # - model lists. They go stale the day they are written; a profile names its
-#   own `model`.
+#   own `model`, or native discovery initializes a missing selection.
 # - Cloudflare. Its base URL carries an account id and there is no templating
 #   here; the documentation shows a profile to copy.
 
@@ -40,6 +40,8 @@ response_key = "key"
 # Each preset lists the protocols its provider speaks, each under `protocols`
 # with its own `base_url` and `options`. One protocol needs no `prefer`.
 [presets.openrouter]
+discovery = "openrouter"
+discover_models = true
 catalog_provider = "openrouter"
 prefer = ["openai-chat", "openai-responses"]
 credential = { store = true, login = "openrouter" }
@@ -67,6 +69,7 @@ credential = { env = "OPENAI_API_KEY" }
 kind = "chatgpt"
 
 [presets.chatgpt]
+discovery = "chatgpt"
 credential = { store = true, login = "chatgpt" }
 discover_models = true
 

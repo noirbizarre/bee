@@ -61,11 +61,7 @@ async fn chatgpt_browser_login_renews_between_native_tool_requests_and_commits_h
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("payload.txt"), "fixture-file-content").unwrap();
     let config_path = root.path().join("config.toml");
-    std::fs::write(
-        &config_path,
-        "[providers.account]\npreset='chatgpt'\nmodel='available-model'",
-    )
-    .unwrap();
+    std::fs::write(&config_path, "[providers.account]\npreset='chatgpt'").unwrap();
     let env = crate::config::Environment::new(None, Some(root.path().into()), Some(config_path));
     let config = crate::config::Config::load(&env, root.path()).unwrap();
     let profiles = Providers::from_config(&config).unwrap();
@@ -95,9 +91,42 @@ async fn chatgpt_browser_login_renews_between_native_tool_requests_and_commits_h
         }
     });
     let oauth = Arc::new(crate::test_chatgpt::OAuth::new());
+    struct Catalogue;
+    impl crate::models::Http for Catalogue {
+        fn get<'a>(
+            &'a self,
+            url: &'a str,
+            headers: reqwest::header::HeaderMap,
+            _: usize,
+        ) -> futures::future::BoxFuture<'a, std::result::Result<Vec<u8>, crate::models::Error>>
+        {
+            assert_eq!(url, "https://api.openai.com/v1/models");
+            assert_eq!(
+                headers["authorization"],
+                format!("Bearer {}", crate::test_chatgpt::ACCESS)
+            );
+            Box::pin(async {
+                Ok(br#"{"models":[{"slug":"available-model","display_name":"Native choice","visibility":"list"}]}"#.to_vec())
+            })
+        }
+    }
+    let discovery = Arc::new(
+        crate::models::Service::new(
+            crate::models::Settings {
+                enabled: false,
+                ..Default::default()
+            },
+            Arc::new(Catalogue),
+            Arc::new(crate::models::FileCache(None)),
+            Arc::new(crate::models::SystemClock),
+        )
+        .with_login_http(oauth.clone()),
+    );
     let mut runtime = Runtime::builtins(crate::agent::Limits::default())
         .unwrap()
-        .with_auth(env, oauth.clone());
+        .with_auth(env, oauth.clone())
+        .with_discovery(discovery.clone())
+        .with_history(crate::history::Store::open(root.path().join("state")).unwrap());
     runtime.inference_http = Some(crate::http::InferenceHttp::test_routed(server.url.clone()));
     let observed_oauth = oauth.clone();
     let (tx, mut updates) = tokio::sync::mpsc::unbounded_channel();
@@ -158,6 +187,12 @@ async fn chatgpt_browser_login_renews_between_native_tool_requests_and_commits_h
         crate::test_chatgpt::RENEWED
     )));
     assert!(first.body.get("max_output_tokens").is_none());
+    assert_eq!(first.body["model"], "available-model");
+    assert!(
+        discovery.snapshot().endpoints["account"]
+            .inference_succeeded_at
+            .contains_key("available-model")
+    );
     assert_eq!(first.body["tools"][0]["type"], "namespace");
     assert_eq!(
         second.body["input"][1]["encrypted_content"],

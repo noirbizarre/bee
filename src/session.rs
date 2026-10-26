@@ -238,14 +238,11 @@ impl Sessions {
     }
 
     /// Background option updates must not target closed sessions.
-    pub(crate) fn open_settings(&self) -> Vec<(String, Settings)> {
+    pub(crate) fn open_ids(&self) -> Vec<String> {
         self.by_id
             .iter()
             .filter(|(_, session)| session.open)
-            .filter_map(|(id, session)| {
-                self.describe(session)
-                    .map(|settings| (id.clone(), settings))
-            })
+            .map(|(id, _)| id.clone())
             .collect()
     }
 
@@ -265,6 +262,13 @@ impl Sessions {
             .get(id)
             .ok_or_else(|| SessionError::Unknown(id.to_owned()))?;
         Ok(self.describe(session))
+    }
+
+    pub(crate) fn open_settings_for(&self, id: &str) -> Option<Settings> {
+        self.by_id
+            .get(id)
+            .filter(|session| session.open)
+            .and_then(|session| self.describe(session))
     }
 
     /// Snapshot the selected configuration and committed model context.
@@ -305,6 +309,61 @@ impl Sessions {
             messages,
             cwd: session.cwd.clone(),
         })
+    }
+
+    /// Pin a native initial choice; the ACP caller persists it before publication.
+    pub(crate) fn initialize_native(&mut self, id: &str, active_token: Option<u64>) -> bool {
+        let Some(session) = self.by_id.get(id) else {
+            return false;
+        };
+        if !session.open
+            || session.model.is_some()
+            || match active_token {
+                Some(token) => session
+                    .active
+                    .as_ref()
+                    .is_none_or(|turn| turn.token != token),
+                None => session.active.is_some(),
+            }
+        {
+            return false;
+        }
+        let Some(profile) = session
+            .provider
+            .as_deref()
+            .or_else(|| self.providers.default_name())
+            .and_then(|name| self.providers.get(name))
+        else {
+            return false;
+        };
+        if profile.default_model().is_some() {
+            return false;
+        }
+        let Some(model) = self.discovery.as_ref().and_then(|service| {
+            service
+                .snapshot()
+                .native_default(profile)
+                .map(str::to_owned)
+        }) else {
+            return false;
+        };
+        let provider = profile.name().to_owned();
+        let session = self.by_id.get_mut(id).expect("existing session");
+        session.model = Some(model);
+        session.provider = Some(provider);
+        true
+    }
+
+    pub(crate) fn selected_profile(&self, id: &str) -> Option<crate::provider::Profile> {
+        let session = self.by_id.get(id)?;
+        self.providers
+            .get(
+                session
+                    .provider
+                    .as_deref()
+                    .or_else(|| self.providers.default_name())?,
+            )
+            .cloned()
     }
 
     /// Commit only while this turn owns the session; cancelled work is stale.
@@ -350,7 +409,7 @@ impl Sessions {
             model,
             models,
             model_info,
-            catalog_status: serde_json::json!({"available": snapshot.fetched_at.is_some(), "stale": snapshot.stale, "fetched_at": snapshot.fetched_at, "error": snapshot.error, "cache_error": snapshot.cache_error}),
+            catalog_status: serde_json::json!({"available": snapshot.fetched_at.is_some(), "stale": snapshot.stale, "fetched_at": snapshot.fetched_at, "error": snapshot.error, "cache_error": snapshot.cache_error, "connection": snapshot.endpoints.get(profile.name()).map(|listing| serde_json::json!({"provenance":listing.provenance,"scope":listing.scope,"fetched_at":listing.fetched_at,"attempted_at":listing.attempted_at,"stale":listing.stale,"error":listing.error,"inference_succeeded_at":listing.inference_succeeded_at}))}),
         })
     }
 
@@ -496,13 +555,21 @@ impl Sessions {
         {
             session.finalizing = false;
         }
-        if !self.is_current(id, token) {
-            return false;
-        }
-        if let Some(session) = self.by_id.get_mut(id) {
+        let current = self.is_current(id, token);
+        if current && let Some(session) = self.by_id.get_mut(id) {
             session.active = None;
         }
-        true
+        // Discovery deferred during a turn must be reconsidered after terminal idle.
+        if self.by_id.get(id).is_some_and(|session| {
+            session.model.is_none() && session.active.is_none() && session.turns == token
+        }) && let Some(profile) = self.selected_profile(id)
+            && profile.default_model().is_none()
+            && let Some(service) = &self.discovery
+            && service.snapshot().native_default(&profile).is_some()
+        {
+            service.notify();
+        }
+        current
     }
 
     /// Stop the turn running in `id`, if any.

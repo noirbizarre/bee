@@ -16,6 +16,9 @@ use serde_json::Value;
 use crate::config::{Config, Environment};
 use crate::provider::{Profile, Protocol};
 
+mod native;
+pub use native::Integration;
+
 /// Published API, deliberately unrelated to any inference endpoint.
 pub const CATALOG_URL: &str = "https://models.dev/api.json";
 /// Bound catalog downloads and cache reads before parsing untrusted JSON.
@@ -33,6 +36,11 @@ pub enum Error {
     /// The source rejected discovery, not necessarily inference.
     #[error("model discovery was rejected; check credentials and endpoint listing support")]
     Rejected,
+    /// Authorization failure invalidates account visibility, unlike a temporary outage.
+    #[error(
+        "model discovery authorization failed; sign in again or check the configured credential"
+    )]
+    Unauthorized,
     /// No valid replacement snapshot was obtained.
     #[error("model discovery returned an invalid document; retry refresh or use configured IDs")]
     Malformed,
@@ -277,16 +285,30 @@ pub struct Snapshot {
 }
 
 /// Account-specific, in-memory endpoint enumeration.
-#[derive(Clone, Serialize)]
+#[derive(Clone, Default, Serialize)]
 pub struct EndpointListing {
     /// Deduplicated IDs; ChatGPT preserves the account's server ordering.
     pub models: Vec<String>,
     /// Account display names also provide indexed membership for ordered listings.
     pub display_names: BTreeMap<String, String>,
-    /// Time observed; endpoint visibility is not a permanent guarantee.
-    pub fetched_at: u64,
+    /// Last success, absent before a complete result; visibility is not a permanent guarantee.
+    pub fetched_at: Option<u64>,
     /// Failure leaves no account-specific fallback after credential changes.
     pub error: Option<Error>,
+    /// Last attempt is separate from the last successful observation.
+    pub attempted_at: u64,
+    /// Retained successful records can be stale after an outage.
+    pub stale: bool,
+    /// A native API, official integration, or generic endpoint; never verification.
+    pub provenance: &'static str,
+    /// Published catalogue and account-filtered visibility have different semantics.
+    pub scope: &'static str,
+    /// Documented facts only; absent values remain unknown.
+    pub entries: BTreeMap<String, Entry>,
+    /// Only native results may supply an initial model.
+    pub native: bool,
+    /// Actual successful inference observations, not lasting entitlement guarantees.
+    pub inference_succeeded_at: BTreeMap<String, u64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -418,6 +440,15 @@ pub struct ModelInfo {
 }
 
 impl Snapshot {
+    /// Native ordering may initialize a selection, but never replaces an existing one.
+    pub fn native_default(&self, profile: &Profile) -> Option<&str> {
+        self.endpoints
+            .get(profile.name())
+            .filter(|listing| listing.native)?
+            .models
+            .first()
+            .map(String::as_str)
+    }
     /// Exact profile association only; catalog absence is ordinary.
     pub fn entry(&self, profile: &Profile, model: &str) -> Option<(&Provider, &Entry)> {
         let provider = self.providers.get(profile.catalog_provider()?)?;
@@ -502,12 +533,12 @@ impl Snapshot {
         if self.endpoints.get(profile.name()).is_some_and(|listing| {
             // Endpoint enumeration sorts once; scanning again for each projected
             // model would make a large account listing quadratic under ACP's lock.
-            listing.error.is_none()
-                && (listing.display_names.contains_key(model)
-                    || listing
-                        .models
-                        .binary_search_by(|id| id.as_str().cmp(model))
-                        .is_ok())
+            listing.display_names.contains_key(model)
+                || listing.entries.contains_key(model)
+                || listing
+                    .models
+                    .binary_search_by(|id| id.as_str().cmp(model))
+                    .is_ok()
         }) {
             sources.push("endpoint");
         }
@@ -535,13 +566,48 @@ impl Snapshot {
         if let Some((listing, name)) = self
             .endpoints
             .get(profile.name())
-            .filter(|listing| listing.error.is_none())
             .and_then(|listing| listing.display_names.get(model).map(|name| (listing, name)))
         {
             // Account labels override public metadata, but never explicit configuration.
             let mut fact = self.fact(name.clone().into(), "endpoint", "declared");
-            fact.fetched_at = Some(listing.fetched_at);
+            fact.fetched_at = listing.fetched_at;
+            fact.stale = listing.stale;
             facts.insert("display_name".into(), fact);
+        }
+        if let Some(listing) = self.endpoints.get(profile.name())
+            && let Some(entry) = listing.entries.get(model)
+        {
+            // Native declarations enrich public metadata below explicit configuration.
+            for (key, value) in serde_json::to_value(&entry.metadata)
+                .expect("metadata serializes")
+                .as_object()
+                .expect("object")
+            {
+                if !value.is_null() {
+                    facts.insert(
+                        key.clone(),
+                        Fact {
+                            value: value.clone(),
+                            source: listing.provenance,
+                            confidence: "declared",
+                            stale: listing.stale,
+                            fetched_at: listing.fetched_at,
+                        },
+                    );
+                }
+            }
+            if let Some(window) = entry.context_window {
+                facts.insert(
+                    "context_window".into(),
+                    Fact {
+                        value: window.into(),
+                        source: listing.provenance,
+                        confidence: "declared",
+                        stale: listing.stale,
+                        fetched_at: listing.fetched_at,
+                    },
+                );
+            }
         }
         for metadata in [Some(profile.metadata()), profile.model_metadata(model)]
             .into_iter()
@@ -587,10 +653,7 @@ impl Snapshot {
             .collect();
         // Large public catalogs must not make selector deduplication quadratic.
         let mut seen: BTreeSet<String> = ids.iter().cloned().collect();
-        let endpoints = self
-            .endpoints
-            .get(profile.name())
-            .filter(|listing| listing.error.is_none());
+        let endpoints = self.endpoints.get(profile.name());
         let catalog = profile
             .catalog_provider()
             .and_then(|id| self.providers.get(id));
@@ -638,7 +701,16 @@ pub struct Service {
     refresh_lock: tokio::sync::Mutex<()>,
     refresh_generation: std::sync::atomic::AtomicU64,
     endpoint_epochs: Mutex<BTreeMap<String, u64>>,
+    endpoint_identities: Mutex<BTreeMap<String, (Profile, Option<crate::auth::Credential>)>>,
+    endpoint_locks: Mutex<BTreeMap<String, Arc<EndpointFlight>>>,
+    login_http: Arc<dyn crate::http::LoginHttp>,
     changed: tokio::sync::watch::Sender<u64>,
+}
+
+#[derive(Default)]
+struct EndpointFlight {
+    lock: tokio::sync::Mutex<()>,
+    generation: std::sync::atomic::AtomicU64,
 }
 
 impl std::fmt::Debug for Service {
@@ -664,7 +736,86 @@ impl Service {
             refresh_lock: tokio::sync::Mutex::new(()),
             refresh_generation: std::sync::atomic::AtomicU64::new(0),
             endpoint_epochs: Mutex::new(BTreeMap::new()),
+            endpoint_identities: Mutex::new(BTreeMap::new()),
+            endpoint_locks: Mutex::new(BTreeMap::new()),
+            login_http: Arc::new(crate::http::AsyncLoginHttp),
             changed: tokio::sync::watch::channel(0).0,
+        }
+    }
+
+    /// Renewal uses the caller's transport, including hermetic authentication tests.
+    pub fn with_login_http(mut self, http: Arc<dyn crate::http::LoginHttp>) -> Self {
+        self.login_http = http;
+        self
+    }
+
+    /// Inference already resolved credentials; do not wait for polling to notice replacement.
+    pub(crate) fn observe_account(
+        &self,
+        profile: &Profile,
+        credential: Option<&crate::auth::Credential>,
+    ) -> bool {
+        let mut identities = self
+            .endpoint_identities
+            .lock()
+            .expect("endpoint identities");
+        let changed = identities
+            .get(profile.name())
+            .is_some_and(|(old, account)| {
+                old != profile || !native::same_account(account.as_ref(), credential)
+            });
+        if changed {
+            self.invalidate_endpoint(profile.name());
+        }
+        identities.insert(
+            profile.name().into(),
+            (profile.clone(), credential.cloned()),
+        );
+        changed
+    }
+
+    /// Record an actual completed inference only while the same account owns visibility.
+    pub fn record_inference_success(
+        &self,
+        profile: &Profile,
+        credential: Option<&crate::auth::Credential>,
+        model: &str,
+    ) {
+        let identities = self
+            .endpoint_identities
+            .lock()
+            .expect("endpoint identities");
+        if identities.get(profile.name()).is_none_or(|(old, account)| {
+            old != profile || !native::same_account(account.as_ref(), credential)
+        }) {
+            return;
+        }
+        let mut state = self.state.lock().expect("model state lock");
+        let Some(listing) = state.endpoints.get_mut(profile.name()) else {
+            // Manual inference without any discovered catalogue has no options to refresh.
+            return;
+        };
+        listing
+            .inference_succeeded_at
+            .insert(model.into(), self.clock.now());
+        drop(state);
+        drop(identities);
+        self.notify();
+    }
+
+    /// Independent connection workers keep a slow account from delaying another.
+    pub async fn run_endpoint(&self, profile: &Profile, env: &Environment) {
+        let mut backoff = 60;
+        loop {
+            let delay = if self.list_endpoint(profile, env).await.is_ok() {
+                backoff = 60;
+                300
+            } else {
+                let delay = backoff;
+                backoff = (backoff * 2).min(3600);
+                delay
+            };
+            tokio::time::sleep(Duration::from_secs(delay)).await;
         }
     }
 
@@ -686,6 +837,11 @@ impl Service {
         }) {
             snapshot.stale = true;
         }
+        for listing in snapshot.endpoints.values_mut() {
+            listing.stale |= listing
+                .fetched_at
+                .is_none_or(|time| self.clock.now().saturating_sub(time) >= 300);
+        }
         snapshot
     }
 
@@ -694,7 +850,7 @@ impl Service {
         self.changed.subscribe()
     }
 
-    fn notify(&self) {
+    pub(crate) fn notify(&self) {
         self.changed
             .send_modify(|generation| *generation = generation.wrapping_add(1));
     }
@@ -859,15 +1015,88 @@ impl Service {
         profile: &Profile,
         env: &Environment,
     ) -> Result<EndpointListing, Error> {
-        // Clear old account visibility before resolving potentially replaced credentials.
-        let epoch = self.invalidate_endpoint(profile.name());
-        let result = endpoint_listing(self.http.as_ref(), profile, env).await;
-        let listing = EndpointListing {
-            models: result.as_ref().map(|v| v.0.clone()).unwrap_or_default(),
-            display_names: result.as_ref().map(|v| v.1.clone()).unwrap_or_default(),
-            fetched_at: self.clock.now(),
-            error: result.err(),
+        let flight = self
+            .endpoint_locks
+            .lock()
+            .expect("endpoint locks")
+            .entry(profile.name().into())
+            .or_default()
+            .clone();
+        let generation = flight.generation.load(std::sync::atomic::Ordering::SeqCst);
+        let _guard = flight.lock.lock().await;
+        let credential = native::credential(profile, env, self.login_http.as_ref(), |credential| {
+            self.observe_account(profile, credential);
+        })
+        .await;
+        if let Ok(credential) = &credential {
+            let changed = self.observe_account(profile, credential.as_ref());
+            if !changed
+                && generation != flight.generation.load(std::sync::atomic::Ordering::SeqCst)
+                && let Some(listing) = self.snapshot().endpoints.get(profile.name()).cloned()
+            {
+                return listing.error.map_or(Ok(listing), Err);
+            }
+        }
+        let epoch = *self
+            .endpoint_epochs
+            .lock()
+            .expect("endpoint epochs lock")
+            .entry(profile.name().into())
+            .or_default();
+        let result = match credential {
+            Ok(ref credential) => {
+                // Bound a whole paginated refresh, not only each individual page.
+                tokio::time::timeout(
+                    Duration::from_secs(30),
+                    native::discover(self.http.as_ref(), profile, credential.as_ref()),
+                )
+                .await
+                .unwrap_or(Err(Error::Transport))
+            }
+            Err(error) => Err(error),
         };
+        // Re-read without renewing: token rotation is harmless, replacement/logout is not.
+        let result = if credential.is_ok() {
+            match native::current_credential(profile, env).await {
+                Ok(current)
+                    if native::same_account(
+                        current.as_ref(),
+                        credential.as_ref().ok().and_then(Option::as_ref),
+                    ) =>
+                {
+                    result
+                }
+                Ok(_) | Err(Error::Unauthorized) => Err(Error::Unauthorized),
+                Err(error) if result.is_ok() => Err(error),
+                Err(_) => result,
+            }
+        } else {
+            result
+        };
+        let mut listing = match result {
+            Ok(mut listing) => {
+                listing.fetched_at = Some(self.clock.now());
+                if let Some(previous) = self.snapshot().endpoints.get(profile.name()) {
+                    listing.inference_succeeded_at = previous.inference_succeeded_at.clone();
+                }
+                listing
+            }
+            Err(error) => {
+                let mut listing = if matches!(error, Error::Unauthorized) {
+                    native::empty_listing(profile)
+                } else {
+                    self.snapshot()
+                        .endpoints
+                        .get(profile.name())
+                        .cloned()
+                        .unwrap_or_else(|| native::empty_listing(profile))
+                };
+                listing.error = Some(error);
+                listing.stale = true;
+                listing
+            }
+        };
+        listing.attempted_at = self.clock.now();
         let epochs = self.endpoint_epochs.lock().expect("endpoint epochs lock");
         // Login/invalidation can race an old account's in-flight response. Never
         // publish that response after visibility was explicitly invalidated.
@@ -880,6 +1109,9 @@ impl Service {
             .endpoints
             .insert(profile.name().to_owned(), listing.clone());
         drop(epochs);
+        flight
+            .generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.notify();
         listing.error.map_or(Ok(listing), Err)
     }
@@ -891,127 +1123,8 @@ pub async fn endpoint_models(
     profile: &Profile,
     env: &Environment,
 ) -> Result<Vec<String>, Error> {
-    endpoint_listing(http, profile, env).await.map(|v| v.0)
-}
-
-async fn endpoint_listing(
-    http: &dyn Http,
-    profile: &Profile,
-    env: &Environment,
-) -> Result<(Vec<String>, BTreeMap<String, String>), Error> {
-    let chatgpt = profile
-        .login_spec()
-        .is_some_and(crate::preset::LoginSpec::is_chatgpt);
-    let oauth_store = if chatgpt {
-        Some(crate::auth::FileStore::from_environment(env).map_err(|_| Error::Credentials)?)
-    } else {
-        None
-    };
-    let oauth_credential = if let Some(store) = &oauth_store {
-        Some(
-            crate::auth::chatgpt::resolve(store, profile.name(), &crate::http::AsyncLoginHttp)
-                .await
-                .map_err(|_| Error::Credentials)?,
-        )
-    } else {
-        None
-    };
-    let auth_profile = profile.clone();
-    let env = env.clone();
-    // Credential store reads are disk work too; background listing must yield
-    // even when the credential file lives on a slow filesystem.
-    let credential = if chatgpt {
-        oauth_credential
-    } else {
-        tokio::task::spawn_blocking(move || {
-            let store = if matches!(
-                auth_profile.credential(),
-                Some(crate::provider::CredentialSource::Store { .. })
-            ) {
-                crate::auth::FileStore::from_environment(&env).map_err(|_| Error::Credentials)?
-            } else {
-                crate::auth::FileStore::new("")
-            };
-            crate::auth::resolve(&auth_profile, &env, &store, crate::auth::unix_now())
-                .map_err(|_| Error::Credentials)
-        })
+    let credential = native::credential(profile, env, &crate::http::AsyncLoginHttp, |_| {}).await?;
+    native::discover(http, profile, credential.as_ref())
         .await
-        .map_err(|_| Error::Credentials)??
-    };
-    let mut urls = Vec::new();
-    let mut ids = Vec::new();
-    let mut names = BTreeMap::new();
-    for endpoint in profile.endpoints().iter().filter(|e| {
-        matches!(
-            e.protocol(),
-            Protocol::OpenAiChat | Protocol::OpenAiResponses
-        )
-    }) {
-        let url = format!("{}/models", endpoint.base_url());
-        if urls.contains(&url) {
-            continue;
-        }
-        let headers = crate::llm::request_headers(
-            profile,
-            endpoint.protocol(),
-            credential.as_ref().map(|c| c.secret()),
-            None,
-            false,
-        )
-        .map_err(|_| Error::Credentials)?;
-        let bytes = http.get(&url, headers, MAX_LIST_BYTES).await?;
-        if bytes.len() > MAX_LIST_BYTES {
-            return Err(Error::Limit);
-        }
-        let value: Value = serde_json::from_slice(&bytes).map_err(|_| Error::Malformed)?;
-        // A partial page is not a complete endpoint enumeration.
-        if value["has_more"] == true || value.get("next").is_some_and(|v| !v.is_null()) {
-            return Err(Error::Unsupported);
-        }
-        let data = value[if chatgpt { "models" } else { "data" }]
-            .as_array()
-            .ok_or(Error::Malformed)?;
-        if data.len() + ids.len() > 100_000 {
-            return Err(Error::Limit);
-        }
-        for item in data {
-            if chatgpt && item["visibility"] != "list" {
-                continue;
-            }
-            let id = item[if chatgpt { "slug" } else { "id" }]
-                .as_str()
-                .ok_or(Error::Malformed)?;
-            crate::provider::check_model_id(id).map_err(|_| Error::Malformed)?;
-            if chatgpt {
-                let name = item["display_name"]
-                    .as_str()
-                    .filter(|n| !n.is_empty() && !n.chars().any(char::is_control))
-                    .ok_or(Error::Malformed)?;
-                if names.insert(id.into(), name.into()).is_some() {
-                    continue;
-                }
-            }
-            ids.push(id.to_owned());
-        }
-        urls.push(url);
-    }
-    if urls.is_empty() {
-        return Err(Error::Unsupported);
-    }
-    if let Some(store) = oauth_store {
-        use crate::auth::CredentialStore;
-        // An external logout/replacement cannot publish a just-obsolete account list.
-        if store
-            .get(crate::auth::Audience::Provider(profile.name()))
-            .map_err(|_| Error::Credentials)?
-            != credential
-        {
-            return Err(Error::Credentials);
-        }
-    }
-    if !chatgpt {
-        ids.sort();
-        ids.dedup();
-    }
-    Ok((ids, names))
+        .map(|listing| listing.models)
 }

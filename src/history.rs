@@ -855,6 +855,26 @@ impl Handle {
         .inspect_err(|failure| self.fail(failure.clone()))
     }
 
+    /// First-use discovery may fill an absent model under the accepted turn's authority.
+    pub(crate) async fn initialize_model(&self, turn: u64, snapshot: Snapshot) -> Result<()> {
+        self.healthy()?;
+        self.run(move |journal, path| {
+            // Reuse context-integrity checks; ordinary settings changes remain idle-only.
+            journal.projection.settings(&snapshot, path)?;
+            journal.append(Event::InitialModelSelected {
+                turn,
+                provider: snapshot
+                    .provider
+                    .ok_or_else(|| error(path, "initial selection needs a connection"))?,
+                model: snapshot
+                    .model
+                    .ok_or_else(|| error(path, "initial selection needs a model"))?,
+            })
+        })
+        .await
+        .inspect_err(|failure| self.fail(failure.clone()))
+    }
+
     pub(crate) async fn finish(
         &self,
         turn: u64,

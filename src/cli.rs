@@ -48,7 +48,7 @@ pub enum ModelsCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Show model suggestions or explicitly enumerate an endpoint's visible IDs.
+    /// Show model suggestions, automatically discovering supported native connections.
     List {
         /// Connection in the active profile; its default connection when omitted.
         #[arg(value_name = "CONNECTION", conflicts_with = "catalog_provider")]
@@ -56,15 +56,18 @@ pub enum ModelsCommand {
         /// Browse a Models.dev provider rather than a configured connection.
         #[arg(long, conflicts_with = "endpoint")]
         catalog_provider: Option<String>,
-        /// Query configured OpenAI-compatible endpoints using existing credentials.
+        /// Force connection discovery, including generic OpenAI-compatible endpoints.
         #[arg(long)]
         endpoint: bool,
         /// Print per-field provenance and freshness as JSON.
         #[arg(long)]
         json: bool,
     },
-    /// Refresh the public catalog, retaining the last valid cache on failure.
+    /// Refresh a connection's native catalogue, or the public catalogue when omitted.
     Refresh {
+        /// Connection in the active profile; omitted refreshes Models.dev.
+        #[arg(value_name = "CONNECTION")]
+        profile: Option<String>,
         /// Print structured refresh status.
         #[arg(long)]
         json: bool,

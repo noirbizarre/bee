@@ -100,6 +100,12 @@ impl std::fmt::Debug for Registration {
 }
 
 impl Registration {
+    pub(super) fn same_discovery_account(&self, other: &Self) -> bool {
+        // Token rotation changes neither registration identity nor granted visibility.
+        self.client_id == other.client_id
+            && self.subject == other.subject
+            && self.scopes == other.scopes
+    }
     pub(super) fn plan_enabled(&self) -> bool {
         self.scopes.iter().any(|s| s == DIRECT)
     }

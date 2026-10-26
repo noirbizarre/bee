@@ -314,6 +314,14 @@ impl Config {
     /// - [`Error::ConfigParse`] if a file is not valid TOML.
     /// - [`Error::ConfigConflict`] if two layers give one key different types.
     pub fn load(environment: &Environment, project_dir: &Path) -> Result<Self> {
+        Self::load_with_global(environment, project_dir, None)
+    }
+
+    fn load_with_global(
+        environment: &Environment,
+        project_dir: &Path,
+        replacement: Option<&Table>,
+    ) -> Result<Self> {
         // (path, required), lowest precedence first. Order is the whole
         // precedence rule, so it lives in one visible place.
         let mut layers: Vec<(PathBuf, bool)> = Vec::new();
@@ -333,7 +341,15 @@ impl Config {
             config.merge_profile_environment(environment)?;
         }
         for (index, (path, required)) in layers.into_iter().enumerate() {
-            if let Some(table) = read_layer(&path, required)? {
+            let table = if index == 0
+                && environment.global_config_path().is_some()
+                && replacement.is_some()
+            {
+                replacement.cloned()
+            } else {
+                read_layer(&path, required)?
+            };
+            if let Some(table) = table {
                 config.sources.push(path.clone());
                 merge(&mut config.table, table, "", &path, &mut config.origins)?;
             }
@@ -409,6 +425,8 @@ impl Config {
         &self.sources
     }
 }
+
+pub mod persist;
 
 /// Treat an empty path as absent, as shells do for an empty variable.
 fn non_empty(path: Option<PathBuf>) -> Option<PathBuf> {

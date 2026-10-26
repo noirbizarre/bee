@@ -48,6 +48,7 @@ const PROFILE_KEYS: &[&str] = &[
     "catalog_protocol_hints",
     "catalog_context_window",
     "discover_models",
+    "discovery",
     "metadata",
     "model_metadata",
 ];
@@ -73,6 +74,7 @@ const PRESET_KEYS: &[&str] = &[
     "catalog_protocol_hints",
     "catalog_context_window",
     "discover_models",
+    "discovery",
     "metadata",
     "model_metadata",
 ];
@@ -285,6 +287,7 @@ pub struct Profile {
     catalog_protocol_hints: bool,
     catalog_context_window: bool,
     discover_models: bool,
+    discovery: Option<crate::models::Integration>,
     metadata: crate::models::Metadata,
     model_metadata: BTreeMap<String, crate::models::Metadata>,
 }
@@ -346,6 +349,10 @@ impl Profile {
     /// Whether to enumerate this endpoint automatically with existing credentials.
     pub fn discover_models(&self) -> bool {
         self.discover_models
+    }
+    /// Native catalogue identity is independent of inference protocol and public metadata.
+    pub fn discovery(&self) -> Option<crate::models::Integration> {
+        self.discovery
     }
     /// Explicit profile-wide descriptive defaults.
     pub fn metadata(&self) -> &crate::models::Metadata {
@@ -845,7 +852,7 @@ impl Reader<'_> {
             models,
             model_protocols,
             credential,
-            login,
+            login: login.clone(),
             headers,
             timeout_ms: self.positive(table, &key, "timeout_ms", 120_000)?,
             max_output_tokens: self.positive(table, &key, "max_output_tokens", 4096)?,
@@ -861,6 +868,13 @@ impl Reader<'_> {
             catalog_protocol_hints: self.boolean(table, &key, "catalog_protocol_hints")?,
             catalog_context_window: self.boolean(table, &key, "catalog_context_window")?,
             discover_models: self.boolean(table, &key, "discover_models")?,
+            discovery: table.get("discovery").map(|value| {
+                match self.string(&format!("{key}.discovery"), value)? {
+                    "openrouter" => Ok(crate::models::Integration::OpenRouter),
+                    "chatgpt" if login.as_ref().is_some_and(|flow| flow.is_chatgpt()) => Ok(crate::models::Integration::ChatGpt),
+                    _ => Err(self.invalid(&key, "discovery requires a supported integration and matching authentication")),
+                }
+            }).transpose()?,
             metadata: table
                 .get("metadata")
                 .map(|value| self.metadata(&format!("{key}.metadata"), value))
