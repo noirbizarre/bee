@@ -309,7 +309,7 @@ the following v1 surfaces available. V2 support described above applies only to 
 | `session/set_config_option`, client `session.configOptions` | Not planned | V1 capability-gated configuration delivery is not implemented; v2 selectors/config updates are supported without this v1 gate. |
 | `authenticate`, `logout`, auth methods / terminal-auth capability | Not planned | No v1 agent-auth API. Provider credentials remain separate in either version. |
 | `fs/read_text_file`, `fs/write_text_file`; client `fs` capabilities | Not planned | No client filesystem delegation. Native tools execute in Bee's host context. |
-| `terminal/create`, `terminal/output`, `terminal/wait_for_exit`, `terminal/kill`, `terminal/release`; client `terminal` | Not planned | No delegated terminal execution; removed from v2. Planned v2 terminal updates are display-only. |
+| `terminal/create`, `terminal/output`, `terminal/wait_for_exit`, `terminal/kill`, `terminal/release`; client `terminal` | Not planned | No delegated terminal execution; removed from v2. Implemented v2 terminal updates are display-only. |
 | `session/request_permission`; `elicitation/create`, `elicitation/complete` | Not planned | No v1 interaction boundary. V2 command subjects and negotiated elicitation use the v2 schemas. |
 | `$/cancel_request`, JSON-RPC error/transport behavior on v1 | Not planned | Shared SDK machinery does not establish a tested Bee v1 endpoint. V2 request cancellation is assessed separately. |
 | `promptCapabilities`: image/audio/embeddedContext; text/resource links | Not planned | No v1 prompt ingestion. Planned #22 is for Bee's v2 prompt boundary. |
