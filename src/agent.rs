@@ -301,14 +301,7 @@ pub(crate) async fn run_with_guidance(
         let step = model.step(&messages, tools, text).await?;
         input_steps += usize::from(step.usage.input.is_some());
         output_steps += usize::from(step.usage.output.is_some());
-        for (total, count) in [
-            (&mut usage.input, step.usage.input),
-            (&mut usage.output, step.usage.output),
-        ] {
-            if let Some(count) = count {
-                *total = Some(total.unwrap_or(0).saturating_add(count));
-            }
-        }
+        usage.accumulate(&step.usage);
         let Message::Assistant { calls, .. } = &step.message else {
             return Err(Error::Malformed);
         };

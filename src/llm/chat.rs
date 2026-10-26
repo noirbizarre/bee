@@ -48,12 +48,46 @@ pub(super) fn request(model: &Model, messages: &[Message], tools: &[Tool]) -> Re
     let field = match model.endpoint().options() {
         ProtocolOptions::OpenAiChat {
             max_tokens_field: MaxTokensField::MaxCompletionTokens,
+            ..
         } => "max_completion_tokens",
         _ => "max_tokens",
     };
     body[field] = model.profile.max_output_tokens().into();
     if !tools.is_empty() {
         body["tools"] = tools.iter().map(|tool| json!({"type":"function","function":{"name":tool.name,"description":tool.description,"parameters":tool.parameters}})).collect();
+    }
+    let ProtocolOptions::OpenAiChat { cache, .. } = model.endpoint().options() else {
+        return Err(Error::Malformed);
+    };
+    let boundaries = super::cache::openai(model, &mut body, cache)?;
+    if boundaries.instructions() {
+        let block = super::cache::marked_text("text", &model.instructions)?;
+        body["messages"][0]["content"] = json!([block]);
+    }
+    if boundaries.conversation() {
+        let mut blocks = Vec::new();
+        let mut items = body["messages"]
+            .as_array_mut()
+            .expect("messages array")
+            .iter_mut()
+            .peekable();
+        while let Some(item) = items.next() {
+            if item["role"] != "user" && item["role"] != "tool" {
+                continue;
+            }
+            let text = item["content"].as_str().ok_or(Error::Malformed)?;
+            if text.is_empty() {
+                continue;
+            }
+            // Historical messages keep the same shape as the bounded marker window advances.
+            item["content"] = json!([{"type":"text","text":text}]);
+            // Model steps see a complete consecutive tool-result group, so its last
+            // result is the reusable endpoint; parallel calls must not consume all slots.
+            if item["role"] == "user" || items.peek().is_none_or(|next| next["role"] != "tool") {
+                blocks.push(&mut item["content"][0]);
+            }
+        }
+        super::cache::mark_conversation(blocks, &cache.options)?;
     }
     Ok(body)
 }
@@ -100,10 +134,7 @@ impl Parser {
             ));
         }
         if let Some(usage) = value.get("usage").filter(|value| !value.is_null()) {
-            self.usage = Usage {
-                input: usage["prompt_tokens"].as_u64(),
-                output: usage["completion_tokens"].as_u64(),
-            };
+            self.usage.update_snapshot(Usage::openai(usage, false));
         }
         let choices = value["choices"].as_array().ok_or(Error::Malformed)?;
         if choices.len() > 1 {

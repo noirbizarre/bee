@@ -58,6 +58,143 @@ Usage-limit recovery links to [ChatGPT usage settings](https://chatgpt.com/setti
 Tokens are refreshed before each model step; protocol, model and context selection remain frozen for the turn.
 See [setup and logout](index.md#use-your-chatgpt-plan).
 
+## Prompt caching
+
+Bee supports provider-native prompt caching, not a local response cache. Eligibility, minimum prompt length, lifetime,
+billing and usage reporting depend on the endpoint and model. A configured key or breakpoint **never guarantees a cache
+hit**. Caching reuses input computation; it does not reuse an earlier answer or change generation semantics.
+
+Ordinary turns append messages and tool results. Unchanged instructions, tool definitions and their production ordering
+remain deterministic. Scoped instruction/skill changes, changed tools, model/protocol selection and oldest-whole-turn
+eviction can legitimately invalidate a prefix. Bee does not suppress fresh guidance to retain a cache hit.
+
+### Capability checklist
+
+Audited against the linked official contracts on 2026-10-26. This is Bee's intentionally supported subset, not a promise
+that every endpoint implementing a wire protocol accepts every option. URL overrides are checked as the actual endpoint,
+regardless of preset or connection name. Optional catalog prices and metadata are not capability evidence.
+
+| Endpoint / adapter | Keys and native request controls in Bee | Usage preserved / limitations |
+| --- | --- | --- |
+| [OpenAI Responses][openai-cache] | Automatic stable key; opt-in older-model retention or newer-model mode, TTL and text breakpoints | Cached reads, writes and returned 30m/12h breakdown; model checks below |
+| [OpenAI Chat][openai-chat-cache] | Automatic stable key; opt-in older-model retention or newer-model mode, 30m TTL and text breakpoints | OpenAI-shaped details; 12h TTL is restricted to Responses on direct OpenAI |
+| [ChatGPT OAuth][chatgpt-cache] / Responses | Automatic stable key and explicit key/opt-out | Retention is forbidden by the preview; new write policies are rejected until route support is verified |
+| [Anthropic Messages][anthropic-cache] | Opt-in automatic, stable-prefix or combined ephemeral caching; 5m/1h | Separate read/creation counts and returned 5m/1h breakdown; no markers by default |
+| [OpenRouter][router-cache] / Chat and Responses | Key is opt-in because it changes sticky routing; new OpenAI controls only for verified `openai/` models | Native OpenAI-shaped read/write details; no legacy retention or cross-provider TTL translation |
+| [OpenRouter][router-cache] / Messages | Anthropic policies on verified `anthropic/` models, using base `https://openrouter.ai/api` | Native Anthropic details; use this protocol for explicit Anthropic TTLs |
+| [xAI][xai-cache] / Responses | Automatic stable key; no OpenAI retention or write-policy controls | OpenAI-shaped cached reads when reported |
+| [xAI][xai-cache] / Chat | No added body controls; existing custom headers can set `x-grok-conv-id` explicitly | Header-based routing differs from Responses; cached reads when reported |
+| [Mistral][mistral-cache] / Chat | Automatic stable key or explicit override/opt-out; no retention or breakpoint controls | `prompt_tokens_details.cached_tokens`; minimum cache block is model/provider dependent |
+| [DeepSeek][deepseek-cache] / supported wire adapters | Provider-managed automatic caching; no added controls | Native hit/miss counters plus OpenAI/Anthropic-shaped details when returned |
+| [Groq][groq-cache] / Chat and Responses | Provider-managed automatic caching on its supported models; no added controls | Cached reads when reported; provider does not expose manual management |
+| [Google OpenAI compatibility][google-cache] / Chat | No added controls: Bee has no verified cache-control contract for this compatibility route | Preserve returned OpenAI-shaped details; Google's native cache-resource API is a different protocol |
+| [OpenCode][opencode-cache] / all three adapters | No added controls: listed cache pricing does not establish forwarding guarantees | Preserve returned native details without assuming upstream control support |
+| [Ollama][ollama-cache] / Chat, or custom endpoints | No added controls without a verified native contract | Compatibility field lists do not promise these controls; preserve recognized returned usage |
+
+[openai-cache]: https://developers.openai.com/api/docs/guides/prompt-caching
+[openai-chat-cache]: https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create
+[chatgpt-cache]: https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations
+[anthropic-cache]: https://platform.claude.com/docs/en/build-with-claude/prompt-caching
+[router-cache]: https://openrouter.ai/docs/guides/best-practices/prompt-caching
+[xai-cache]: https://docs.x.ai/developers/advanced-api-usage/prompt-caching/maximizing-cache-hits
+[mistral-cache]: https://docs.mistral.ai/studio/conversations/advanced/prompt-caching
+[deepseek-cache]: https://api-docs.deepseek.com/guides/kv_cache
+[groq-cache]: https://console.groq.com/docs/prompt-caching
+[google-cache]: https://ai.google.dev/gemini-api/docs/openai
+[opencode-cache]: https://opencode.ai/docs/zen/
+[ollama-cache]: https://docs.ollama.com/api/openai-compatibility
+
+Default key derivation is intentionally omitted on unverified endpoints and on OpenRouter. Explicit `mode = "auto"` or
+`mode = "explicit"` requires key support and fails otherwise. Any explicit unsupported retention, write policy or TTL
+fails before HTTP with `bee::llm::cache`; Bee never retries after stripping it or changes protocol/billing route.
+
+### Stable keys and OpenAI controls
+
+The automatic `bee-v1-...` key hashes the grouping profile, connection name, effective endpoint, protocol, authentication
+route class and model. It contains no credentials, prompt content, paths, timestamps or session/request IDs. The same
+scope survives model reconstruction, credential refresh, resume and process restart; changing scope/connection/model
+changes the key. Keys group routing/accounting, not authentication or account isolation. Hashing does not make a key an
+anonymity guarantee. Embedded `Model` callers can set a stable grouping scope with `with_cache_scope` (default `default`).
+
+```toml
+[providers.openai]
+preset = "openai"
+model = "gpt-6.1-sol"
+
+[providers.openai.protocols.openai-responses.options]
+# Omit this table for the default automatic key; explicit values are 1–64 bytes.
+prompt_cache_key = { mode = "explicit", value = "my-application-v1" }
+# Paid writes and TTL selection are opt-in. Provider defaults remain active without this table.
+prompt_cache_options = { enabled = true, mode = "explicit", ttl = "30m", breakpoints = "instructions-and-conversation" }
+```
+
+`prompt_cache_options.mode` is `implicit` (default within an enabled table) or `explicit`. TTL may be omitted or set to
+`default` to preserve the native short lifetime. Responses supports `30m` and `12h`; direct OpenAI Chat supports `30m`,
+while OpenRouter documents both. Longer minimum lifetime costs more and is not a deletion deadline. Supported newer
+aliases are `gpt-5.6`, `gpt-5.6-pro`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-6`, `gpt-6-astra`,
+`gpt-6-sol`, `gpt-6-luna` and `gpt-6.1-sol`, plus their date snapshots. Unknown models remain usable with default requests;
+explicit model-specific controls require a verified alias. OpenRouter uses these with the `openai/` prefix.
+
+`breakpoints` is a Bee placement setting, not a forwarded API field: `none`, `instructions`, `conversation`, or
+`instructions-and-conversation`. Instruction caching in Responses sends the payload once in a leading developer text
+block instead of top-level `instructions`. Conversation caching retains a bounded window of recent nonempty user-text
+and completed tool-result-group boundaries, including the newest one. Earlier write endpoints remain available for
+explicit-mode lookups as the conversation grows. Markers are request-local, never persisted in native continuation.
+The window uses the remaining four-write budget after reserving slots for an enabled implicit boundary and selected
+instruction boundary. Missing requested boundaries fail clearly. `mode = "explicit"` with
+`breakpoints = "none"` disables caching on supporting models; `prompt_cache_key.mode = "disabled"` only omits the key.
+
+Newer OpenAI models charge for implicit writes even without additional controls. Bee's default key does not opt into a
+new write/retention policy, but does not disable that provider default. Current newer-model cache minimum is 1,024 visible
+tokens; pricing and lookup windows vary and should be checked in the official guide. Prefix retention and latency gains
+are not guaranteed.
+
+For older OpenAI API-key models, set `prompt_cache_retention = "in_memory"` or `"24h"` instead of enabling new options.
+`"default"` omits the field and resets an inherited choice. Bee accepts extended retention for the officially listed
+`gpt-5.5`, `gpt-5.5-pro`, `gpt-5.4`, `gpt-5.2`, `gpt-5.1-codex-max`, `gpt-5.1`, `gpt-5.1-codex`,
+`gpt-5.1-codex-mini`, `gpt-5.1-chat-latest`, `gpt-5`, `gpt-5-codex` and `gpt-4.1`, including date snapshots.
+These also accept in-memory retention except `gpt-5.5`/`gpt-5.5-pro`, which require 24h. In-memory-only aliases additionally
+include `gpt-4o`, `gpt-4o-mini`, `gpt-4.1-mini`, `gpt-4.1-nano`, `gpt-5-mini`, `gpt-5-nano`, `o1`, `o3`, `o3-mini`,
+and `o4-mini`. Retention support is independent of `store = false`; organization data-retention policies still apply.
+
+### Anthropic policies
+
+```toml
+[providers.claude]
+preset = "anthropic"
+model = "claude-sonnet-4-6"
+
+[providers.claude.protocols.anthropic-messages.options]
+cache_control = { policy = "stable-prefix-and-automatic", ttl = "5m" }
+```
+
+Policies are `disabled` (default), `automatic` (top-level native `cache_control`), `stable-prefix` (last system text block,
+or last tool definition if no instructions exist), and `stable-prefix-and-automatic`. Enabled policies default to `5m`;
+select `1h` explicitly for extended, higher-priced writes. One TTL applies to both boundaries, avoiding mixed-TTL ordering
+ambiguities. The combined policy uses two of the four available slots. A requested stable prefix needs nonempty
+instructions or at least one tool.
+
+Verified aliases cover Sonnet 4/4.5/4.6/5/5.5, Opus 4/4.1/4.5/4.6/4.7/4.8/5/5.5, Haiku 4.5/5.5, Fable 5/5.1 and
+Mythos 5/5.1 with the native hyphenated spelling and optional YYYYMMDD suffix. Retired models may still be rejected by the
+provider. Minimum cacheable lengths vary by model. Prefixes are ordered tools → system → messages. The provider's
+20-position lookback can miss an older boundary after a large addition; this baseline policy does not promise optimal
+reuse for every long tool batch. Empty text cannot be marked. Provider-native continuation and tool-result grouping are
+preserved. OpenRouter uses its documented dotted model versions, such as `anthropic/claude-sonnet-4.6`, rather than the
+native `claude-sonnet-4-6` spelling; Bee normalizes capability lookup without rewriting the wire model ID.
+
+### Usage visibility
+
+`llm::Usage.cache` preserves only returned counters in native `CacheUsage` families: OpenAI-shaped read/write/TTL
+details, Anthropic read/creation/TTL details, and DeepSeek hit/miss details. Each `CacheCounter` keeps optional tokens and
+the number of model steps reporting it, so absent and zero remain distinct and partial turn totals stay identifiable.
+Streaming snapshots replace cumulative counters rather than adding each event. Completed steps aggregate with
+saturating arithmetic. This metadata is available to embedded callers and later instrumentation; ACP cost dashboards are
+separate work.
+
+OpenAI input totals already include cache tokens. Anthropic input totals are normalized as uncached + creation + reads.
+Write breakdowns are components of the write total, not additional input. Bee never infers a hit from a request policy,
+elapsed time or a catalog price, and no live cache hit is required by the credential-free regression tests.
+
 ## Turn execution limits
 
 The layered configuration accepts positive integer budgets, with these defaults:

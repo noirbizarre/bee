@@ -159,6 +159,24 @@ Requests use the resolved protocol exactly; failures never trigger a retry on an
 `openai-responses` and `anthropic-messages` can run inference, including presets preferring Responses or Messages.
 See [Inference and smoke tests](inference.md) for the supported subset and verification instructions.
 
+### Prompt-cache settings
+
+Native cache settings belong to `providers.<connection>.protocols.<protocol>.options`, including when inherited from a
+preset. OpenAI Chat and Responses accept `prompt_cache_key` (a table with `mode = "auto"`, `"disabled"` or `"explicit"`
+and an explicit `value`), `prompt_cache_retention` (`"default"`, `"in_memory"`, `"24h"`), and `prompt_cache_options`
+(`enabled`, `mode`, `ttl`, `breakpoints`). Anthropic Messages accepts `cache_control` (`policy`, `ttl`).
+
+By default, Bee derives stable opaque keys on verified key-capable endpoints; it adds no retention, write-mode or
+breakpoint policy. Anthropic writes require explicit opt-in. Endpoint, model and authentication compatibility are checked
+before inference; wire compatibility alone does not enable a control. Unsupported explicit choices produce
+`bee::llm::cache` errors instead of being stripped. See the
+[capability checklist and configuration examples](inference.md#prompt-caching) before enabling a policy.
+
+Nested options merge key by key across presets and configuration layers. Use `prompt_cache_key.mode = "disabled"`,
+`prompt_cache_retention = "default"`, `prompt_cache_options.enabled = false`, or `cache_control.policy = "disabled"` to
+override an inherited setting; an empty table does not reset it. Disabling a key only omits that routing/accounting field,
+not the provider's automatic caching.
+
 ## Authentication
 
 A connection's `credential` says where its secret comes from. It is separate from the `protocol` (which only decides how

@@ -48,6 +48,54 @@ fn stream(blocks: Vec<Value>, reason: &str) -> String {
 }
 
 #[tokio::test]
+async fn streamed_cache_creation_updates_are_cumulative_and_keep_start_only_counters() {
+    let wire = event(
+        "message_start",
+        json!({"type":"message_start","message":{"type":"message","role":"assistant","content":[],
+        "usage":{"input_tokens":5,"output_tokens":1,"cache_read_input_tokens":30,"cache_creation_input_tokens":10,
+            "cache_creation":{"ephemeral_5m_input_tokens":10,"ephemeral_1h_input_tokens":0}}}}),
+    ) + &event(
+        "message_delta",
+        json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},
+            "usage":{"output_tokens":4,"cache_creation_input_tokens":20,"cache_creation":{"ephemeral_5m_input_tokens":20}}}),
+    ) + &event("message_stop", json!({"type":"message_stop"}));
+    let mut ordinary = answer("done");
+    ordinary["usage"] = json!({"input_tokens":5,"output_tokens":4,"cache_read_input_tokens":30,"cache_creation_input_tokens":20,
+        "cache_creation":{"ephemeral_5m_input_tokens":20,"ephemeral_1h_input_tokens":0}});
+    let server = Server::start(vec![Response::sse(wire), Response::json(ordinary)]);
+    let model = Model::new(
+        profile("anthropic-messages", &server.url, ""),
+        "opaque".into(),
+        None,
+    )
+    .unwrap();
+    let streamed = model
+        .step(&[Message::User("question".into())], &[], &mut |_| {})
+        .await
+        .unwrap();
+    let ordinary = model
+        .step(&[Message::User("question".into())], &[], &mut |_| {})
+        .await
+        .unwrap();
+    assert_eq!(streamed.usage, ordinary.usage);
+    assert_eq!(streamed.usage.input, Some(55));
+    let bee::llm::CacheUsage::Anthropic {
+        read,
+        created,
+        ephemeral_5m,
+        ephemeral_1h,
+    } = &streamed.usage.cache[0]
+    else {
+        panic!("native cache usage expected")
+    };
+    assert_eq!(read.tokens, Some(30));
+    assert_eq!(created.tokens, Some(20));
+    assert_eq!(created.reports, 1);
+    assert_eq!(ephemeral_5m.tokens, Some(20));
+    assert_eq!(ephemeral_1h.tokens, Some(0));
+}
+
+#[tokio::test]
 async fn native_tool_errors_and_success_preserve_anthropic_flags_and_call_ids() {
     let blocks = vec![
         json!({"type":"tool_use","id":"failure","name":"echo","input":{"text":"fail"}}),
@@ -117,6 +165,12 @@ async fn native_text_streaming_sets_authentication_version_limits_and_usage() {
     assert_eq!(step.stop, Stop::End);
     assert_eq!(step.usage.input, Some(8));
     assert_eq!(step.usage.output, Some(4));
+    let bee::llm::CacheUsage::Anthropic { read, created, .. } = &step.usage.cache[0] else {
+        panic!("native cache usage expected")
+    };
+    assert_eq!(read.tokens, Some(3));
+    assert_eq!(read.reports, 1);
+    assert_eq!(created.tokens, None);
     let request = server.request();
     assert!(request.head.starts_with("POST /prefix/v1/messages "));
     assert!(request.head.contains("x-api-key: key"));

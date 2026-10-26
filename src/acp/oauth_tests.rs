@@ -178,6 +178,25 @@ async fn chatgpt_browser_login_renews_between_native_tool_requests_and_commits_h
     let first = server.request();
     let second = server.request();
     let third = server.request();
+    // Renewal and a later ACP prompt must retain routing/accounting identity.
+    assert!(
+        first.body["prompt_cache_key"]
+            .as_str()
+            .unwrap()
+            .starts_with("bee-v1-")
+    );
+    assert_eq!(
+        first.body["prompt_cache_key"],
+        second.body["prompt_cache_key"]
+    );
+    assert_eq!(
+        first.body["prompt_cache_key"],
+        third.body["prompt_cache_key"]
+    );
+    assert_eq!(first.body["tools"], second.body["tools"]);
+    assert_eq!(first.body["tools"], third.body["tools"]);
+    assert_eq!(first.body["instructions"], second.body["instructions"]);
+    assert!(first.body.get("prompt_cache_retention").is_none());
     assert!(first.head.contains(&format!(
         "authorization: Bearer {}",
         crate::test_chatgpt::ACCESS

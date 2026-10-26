@@ -346,14 +346,16 @@ fn a_provider_can_speak_several_protocols_each_with_its_own_url_and_options() {
     assert_eq!(
         *openai.options(),
         ProtocolOptions::OpenAiChat {
-            max_tokens_field: MaxTokensField::MaxCompletionTokens
+            max_tokens_field: MaxTokensField::MaxCompletionTokens,
+            cache: Default::default(),
         }
     );
     assert_eq!(
         *anthropic.options(),
         ProtocolOptions::AnthropicMessages {
             version: None,
-            max_tokens: Some(2048)
+            max_tokens: Some(2048),
+            cache: Default::default(),
         }
     );
 }
@@ -409,23 +411,135 @@ fn one_protocol_needs_no_preference_and_prefer_may_still_name_it() {
 }
 
 #[test]
-fn the_responses_protocol_takes_no_options_and_says_so() {
+fn the_responses_protocol_rejects_unrelated_generation_options() {
     let text = rendered(
         load("[providers.p.protocols.openai-responses.options]\nmax_tokens = 5").unwrap_err(),
     );
 
     assert!(text.contains("bee::provider::unknown_key"), "{text}");
-    assert!(text.contains("no keys"), "{text}");
+    assert!(text.contains("prompt_cache_key"), "{text}");
 }
 
 #[test]
-fn the_responses_protocol_has_no_settings_and_an_empty_options_table_is_fine() {
+fn an_empty_responses_options_table_keeps_native_cache_defaults() {
     let providers = load("[providers.p.protocols.openai-responses]\noptions = {}").unwrap();
 
     assert_eq!(
         *providers.get("p").unwrap().options(),
-        ProtocolOptions::OpenAiResponses
+        ProtocolOptions::OpenAiResponses {
+            cache: Default::default()
+        }
     );
+}
+
+#[test]
+fn native_cache_configuration_is_typed_and_invalid_values_never_reach_diagnostics() {
+    for (protocol, option) in [
+        ("openai-chat", "prompt_cache_key = 42"),
+        ("openai-responses", "prompt_cache_key = {mode='explicit'}"),
+        (
+            "openai-responses",
+            "prompt_cache_key = {mode='sk-super-secret-token'}",
+        ),
+        (
+            "openai-responses",
+            "prompt_cache_retention = 'sk-super-secret-token'",
+        ),
+        (
+            "openai-responses",
+            "prompt_cache_options = {enabled='sk-super-secret-token'}",
+        ),
+        (
+            "openai-responses",
+            "prompt_cache_options = {ttl='sk-super-secret-token'}",
+        ),
+        (
+            "openai-responses",
+            "prompt_cache_options = {mode='sk-super-secret-token'}",
+        ),
+        (
+            "openai-responses",
+            "prompt_cache_options = {breakpoints='sk-super-secret-token'}",
+        ),
+        (
+            "openai-responses",
+            "prompt_cache_options = {enabled=true}\nprompt_cache_retention='24h'",
+        ),
+        (
+            "anthropic-messages",
+            "cache_control = {policy='sk-super-secret-token'}",
+        ),
+        (
+            "anthropic-messages",
+            "cache_control = {ttl='sk-super-secret-token'}",
+        ),
+        ("anthropic-messages", "prompt_cache_retention = '24h'"),
+    ] {
+        let error = load(&format!(
+            "[providers.p.protocols.{protocol}.options]\n{option}"
+        ))
+        .unwrap_err();
+        assert!(!format!("{error:?}").contains(SECRET));
+        let diagnostic = rendered(error);
+        assert!(!diagnostic.contains(SECRET));
+        assert!(diagnostic.contains("bee::provider::"));
+    }
+    for value in ["", &"a".repeat(65)] {
+        assert!(load(&format!("[providers.p.protocols.openai-responses.options]\nprompt_cache_key={{mode='explicit',value='{value}'}}")).is_err());
+    }
+}
+
+#[test]
+fn higher_layers_can_disable_inherited_write_policies_without_changing_value_types() {
+    use bee::provider::cache::{AnthropicPolicy, CacheKey, Retention};
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        &sandbox.global(),
+        r#"
+[presets.cached.protocols.openai-responses.options]
+prompt_cache_options = { enabled=true, mode='explicit', ttl='12h', breakpoints='instructions' }
+prompt_cache_key = {mode='explicit', value='private-application-key'}
+[providers.p]
+preset='cached'
+prefer=['openai-responses']
+[providers.p.protocols.openai-responses.options]
+prompt_cache_options = {enabled=true}
+[providers.p.protocols.anthropic-messages.options]
+cache_control = {policy='stable-prefix-and-automatic',ttl='1h'}
+"#,
+    );
+    sandbox.write(
+        &sandbox.project(),
+        r#"
+[providers.p.protocols.openai-responses.options]
+prompt_cache_options = {enabled=false}
+prompt_cache_key = {mode='disabled'}
+prompt_cache_retention = 'default'
+[providers.p.protocols.anthropic-messages.options]
+cache_control = {policy='disabled'}
+"#,
+    );
+    let providers = sandbox.providers().unwrap();
+    let profile = providers.get("p").unwrap();
+    let ProtocolOptions::OpenAiResponses { cache } = profile
+        .endpoint(Protocol::OpenAiResponses)
+        .unwrap()
+        .options()
+    else {
+        panic!("Responses options expected")
+    };
+    assert!(!cache.options.enabled);
+    assert_eq!(cache.key, CacheKey::Disabled);
+    assert_eq!(cache.retention, Retention::Default);
+    let ProtocolOptions::AnthropicMessages { cache, .. } = profile
+        .endpoint(Protocol::AnthropicMessages)
+        .unwrap()
+        .options()
+    else {
+        panic!("Anthropic options expected")
+    };
+    assert_eq!(cache.policy, AnthropicPolicy::Disabled);
+    assert!(!format!("{profile:?}").contains("private-application-key"));
 }
 
 #[test]
@@ -492,14 +606,16 @@ max_tokens = 4096
     assert_eq!(
         *a.options(),
         ProtocolOptions::OpenAiChat {
-            max_tokens_field: MaxTokensField::MaxCompletionTokens
+            max_tokens_field: MaxTokensField::MaxCompletionTokens,
+            cache: Default::default(),
         }
     );
     assert_eq!(
         *b.options(),
         ProtocolOptions::AnthropicMessages {
             version: Some("2023-06-01".to_owned()),
-            max_tokens: Some(4096)
+            max_tokens: Some(4096),
+            cache: Default::default(),
         }
     );
 }

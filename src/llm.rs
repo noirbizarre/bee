@@ -1,8 +1,11 @@
 //! SDK-free inference types and protocol dispatch.
 
 pub mod anthropic;
+mod cache;
 pub mod chat;
 pub mod responses;
+mod usage;
+pub use usage::{CacheCounter, CacheUsage};
 
 use std::fmt;
 
@@ -60,6 +63,12 @@ pub enum Error {
     )]
     #[diagnostic(code(bee::llm::unsupported))]
     Unsupported(&'static str),
+    /// A requested cache policy is not documented for the selected route.
+    #[error(
+        "unsupported prompt-cache setting: {0}; reset or disable that option, or select a documented endpoint/model combination (see inference documentation)"
+    )]
+    #[diagnostic(code(bee::llm::cache))]
+    Cache(&'static str),
     /// Invalid request headers, without their names or contents.
     #[error(
         "model request headers are invalid or conflict with protocol headers; fix the profile's headers"
@@ -106,6 +115,8 @@ pub struct Usage {
     pub input: Option<u64>,
     /// Output tokens, when supplied.
     pub output: Option<u64>,
+    /// Reported native cache counters, retaining their provider-specific meanings.
+    pub cache: Vec<CacheUsage>,
 }
 
 /// A function the caller is prepared to execute.
@@ -192,6 +203,7 @@ pub struct Step {
 pub struct Model {
     chatgpt_session: Option<crate::auth::chatgpt::Session>,
     instructions: String,
+    cache_scope: String,
     profile: Profile,
     model: String,
     credential: Option<Secret>,
@@ -211,6 +223,7 @@ impl Model {
         Ok(Self {
             chatgpt_session: None,
             instructions: String::new(),
+            cache_scope: "default".into(),
             http: crate::http::InferenceHttp::new()?,
             profile,
             model,
@@ -277,6 +290,13 @@ impl Model {
     /// Additional persistent instructions, kept outside evictable user-led turns.
     pub fn with_instructions(mut self, instructions: String) -> Self {
         self.instructions = instructions;
+        self
+    }
+
+    /// Group automatic cache accounting without including session IDs or prompt content.
+    /// Embedded callers may retain the default scope or supply their stable grouping profile.
+    pub fn with_cache_scope(mut self, scope: String) -> Self {
+        self.cache_scope = scope;
         self
     }
 
