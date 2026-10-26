@@ -143,8 +143,8 @@ toml_edit = "0.25"
 # the system's OpenSSL, so the musl targets need no C library to link against.
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 # PKCE (RFC 7636) is a SHA-256 of a random verifier, base64url encoded. Each is
-# the smallest crate that does exactly that; no OAuth framework, since the one
-# flow Bee has is OpenRouter's and a generic client would erase what differs.
+# the smallest crate that does exactly that. Mechanism-specific login code keeps
+# configurable API-key exchanges distinct from fixed ChatGPT and GitHub flows.
 sha2 = "0.11"
 base64 = "0.23"
 # The operating system's CSPRNG, for the PKCE verifier and `state`.

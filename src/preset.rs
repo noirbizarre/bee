@@ -1,11 +1,12 @@
 //! Provider presets and login flows, as data and free of the ACPv2 SDK.
 //!
-//! The only things Bee's Rust must know about a provider are its *protocol*
-//! (each is a backend) and the *kind* of its browser sign-in (each is a
-//! mechanism). Everything else (URLs, parameter names, the field a credential
-//! comes back in, a profile's defaults) is data, in `data/presets.toml` shipped
-//! inside the binary and extended or overridden by the user's own `presets` and
-//! `login_flows` tables. See ADR-009.
+//! Presets describe protocol endpoints and connection defaults in the embedded
+//! `data/presets.toml`, extended or overridden through user `presets` tables.
+//! Configurable `pkce-key` login flows also describe URLs, parameter names and
+//! credential response fields as data in `login_flows` (ADR-009). ChatGPT and
+//! GitHub use separate native mechanisms with fixed trusted authentication
+//! endpoints: their registration, identity or device-authorization contracts
+//! cannot be replaced with configurable API-key exchanges.
 //!
 //! Like `provider`, the validation is written by hand over the generic TOML
 //! value, and every diagnostic names a key and a file, never a value.
