@@ -887,6 +887,64 @@ mod file_store {
         fs::metadata(path).unwrap().permissions().mode() & 0o777
     }
 
+    #[rstest]
+    #[case::oversized("oversized")]
+    #[case::aggregate("aggregate")]
+    #[case::escaped("escaped")]
+    #[case::empty_provider("empty_provider")]
+    #[case::empty_mcp("empty_mcp")]
+    fn an_unreadable_credential_write_preserves_the_previous_store(#[case] kind: &str) {
+        let sandbox = Sandbox::new();
+        let store = sandbox.store();
+        let retained = Credential::new(Secret::new("k".repeat(2 * 1024 * 1024)));
+        store
+            .put(Audience::Provider("retained"), &retained)
+            .unwrap();
+        let before = fs::read(sandbox.store_path()).unwrap();
+        let secret = match kind {
+            "oversized" => "x".repeat(4 * 1024 * 1024),
+            "aggregate" => "x".repeat(2 * 1024 * 1024),
+            // JSON escaping, not the raw token length, determines publication size.
+            "escaped" => "\u{1}".repeat(512 * 1024),
+            _ => String::new(),
+        };
+        let audience = if kind == "empty_mcp" {
+            Audience::McpServer("new")
+        } else {
+            Audience::Provider("new")
+        };
+        let error = store
+            .put(audience, &Credential::new(Secret::new(secret)))
+            .unwrap_err();
+        assert!(matches!(error, Error::AuthStoreParse { .. }));
+        assert_eq!(fs::read(sandbox.store_path()).unwrap(), before);
+        assert_eq!(
+            store.get(Audience::Provider("retained")).unwrap(),
+            Some(retained)
+        );
+        assert_eq!(store.get(audience).unwrap(), None);
+    }
+
+    #[test]
+    fn a_credential_store_at_the_exact_read_limit_round_trips() {
+        let sandbox = Sandbox::new();
+        let store = sandbox.store();
+        let audience = Audience::McpServer("boundary");
+        store
+            .put(audience, &Credential::new(Secret::new("x")))
+            .unwrap();
+        // Derive the envelope overhead so whitespace changes do not silently weaken the boundary test.
+        let overhead = fs::read(sandbox.store_path()).unwrap().len() - 1;
+        let credential = Credential::new(Secret::new("x".repeat(4 * 1024 * 1024 - overhead)));
+        store.put(audience, &credential).unwrap();
+        let before = fs::read(sandbox.store_path()).unwrap();
+        assert_eq!(before.len(), 4 * 1024 * 1024);
+        assert_eq!(store.get(audience).unwrap(), Some(credential.clone()));
+        let larger = Credential::new(Secret::new(format!("{}x", credential.secret().expose())));
+        assert!(store.put(audience, &larger).is_err());
+        assert_eq!(fs::read(sandbox.store_path()).unwrap(), before);
+    }
+
     #[test]
     fn the_credential_file_is_private_and_so_is_its_directory() {
         let sandbox = Sandbox::new();
