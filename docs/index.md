@@ -434,7 +434,8 @@ bee auth status [CONNECTION]                # where each credential comes from, 
 
 `CONNECTION` defaults to the active profile's default connection for login/logout; status lists its member connections.
 Explicit targets must be members, except explicit login can add a connection to the active profile. Missing built-in
-`openrouter`, `chatgpt` and `github` connections are created on login. `--no-browser` prints the sign-in URL without opening it.
+`openrouter`, `chatgpt` and `github` connections are created on login.
+`--no-browser` prints the sign-in URL without opening it.
 Prompts and URLs go to stderr; only `status` writes to stdout. Bare `bee` still serves ACPv2.
 
 ### OAuth sign-in, API tokens, inference credentials and MCP authorization
