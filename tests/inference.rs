@@ -26,10 +26,11 @@ fn answer(protocol: &str, text: &str) -> Value {
 #[case::failed(0)]
 #[case::refused(1)]
 #[case::cancelled(2)]
+#[case::truncated_refusal(3)]
 #[tokio::test]
 async fn unsuccessful_truncation_preserves_prior_context_across_close_and_resume(#[case] kind: u8) {
-    let mut rejected = Response::json(if kind == 1 {
-        json!({"choices":[{"index":0,"message":{"role":"assistant","refusal":"declined"},"finish_reason":"stop"}]})
+    let mut rejected = Response::json(if kind == 1 || kind == 3 {
+        json!({"choices":[{"index":0,"message":{"role":"assistant","refusal":"declined"},"finish_reason":if kind == 3 { "length" } else { "stop" }}]})
     } else {
         json!({"error":{"code":"context_length_exceeded"}})
     });
@@ -152,7 +153,7 @@ async fn unsuccessful_truncation_preserves_prior_context_across_close_and_resume
                                             idle.stop_reason,
                                             Some(v2::StopReason::Error(_))
                                         ),
-                                        1 => idle.stop_reason == Some(v2::StopReason::Refusal),
+                                        1 | 3 => idle.stop_reason == Some(v2::StopReason::Refusal),
                                         _ => idle.stop_reason == Some(v2::StopReason::Cancelled),
                                     });
                                 }

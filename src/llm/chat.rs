@@ -224,7 +224,14 @@ impl Parser {
         if !self.done {
             return Err(Error::Malformed);
         }
-        let stop = self.stop.ok_or(Error::Malformed)?;
+        let mut stop = self.stop.ok_or(Error::Malformed)?;
+        // Refusal content can arrive separately from the finish reason and must never authorize tools.
+        if self.refused {
+            if !self.calls.is_empty() {
+                return Err(Error::Malformed);
+            }
+            stop = Stop::Refusal;
+        }
         let calls: Vec<_> = self
             .calls
             .into_values()

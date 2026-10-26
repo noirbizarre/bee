@@ -120,6 +120,7 @@ fn invalid_params(error: &Error) -> bool {
 #[rstest::rstest]
 #[case("error")]
 #[case("refusal")]
+#[case("truncated_refusal")]
 #[case("cancel")]
 #[case("max_tokens")]
 #[case("preference_write_failure")]
@@ -134,6 +135,7 @@ async fn only_committed_successful_inference_changes_recency_across_new_sessions
     match outcome {
         "error" => second.status = 500,
         "refusal" => second.body = serde_json::json!({"choices":[{"index":0,"message":{"role":"assistant","refusal":"declined"},"finish_reason":"stop"}]}).to_string(),
+        "truncated_refusal" => second.body = serde_json::json!({"choices":[{"index":0,"message":{"role":"assistant","refusal":"declined"},"finish_reason":"length"}]}).to_string(),
         "max_tokens" => second.body = serde_json::json!({"choices":[{"index":0,"message":{"role":"assistant","content":"partial"},"finish_reason":"length"}]}).to_string(),
         "cancel" => second.delay = Duration::from_millis(300),
         "preference_write_failure" | "preference_lock_contention" => {}
@@ -252,7 +254,9 @@ async fn only_committed_successful_inference_changes_recency_across_new_sessions
                                         "error" => {
                                             assert!(matches!(reason, v2::StopReason::Error(_)))
                                         }
-                                        "refusal" => assert_eq!(reason, v2::StopReason::Refusal),
+                                        "refusal" | "truncated_refusal" => {
+                                            assert_eq!(reason, v2::StopReason::Refusal)
+                                        }
                                         "cancel" => assert_eq!(reason, v2::StopReason::Cancelled),
                                         "max_tokens" => {
                                             assert_eq!(reason, v2::StopReason::MaxTokens)
