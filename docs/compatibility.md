@@ -5,8 +5,10 @@ The supported subset is tested against the real binary and in-process. This matr
 the applicable protocol surfaces, including features Bee does not implement. It is a compatibility
 audit, not a claim of complete ACP conformance or certification.
 
-The implementation audit was performed on **2026-10-26**, against Bee commit
-`7cccee06a715b0711d3b522dfecd3bf0e1fe73c1`. Planned and not-planned dispositions reflect the
+The implementation audit was performed on **2026-10-26**, initially against Bee commit
+`7cccee06a715b0711d3b522dfecd3bf0e1fe73c1`, then refreshed by code/test inspection against
+`b8c3eeb` after rebasing onto main. Recorded test runs below identify their original tested revision;
+they were not rerun for the rebase. Planned and not-planned dispositions reflect the
 maintainer's decisions during [#59](https://github.com/noirbizarre/bee/issues/59), rather than
 inferences from missing code. Existing interoperability runs below retain their own dates and scope.
 
@@ -131,11 +133,13 @@ All methods in this table are client → agent; updates are agent → client.
 | `session/resume`, current-state synchronization | Implemented and supported | Requires original cwd/known identity. Omitted/null `replayFrom` sends current state before response; active state remains active. [Session][test-session] and [cancellation tests][test-cancel]. |
 | Start replay and stable message/plan identity | Implemented and supported | `replayFrom: {"type":"start"}` sends retained full messages, latest plans, then current state; no execution replay. Unknown/malformed cursors rejected; cumulative replay budget can reject a whole replay. [Restart/replay tests][test-stdio], [plans][test-plans], [retention contract](sessions.md). |
 | Durable sessions and exclusive attachment | Implemented and supported | Production survives restarts; one OS-lock owner, explicit corruption/storage failures. Embedded runtimes default to memory. [Process tests][test-stdio], [session history](sessions.md). Durability has no separate v2 capability flag. |
+| Profile-scoped session ownership | Implemented and supported | Listing is limited to the active profile; cross-profile resume and removed selected connections fail before recovery/replay. `profile_ownership_isolates_history_and_models_across_process_restarts` in [wire tests][test-stdio]. This is local session policy, not an additional ACP capability. |
 | `session/close` | Implemented and supported | Detaches rather than deletes. Active work/requests are cleaned up and terminal idle precedes response. Known closed sessions are idempotent; unknown IDs fail. [Close tests][test-cancel], [session tests][test-session]. |
 | `session/prompt` acceptance and message IDs | Implemented and supported | Response acknowledges the accepted user message, not final completion. Echo → running → output → terminal idle; one foreground turn per session. [Ordering tests][test-session], [busy-turn tests][test-cancel]. |
 | `session/cancel` notification | Implemented and supported | Cancels active work; idle/unknown IDs produce no spurious updates. No assistant output after terminal idle. [Cancellation tests][test-cancel], [MCP cancellation][test-mcp]. |
 | `session/set_config_option` | Partially supported | Provider/model select IDs only, scoped per session; invalid types/IDs and active-turn changes fail. Unlisted model IDs are allowed. [Selection tests][test-selection], [option construction][acp-code]. |
 | Select options, categories and background updates | Implemented and supported | Standard `model` category and custom `_provider`; no options when unconfigured. Optional discovery emits `config_option_update` without losing current custom model IDs. [Selection][test-selection], [model discovery tests][test-models]. |
+| Profile/account-bound automatic model selection | Implemented and supported | New sessions prefer the profile's last successfully used connection/model/account; unsafe automatic reuse warns and requires explicit selection. Preference-write failure warns without undoing answers. [Selection tests][test-selection], [profile resolution](profiles.md#configured-default-and-last-used-model). |
 | Boolean/additional settings, other standard categories | Planned | `boolean`, and concrete settings using categories such as `mode`, `model_config`, `thought_level`, are not currently offered. [#79](https://github.com/noirbizarre/bee/issues/79); not experimental provider-management RPCs. |
 | Additional roots / `session.additionalDirectories` | Planned | Not advertised or integrated into session workspace state. [#69](https://github.com/noirbizarre/bee/issues/69). Native path access beyond cwd is not this capability. |
 | `session/delete` / `session.delete` | Not planned | Not advertised; closing does not delete retained history. [Session retention](sessions.md#storage-and-retention), [capability tests][test-acp]. |
@@ -194,7 +198,7 @@ All update names below are values of agent → client `session/update.sessionUpd
 | `session_info_update` | Planned | No live title/timestamp/custom metadata patch updates. [#74](https://github.com/noirbizarre/bee/issues/74). |
 | `usage_update`: context `used` / `size` | Partially supported | Estimated committed occupancy only when effective capacity is known; `bee.dev/context` labels method/provenance/output reservation. Not token billing. [Context wire tests][test-stdio], [usage contract](inference.md#usage-and-overflow-reporting). |
 | `usage_update.cost` | Planned | No monetary cost reporting. [#80](https://github.com/noirbizarre/bee/issues/80). |
-| `notice` | Implemented and supported | Informational truncation/interruption and skill-discovery diagnostics; not conversation history or replayed accounting. No client capability required in v2. [Wire tests][test-stdio], [emission code][acp-code]. |
+| `notice` | Implemented and supported | Truncation/interruption, skill-discovery, automatic-selection and preference-write diagnostics; not conversation history or replayed accounting. No client capability required in v2. [Wire tests][test-stdio], [selection tests][test-selection], [emission code][acp-code]. |
 | `compaction_update`, `compaction_summary_chunk` | Planned | Whole-turn eviction/notices are not summary compaction or retained-summary streaming. [#75](https://github.com/noirbizarre/bee/issues/75). |
 
 ## Permissions, input requests and authentication
@@ -212,6 +216,7 @@ except `auth/login` and `auth/logout`, which run client → agent.
 | Tool-call/subjectless permission subjects and broader operation coverage | Planned | Read/write/edit do not request ACP permission; current requests use `command`, not `tool_call` subjects. [#78](https://github.com/noirbizarre/bee/issues/78). MCP authorization remains client-owned. |
 | `elicitation/create`, form mode; `client.elicitation.form` | Partially supported | Negotiated `ask_user` form has one required string `answer`, bounded to 4096 bytes. Accept validates data; decline/cancel/invalid becomes tool failure. Richer forms: [#77](https://github.com/noirbizarre/bee/issues/77). [Form tests][test-interactions]. |
 | `elicitation/create`, URL mode; `client.elicitation.url` | Partially supported | Configured provider-login flows for missing/expired stored credentials only. Acceptance is not login completion. Successful browser scenarios are Unix-only. [Login tests][test-interactions]; broader workflows: [#77](https://github.com/noirbizarre/bee/issues/77). |
+| Provider OAuth through URL elicitation | Implemented and supported | ChatGPT browser login uses standard URL elicitation; subsequent token renewal is provider-side, not `auth/login`. `chatgpt_browser_login_renews_between_native_tool_requests_and_commits_history` in [OAuth boundary tests][test-oauth]. |
 | `elicitation/complete` notification | Implemented and supported | Sent only after callback/exchange/credential commit; failures do not falsely report completion. [Login completion tests][test-interactions], [implementation][interaction-code]. |
 | Session-scoped elicitation and request/tool correlation | Implemented and supported | Unique login IDs; form tool-call IDs; isolated concurrent sessions. [Correlation/cleanup tests][test-interactions]. |
 | Request-scoped elicitation (`requestId`) | Planned | Current flows are session-scoped. [#77](https://github.com/noirbizarre/bee/issues/77). |
@@ -306,7 +311,7 @@ When changing SDK/schema pins, advertised capabilities, protocol handlers/emissi
 4. Run the documented checks below. Record TCK/client results with their own versions, dates, tested Bee revision and
    exercised paths; preserve historical runs as historical. A passing subset never establishes full conformance.
 
-Code/test evidence links pin the audited Bee commit, so they work both in the repository and on the published site.
+Code/test evidence links pin the refreshed Bee audit revision, so they work in the repository and on the published site.
 Update those links with the audit provenance when rechecking implementation claims; specification links remain immutable.
 
 [v1-schema]: https://github.com/agentclientprotocol/agent-client-protocol/blob/e2d83349bc9e28a4059ea3acefa1c91c966f74e2/schema/v1/schema.json
@@ -322,20 +327,21 @@ Update those links with the audit provenance when rechecking implementation clai
 [spec-lifecycle]: https://github.com/agentclientprotocol/agent-client-protocol/blob/e2d83349bc9e28a4059ea3acefa1c91c966f74e2/docs/protocol/v2/prompt-lifecycle.mdx
 [spec-migration]: https://github.com/agentclientprotocol/agent-client-protocol/blob/e2d83349bc9e28a4059ea3acefa1c91c966f74e2/docs/protocol/v2/migration.mdx
 [sdk-transport]: https://docs.rs/crate/agent-client-protocol/3.5.0/source/src/jsonrpc/transport_actor.rs
-[acp-code]: https://github.com/noirbizarre/bee/blob/7cccee06a715b0711d3b522dfecd3bf0e1fe73c1/src/acp.rs
-[interaction-code]: https://github.com/noirbizarre/bee/blob/7cccee06a715b0711d3b522dfecd3bf0e1fe73c1/src/acp/interactions.rs
-[mcp-code]: https://github.com/noirbizarre/bee/blob/7cccee06a715b0711d3b522dfecd3bf0e1fe73c1/src/acp/mcp.rs
-[plan-code]: https://github.com/noirbizarre/bee/blob/7cccee06a715b0711d3b522dfecd3bf0e1fe73c1/src/acp/plans.rs
-[test-acp]: https://github.com/noirbizarre/bee/blob/7cccee06a715b0711d3b522dfecd3bf0e1fe73c1/tests/acp.rs
-[test-stdio]: https://github.com/noirbizarre/bee/blob/7cccee06a715b0711d3b522dfecd3bf0e1fe73c1/tests/stdio.rs
-[test-session]: https://github.com/noirbizarre/bee/blob/7cccee06a715b0711d3b522dfecd3bf0e1fe73c1/tests/session.rs
-[test-cancel]: https://github.com/noirbizarre/bee/blob/7cccee06a715b0711d3b522dfecd3bf0e1fe73c1/tests/cancel.rs
-[test-selection]: https://github.com/noirbizarre/bee/blob/7cccee06a715b0711d3b522dfecd3bf0e1fe73c1/tests/selection.rs
-[test-models]: https://github.com/noirbizarre/bee/blob/7cccee06a715b0711d3b522dfecd3bf0e1fe73c1/tests/models.rs
-[test-e2e]: https://github.com/noirbizarre/bee/blob/7cccee06a715b0711d3b522dfecd3bf0e1fe73c1/tests/e2e.rs
-[test-interactions]: https://github.com/noirbizarre/bee/blob/7cccee06a715b0711d3b522dfecd3bf0e1fe73c1/tests/interactions.rs
-[test-plans]: https://github.com/noirbizarre/bee/blob/7cccee06a715b0711d3b522dfecd3bf0e1fe73c1/tests/plans.rs
-[test-mcp]: https://github.com/noirbizarre/bee/blob/7cccee06a715b0711d3b522dfecd3bf0e1fe73c1/tests/mcp_integration.rs
+[acp-code]: https://github.com/noirbizarre/bee/blob/b8c3eeb/src/acp.rs
+[interaction-code]: https://github.com/noirbizarre/bee/blob/b8c3eeb/src/acp/interactions.rs
+[mcp-code]: https://github.com/noirbizarre/bee/blob/b8c3eeb/src/acp/mcp.rs
+[plan-code]: https://github.com/noirbizarre/bee/blob/b8c3eeb/src/acp/plans.rs
+[test-acp]: https://github.com/noirbizarre/bee/blob/b8c3eeb/tests/acp.rs
+[test-stdio]: https://github.com/noirbizarre/bee/blob/b8c3eeb/tests/stdio.rs
+[test-session]: https://github.com/noirbizarre/bee/blob/b8c3eeb/tests/session.rs
+[test-cancel]: https://github.com/noirbizarre/bee/blob/b8c3eeb/tests/cancel.rs
+[test-selection]: https://github.com/noirbizarre/bee/blob/b8c3eeb/tests/selection.rs
+[test-models]: https://github.com/noirbizarre/bee/blob/b8c3eeb/tests/models.rs
+[test-e2e]: https://github.com/noirbizarre/bee/blob/b8c3eeb/tests/e2e.rs
+[test-interactions]: https://github.com/noirbizarre/bee/blob/b8c3eeb/tests/interactions.rs
+[test-plans]: https://github.com/noirbizarre/bee/blob/b8c3eeb/tests/plans.rs
+[test-mcp]: https://github.com/noirbizarre/bee/blob/b8c3eeb/tests/mcp_integration.rs
+[test-oauth]: https://github.com/noirbizarre/bee/blob/b8c3eeb/src/acp/oauth_tests.rs
 
 ## Automated coverage
 
@@ -409,7 +415,7 @@ workflows and the documentation build. The separate project-owned
 and main pushes, fails on TCK failure, and uploads its JSON requirement/transcript report.
 On 2026-10-25, `mise run ci` passed locally on Linux: **736 Rust tests**, formatting,
 Clippy, spelling, workflow/Markdown linting and the documentation build.
-The 2026-10-26 audit reran `mise run ci` on Linux against the audited implementation plus these documentation
+The 2026-10-26 audit reran `mise run ci` on Linux against the original `7cccee0` implementation plus these documentation
 and comment changes: **834 Rust tests passed**, with formatting, Clippy, spelling, workflow/Markdown linting
 and the documentation build also passing.
 
