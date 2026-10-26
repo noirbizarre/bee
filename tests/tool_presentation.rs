@@ -508,7 +508,8 @@ async fn nested_directory_guidance_reaches_the_model_before_any_mutation(
                 );
                 assert!(
                     live.iter()
-                        .any(|u| u["toolCallId"] == "tool-1-2" && u["status"] == "completed")
+                        .any(|u| u["toolCallId"] == "tool-1-2" && u["status"] == "completed"),
+                    "reconsidered {operation} did not complete: {live:#?}"
                 );
                 assert!(
                     !live

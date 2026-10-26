@@ -3,9 +3,25 @@
 use std::path::Path;
 
 fn quoted(path: &Path) -> Option<String> {
-    let path = path.to_str()?;
+    let text = path.to_str()?;
+    #[cfg(windows)]
+    let normalized;
+    #[cfg(windows)]
+    let text = if path.is_absolute() {
+        // Git accepts drive/UNC paths, not Win32's verbatim namespace returned by canonicalize.
+        normalized = if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+            format!("//{}", rest.replace('\\', "/"))
+        } else {
+            text.strip_prefix(r"\\?\")
+                .unwrap_or(text)
+                .replace('\\', "/")
+        };
+        &normalized
+    } else {
+        text
+    };
     let mut out = String::from("\"");
-    for byte in path.bytes() {
+    for byte in text.bytes() {
         match byte {
             b'"' => out.push_str("\\\""),
             b'\\' => out.push_str("\\\\"),
@@ -113,9 +129,14 @@ mod tests {
         use std::io::Write;
         for operation in ["add", "modify", "delete", "move", "copy"] {
             let root = tempfile::tempdir().unwrap();
-            let old_path = root.path().join("source file");
+            // macOS exposes temporary directories through /var -> /private/var; git apply rejects symlink ancestors.
+            #[cfg(unix)]
+            let directory = std::fs::canonicalize(root.path()).unwrap();
+            #[cfg(windows)]
+            let directory = root.path().to_path_buf();
+            let old_path = directory.join("source file");
             let path = if matches!(operation, "move" | "copy") {
-                root.path().join("destination file")
+                directory.join("destination file")
             } else {
                 old_path.clone()
             };
@@ -137,7 +158,16 @@ mod tests {
                     .any(|line| line.starts_with("--- \"a/") || line.starts_with("+++ \"b/"))
             );
             let mut child = std::process::Command::new("git")
-                .args(["apply", "--unsafe-paths", "-p0"])
+                .args([
+                    "-c",
+                    "core.autocrlf=false",
+                    "-c",
+                    "core.eol=lf",
+                    "apply",
+                    "--whitespace=nowarn",
+                    "--unsafe-paths",
+                    "-p0",
+                ])
                 .current_dir(root.path())
                 .stdin(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
@@ -227,5 +257,18 @@ mod tests {
         .unwrap();
         assert!(patch.contains("deleted file mode 100755\n"));
         assert!(generate_with_mode("delete", path, None, Some("script"), None, None).is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_verbatim_paths_use_absolute_git_drive_and_unc_notation() {
+        assert_eq!(
+            quoted(Path::new(r"\\?\C:\workspace\file")),
+            Some("\"C:/workspace/file\"".into())
+        );
+        assert_eq!(
+            quoted(Path::new(r"\\?\UNC\server\share\file")),
+            Some("\"//server/share/file\"".into())
+        );
     }
 }

@@ -13,8 +13,12 @@ const MAX_COPY: u64 = 64 * 1024 * 1024;
 
 struct Anchor {
     path: PathBuf,
+    #[cfg(unix)]
     file: File,
-    // Keep ancestors alive for identity checks; Windows directory deletion needs shared delete.
+    // Windows MoveFileEx cannot rename a tree while inspection keeps descendant handles open.
+    // Keep identity snapshots there; Unix traversal uses anchored no-follow directory descriptors.
+    #[cfg(windows)]
+    metadata: std::fs::Metadata,
     #[cfg(windows)]
     _parent: Option<Arc<Anchor>>,
 }
@@ -44,8 +48,11 @@ impl Drop for Staging<'_> {
 
 impl Anchor {
     fn validate(&self) -> Result<(), Failure> {
-        let current = std::fs::metadata(&self.path).map_err(mutation::io)?;
+        let current = std::fs::symlink_metadata(&self.path).map_err(mutation::io)?;
+        #[cfg(unix)]
         let opened = self.file.metadata().map_err(mutation::io)?;
+        #[cfg(windows)]
+        let opened = &self.metadata;
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
@@ -58,6 +65,9 @@ impl Anchor {
             use std::os::windows::fs::MetadataExt;
             if reparse(&current) || current.creation_time() != opened.creation_time() {
                 return Err(conflict());
+            }
+            if let Some(parent) = &self._parent {
+                parent.validate()?;
             }
         }
         Ok(())
@@ -76,6 +86,15 @@ impl Anchor {
                 .map_err(mutation::io)?
         };
         #[cfg(windows)]
+        let metadata = {
+            let metadata = file.metadata().map_err(mutation::io)?;
+            if reparse(&metadata) {
+                return Err(unsupported());
+            }
+            drop(file);
+            metadata
+        };
+        #[cfg(windows)]
         let parent = path
             .parent()
             .filter(|p| *p != path)
@@ -83,7 +102,10 @@ impl Anchor {
             .transpose()?;
         Ok(Arc::new(Self {
             path: path.into(),
+            #[cfg(unix)]
             file,
+            #[cfg(windows)]
+            metadata,
             #[cfg(windows)]
             _parent: parent,
         }))
@@ -113,9 +135,6 @@ impl Anchor {
         #[cfg(windows)]
         {
             let child = Self::open(&self.path.join(name))?;
-            if reparse(&child.file.metadata().map_err(mutation::io)?) {
-                return Err(unsupported());
-            }
             Ok(child)
         }
     }
@@ -915,15 +934,40 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn recursive_deletion_unlinks_nested_directories_while_other_manifests_hold_anchors() {
+        use std::os::windows::fs::OpenOptionsExt;
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(root.path().join("tree/nested/deeper")).unwrap();
         std::fs::write(root.path().join("tree/nested/deeper/file"), "contents").unwrap();
         let context = context(&root);
         let other = Manifest::prepare(&context, "tree", Some("copy"), true, "copy").unwrap();
         let deletion = Manifest::prepare(&context, "tree", None, true, "delete").unwrap();
+        let inspected = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(7)
+            .custom_flags(0x02000000 | 0x00200000)
+            .open(root.path().join("tree/nested/deeper"))
+            .unwrap();
         assert_eq!(deletion.delete(&context).await.unwrap(), 4);
         assert!(!root.path().join("tree").exists());
+        drop(inspected);
         drop(other);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn directory_moves_release_inspection_handles_before_namespace_publication() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("source/nested")).unwrap();
+        std::fs::write(root.path().join("source/nested/AGENTS.md"), "guidance").unwrap();
+        let context = context(&root);
+        let manifest =
+            Manifest::prepare(&context, "source", Some("destination"), true, "move").unwrap();
+        assert_eq!(manifest.move_to(&context).await.unwrap(), 3);
+        assert!(!root.path().join("source").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("destination/nested/AGENTS.md")).unwrap(),
+            "guidance"
+        );
     }
 
     #[tokio::test]
