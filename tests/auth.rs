@@ -289,12 +289,13 @@ fn a_callback_without_a_state_is_refused() {
     assert!(matches!(error, Error::AuthStateMismatch), "{error:?}");
 }
 
-#[test]
-fn a_callback_reporting_an_error_is_a_denial() {
+#[rstest]
+#[case::correlated("state=expected&error=access_denied")]
+#[case::openrouter_denial("error=access_denied")]
+fn a_callback_reporting_an_error_is_a_denial(#[case] query: &'static str) {
     let listener = CallbackListener::bind().unwrap();
     let port = listener.port();
-    let browser =
-        thread::spawn(move || browse(port, "/callback?state=expected&error=access_denied"));
+    let browser = thread::spawn(move || browse(port, &format!("/callback?{query}")));
 
     let error = listener
         .wait("expected", Duration::from_secs(5))
@@ -304,11 +305,15 @@ fn a_callback_reporting_an_error_is_a_denial() {
     assert!(matches!(error, Error::AuthDenied), "{error:?}");
 }
 
-#[test]
-fn a_denial_without_the_expected_state_is_not_trusted() {
+#[rstest]
+#[case::wrong_state("state=wrong&error=access_denied")]
+#[case::stateless_code_and_error("code=stolen&error=access_denied")]
+fn an_error_cannot_bypass_state_validation_for_a_code_or_a_mismatched_state(
+    #[case] query: &'static str,
+) {
     let listener = CallbackListener::bind().unwrap();
     let port = listener.port();
-    let browser = thread::spawn(move || browse(port, "/callback?state=wrong&error=access_denied"));
+    let browser = thread::spawn(move || browse(port, &format!("/callback?{query}")));
     let error = listener
         .wait("expected", Duration::from_secs(5))
         .unwrap_err();
@@ -408,24 +413,39 @@ fn an_unreachable_provider_is_reported_as_a_network_problem() {
     assert!(error.to_string().contains("did not reach the server"));
 }
 
-#[test]
-fn a_success_without_a_key_is_not_taken_for_one() {
-    let http = FakeHttp::answering(200, r#"{"key":""}"#);
+#[rstest]
+#[case::empty(r#"{"key":""}"#)]
+#[case::blank(r#"{"key":" \n\t"}"#)]
+#[case::missing(r#"{"other":"secret-response"}"#)]
+#[case::wrong_type(r#"{"key":{"secret-response":true}}"#)]
+#[case::null(r#"{"key":null}"#)]
+#[case::malformed("secret-response")]
+fn a_success_without_a_usable_key_is_not_taken_for_one(#[case] body: &str) {
+    let http = FakeHttp::answering(200, body);
 
     let error = openrouter()
         .exchange(&http, &Code::new("c").unwrap(), &Pkce::generate().unwrap())
         .unwrap_err();
 
     assert!(error.to_string().contains("did not contain a credential"));
+    assert!(!rendered(error).contains("secret-response"));
 }
 
 /// A one-shot HTTP server on loopback: answers `status` and `body`, and returns
 /// the request it got.
 fn serve_once(status: &str, body: &str) -> (u16, thread::JoinHandle<String>) {
+    serve_once_with_headers(status, "", body)
+}
+
+fn serve_once_with_headers(
+    status: &str,
+    headers: &str,
+    body: &str,
+) -> (u16, thread::JoinHandle<String>) {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     let response = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "HTTP/1.1 {status}\r\n{headers}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
     let handle = thread::spawn(move || {
@@ -455,7 +475,8 @@ fn serve_once(status: &str, body: &str) -> (u16, thread::JoinHandle<String>) {
             }
             assert!(read > 0, "the client closed before sending its body");
         }
-        stream.write_all(response.as_bytes()).unwrap();
+        // A bounded client may disconnect before an oversized response is sent.
+        let _ = stream.write_all(response.as_bytes());
         String::from_utf8(request).unwrap()
     });
     (port, handle)
@@ -501,6 +522,39 @@ fn the_real_http_client_refuses_plain_http_unless_told_otherwise() {
 }
 
 // ---- whole flows ------------------------------------------------------------
+
+#[test]
+fn the_blocking_exchange_does_not_forward_secrets_to_a_redirect_target() {
+    let target = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    target.set_nonblocking(true).unwrap();
+    let location = format!(
+        "Location: http://{}/stolen\r\n",
+        target.local_addr().unwrap()
+    );
+    let (port, server) = serve_once_with_headers("307 Temporary Redirect", &location, "{}");
+    let client = bee::http::UreqHttp::allowing_plain_http(Duration::from_secs(2));
+
+    let response = client.post_json(&format!("http://127.0.0.1:{port}/"), SECRET);
+
+    // ureq may return the redirect as an answer, but must never follow it.
+    assert!(response.is_err() || response.unwrap().status == 307);
+    assert!(server.join().unwrap().ends_with(SECRET));
+    assert!(
+        matches!(target.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+    );
+}
+
+#[test]
+fn the_blocking_exchange_rejects_a_response_larger_than_one_mebibyte() {
+    let (port, server) = serve_once("200 OK", &"x".repeat(1024 * 1024 + 1));
+    let client = bee::http::UreqHttp::allowing_plain_http(Duration::from_secs(5));
+
+    assert_eq!(
+        client.post_json(&format!("http://127.0.0.1:{port}/"), "{}"),
+        Err(Unreachable)
+    );
+    server.join().unwrap();
+}
 
 /// The value of `name` in `url`'s query, decoded as far as these tests need.
 fn query_param(url: &str, name: &str) -> String {

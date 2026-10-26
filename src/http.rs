@@ -441,6 +441,8 @@ impl UreqHttp {
             // into advice.
             .http_status_as_error(false)
             .https_only(https_only)
+            // A redirect must not forward the authorization code and verifier.
+            .max_redirects(0)
             .build();
         Self {
             agent: config.into(),
@@ -460,6 +462,9 @@ impl Http for UreqHttp {
         let status = response.status().as_u16();
         let body = response
             .body_mut()
+            // Match the async login bound instead of the larger default body limit.
+            .with_config()
+            .limit(MAX_EVENT as u64)
             .read_to_string()
             .map_err(|_| Unreachable)?;
         Ok(HttpResponse { status, body })

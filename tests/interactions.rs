@@ -419,6 +419,7 @@ fn callback(request: &Value) -> reqwest::Url {
 #[case("bad-state")]
 #[case("no-code")]
 #[case("denied")]
+#[case("stateless-denial")]
 #[case("store-failure")]
 #[tokio::test]
 async fn failed_external_login_does_not_report_completion_or_publish_a_credential(
@@ -499,15 +500,17 @@ async fn failed_external_login_does_not_report_completion_or_publish_a_credentia
                         .1
                         .into_owned();
                     url.set_query(None);
-                    url.query_pairs_mut().append_pair(
-                        "state",
-                        if failure == "bad-state" {
-                            "wrong"
-                        } else {
-                            &state
-                        },
-                    );
-                    if failure == "denied" {
+                    if failure != "stateless-denial" {
+                        url.query_pairs_mut().append_pair(
+                            "state",
+                            if failure == "bad-state" {
+                                "wrong"
+                            } else {
+                                &state
+                            },
+                        );
+                    }
+                    if matches!(failure, "denied" | "stateless-denial") {
                         url.query_pairs_mut().append_pair("error", "access_denied");
                     }
                     if failure == "bad-state" {

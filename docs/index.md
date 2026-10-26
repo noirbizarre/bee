@@ -348,7 +348,8 @@ These are different things and Bee keeps them apart:
 
 - **Browser sign-in** is a provider's own flow, and what it returns differs by provider. OpenRouter's authorization-code
   flow with PKCE returns an **API key**, not an OAuth access token: Bee stores it and sends it as a bearer token. The
-  key does not expire and cannot be refreshed, so a rejected key is fixed by signing in again. ChatGPT's separate flow
+  exchange supplies no refresh token or key expiry metadata; a revoked or expired key requires signing in again.
+  ChatGPT's separate flow
   returns renewable OAuth tokens tied to a verified account/workspace registration.
 - **API tokens** are pasted (`--with-token`) or read from a variable. API-key profiles support them, and they are the
   only option for providers with no browser flow.
@@ -371,7 +372,10 @@ with the provider until you revoke it there. ChatGPT logout also attempts renewa
 registration/host metadata. Credentials, authorization codes, PKCE verifiers and response bodies never appear
 in diagnostics or debug output. See [ADR-008](adr/008-provider-authentication.md).
 
-OpenRouter example:
+### OpenRouter browser authentication
+
+OpenRouter's officially supported [OAuth PKCE flow](https://openrouter.ai/docs/guides/overview/auth/oauth) creates a
+user-controlled API key. Configure a profile in your Bee configuration:
 
 ```toml
 [providers.openrouter]
@@ -380,7 +384,45 @@ preset = "openrouter"
 
 ```bash
 bee auth login openrouter
+bee auth status openrouter
 ```
+
+Bee opens OpenRouter in your browser, validates the successful callback's state, exchanges the code using S256 PKCE,
+and stores the key privately. OpenRouter supports localhost callbacks on any port; no application registration,
+client secret, scopes or audience parameters are required by its documented flow. Denying access ends login without
+storing anything; OpenRouter omits state on denial, so that response can only abort login, never authorize it.
+
+Use `bee auth login openrouter --no-browser` to print the URL without opening it. The browser must reach the Bee host's
+loopback interface. For SSH sessions or containers where it cannot, use `bee auth login openrouter --paste-code`:
+open the URL on another machine and paste the authorization code OpenRouter displays. The code is single-use and
+expires after ten minutes; Bee's browser callback wait is five minutes. An expired code requires a new login attempt.
+
+You need an eligible OpenRouter account and permission to create a key in the selected workspace. The documented flow
+does not require a special subscription or developer client registration. Account eligibility and organization/model
+restrictions follow [OpenRouter's terms](https://openrouter.ai/terms); the provider's browser page handles account or
+workspace ineligibility. Inference uses your account's credits and is subject to account, workspace, model and
+[key limits](https://openrouter.ai/docs/api/reference/limits). Signing in does not grant free inference.
+
+The resulting key has no refresh token. Bee records no expiry because the exchange does not return one; this is not a
+promise that the key never expires. `auth status` checks the local credential, not its validity at OpenRouter. For a
+revoked or expired key, run login again. For credit or budget failures, manage your account/key limits at OpenRouter.
+Provider failures stop the request without silently switching credentials or providers, or replaying inference.
+
+`bee auth logout openrouter` removes Bee's copy only. Revoke the key in
+[OpenRouter's key settings](https://openrouter.ai/settings/keys) to invalidate it at the provider.
+
+Browser authentication avoids manually copying an API key, but the inference credential is the same kind of bearer
+key. To supply an existing key, use `bee auth login openrouter --with-token` and provide it on standard input.
+Alternatively, replace the preset's credential source:
+
+```toml
+[providers.openrouter]
+preset = "openrouter"
+credential = { env = "OPENROUTER_API_KEY" }
+```
+
+The environment source replaces the store source entirely. See
+[ADR-021](adr/021-openrouter-authentication.md) for the verified protocol, lifecycle and eligibility constraints.
 
 Stored credentials are resolved when an inference request needs them, using the selected profile's audience.
 

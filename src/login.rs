@@ -204,7 +204,7 @@ impl LoginSpec {
             200 => serde_json::from_str::<Value>(&response.body)
                 .ok()
                 .and_then(|value| value.get(&names.response_key)?.as_str().map(str::to_owned))
-                .filter(|key| !key.is_empty())
+                .filter(|key| !key.trim().is_empty())
                 .map(Secret::new)
                 .ok_or_else(|| {
                     failed(
@@ -366,14 +366,18 @@ fn interpret(line: &str, expected_state: &str, mut respond: impl FnMut(&str, &st
 
     // The pages are fixed text: echoing a parameter back would let any page
     // that can reach localhost put its own content in front of the user.
-    if param("state") != Some(expected_state) {
+    // OpenRouter omits state on denial. Such a response may only abort the
+    // attempt, never supply a code; an explicitly wrong state is still refused.
+    let stateless_denial =
+        param("state").is_none() && param("error").is_some() && param("code").is_none();
+    if param("state") != Some(expected_state) && !stateless_denial {
         respond(
             "400 Bad Request",
             "This sign-in response was not expected. Return to the terminal.",
         );
         return Outcome::StateMismatch;
     }
-    // A denial is authoritative only when it belongs to this sign-in attempt.
+    // Provider error text is untrusted and may contain secrets, so never echo it.
     if param("error").is_some() {
         respond(
             "200 OK",
