@@ -117,6 +117,7 @@ async fn plan_replay_reserves_the_entire_budget_before_delivering_messages_or_pl
 
 fn snapshot() -> Snapshot {
     Snapshot {
+        selection_state: Default::default(),
         profile: "default".into(),
         cwd: std::env::temp_dir(),
         turns: 0,
@@ -269,7 +270,7 @@ async fn incomplete_creations_are_not_published_to_the_session_listing() {
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(first["version"], 3);
+    assert_eq!(first["version"], 4);
     assert_eq!(first["seq"], 0);
     assert_eq!(first["event"]["id"], id);
 }

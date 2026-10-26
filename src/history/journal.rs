@@ -13,7 +13,7 @@ use super::{Message, Result, Snapshot, error, open_options, open_private_file};
 // A corrupt/malicious line must not allocate the size of the entire journal.
 // This bounds one record, not transcript length or the number of sessions.
 pub(super) const MAX_RECORD_BYTES: usize = 64 * 1024 * 1024;
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -26,6 +26,8 @@ pub(super) enum Event {
     SettingsChanged {
         provider: Option<String>,
         model: Option<String>,
+        #[serde(default)]
+        selection_state: crate::selection::State,
         portable: bool,
     },
     InitialModelSelected {
@@ -132,7 +134,7 @@ fn decode(line: &[u8], seq: u64, path: &Path) -> Result<Event> {
         serde_json::from_slice(line).map_err(|_| error(path, "invalid complete journal record"))?;
     // Existing journals remain readable; older binaries reject new records by
     // version instead of interpreting an extended event contract as v1.
-    if !matches!(record.version, 1 | 2 | VERSION) {
+    if !matches!(record.version, 1 | 2 | 3 | VERSION) {
         return Err(error(
             path,
             "unsupported session history version; use a compatible Bee version",
@@ -145,12 +147,43 @@ fn decode(line: &[u8], seq: u64, path: &Path) -> Result<Event> {
     }
     let event = serde_json::from_str(record.event.get())
         .map_err(|_| error(path, "invalid journal event"))?;
+    let selection = match &event {
+        Event::SessionCreated { snapshot, .. } => Some((
+            &snapshot.selection_state,
+            snapshot.provider.as_deref(),
+            snapshot.model.as_deref(),
+        )),
+        Event::SettingsChanged {
+            provider,
+            model,
+            selection_state,
+            ..
+        } => Some((selection_state, provider.as_deref(), model.as_deref())),
+        _ => None,
+    };
+    if let Some((state, provider, model)) = selection {
+        let raw: serde_json::Value = serde_json::from_str(record.event.get())
+            .map_err(|_| error(path, "invalid journal event"))?;
+        let fields = if matches!(event, Event::SessionCreated { .. }) {
+            &raw["snapshot"]
+        } else {
+            &raw
+        };
+        // A safety guard cannot be retrofitted into an old version older binaries would ignore.
+        if !state.valid(provider, model)
+            || (record.version < 4 && *state != crate::selection::State::Explicit)
+            || (record.version >= 4 && fields.get("selection_state").is_none())
+        {
+            return Err(error(path, "invalid session model selection state"));
+        }
+    }
     if let Event::SessionCreated { snapshot, .. } = &event {
         // A v3 header must bind ownership explicitly. Old binaries reject its
         // version instead of silently discarding the new isolation boundary.
         let raw: serde_json::Value = serde_json::from_str(record.event.get())
             .map_err(|_| error(path, "invalid journal event"))?;
         if (record.version >= 3 && raw["snapshot"].get("profile").is_none())
+            || (record.version >= 4 && raw["snapshot"].get("selection_state").is_none())
             || (record.version < 3 && snapshot.profile != "default")
             || snapshot.profile.trim().is_empty()
         {
@@ -259,6 +292,7 @@ impl Projection {
             Event::SettingsChanged {
                 provider,
                 model,
+                selection_state,
                 portable: clear_native,
             } => {
                 if self.active.is_some() {
@@ -266,6 +300,7 @@ impl Projection {
                 }
                 self.snapshot.provider.clone_from(provider);
                 self.snapshot.model.clone_from(model);
+                self.snapshot.selection_state.clone_from(selection_state);
                 if *clear_native {
                     portable(&mut self.snapshot.messages);
                 }
@@ -292,7 +327,13 @@ impl Projection {
                 self.snapshot.model = Some(model.clone());
             }
             Event::TurnAccepted { turn, content } => {
-                if self.active.is_some() || *turn <= self.snapshot.turns || !content.is_array() {
+                if matches!(
+                    self.snapshot.selection_state,
+                    crate::selection::State::Blocked(_)
+                ) || self.active.is_some()
+                    || *turn <= self.snapshot.turns
+                    || !content.is_array()
+                {
                     return Err(invalid());
                 }
                 self.snapshot.turns = *turn;
@@ -383,6 +424,7 @@ impl Projection {
         Ok(Event::SettingsChanged {
             provider: next.provider.clone(),
             model: next.model.clone(),
+            selection_state: next.selection_state.clone(),
             portable: clear_native,
         })
     }
@@ -394,6 +436,7 @@ impl Projection {
             || next.turns != self.snapshot.turns
             || next.provider != self.snapshot.provider
             || next.model != self.snapshot.model
+            || next.selection_state != self.snapshot.selection_state
         {
             return Err(invalid());
         }
@@ -702,6 +745,45 @@ mod compatibility_tests {
     use super::*;
 
     #[test]
+    fn selection_guards_require_version_four_and_explicit_settings_fields() {
+        let path = Path::new("journal");
+        for (version, state, valid) in [
+            (3, None, true),
+            (4, None, false),
+            (
+                3,
+                Some(crate::selection::State::Blocked(
+                    crate::selection::Reason::AccountChanged,
+                )),
+                false,
+            ),
+            (
+                4,
+                Some(crate::selection::State::Blocked(
+                    crate::selection::Reason::AccountChanged,
+                )),
+                true,
+            ),
+        ] {
+            let mut value = serde_json::json!({"type":"settings_changed","provider":"account","model":null,"portable":false});
+            if let Some(state) = state {
+                value["selection_state"] = serde_json::to_value(state).unwrap();
+            }
+            let event = serde_json::value::to_raw_value(&value).unwrap();
+            let record = Record {
+                version,
+                seq: 1,
+                checksum: checksum(version, 1, event.get()),
+                event,
+            };
+            assert_eq!(
+                decode(&serde_json::to_vec(&record).unwrap(), 1, path).is_ok(),
+                valid
+            );
+        }
+    }
+
+    #[test]
     fn profile_ownership_requires_a_new_explicit_header_contract() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("journal");
@@ -738,6 +820,7 @@ mod compatibility_tests {
     #[rstest::rstest]
     #[case(1)]
     #[case(2)]
+    #[case(3)]
     fn legacy_headers_accept_new_plan_records_without_rewriting_the_old_prefix(
         #[case] version: u32,
     ) {
@@ -751,6 +834,7 @@ mod compatibility_tests {
             id: "saved".into(),
             created: 1,
             snapshot: Snapshot {
+                selection_state: Default::default(),
                 profile: "default".into(),
                 cwd: root.path().into(),
                 turns: 0,
@@ -762,8 +846,14 @@ mod compatibility_tests {
             },
         })
         .unwrap();
-        // Historical creation snapshots did not carry grouping ownership.
-        event["snapshot"].as_object_mut().unwrap().remove("profile");
+        // Historical snapshots lack recency guards; v1/v2 also lack grouping ownership.
+        event["snapshot"]
+            .as_object_mut()
+            .unwrap()
+            .remove("selection_state");
+        if version < 3 {
+            event["snapshot"].as_object_mut().unwrap().remove("profile");
+        }
         let event = serde_json::value::to_raw_value(&event).unwrap();
         // Construct historical framing/checksum rather than editing a new
         // record's version without updating its integrity check.

@@ -21,7 +21,10 @@ use windows_sys::Win32::{
         GetTokenInformation, OWNER_SECURITY_INFORMATION, SE_DACL_PROTECTED, SECURITY_ATTRIBUTES,
         TOKEN_QUERY, TOKEN_USER, TokenUser,
     },
-    Storage::FileSystem::{CreateDirectoryW, FILE_ALL_ACCESS, MOVEFILE_WRITE_THROUGH, MoveFileExW},
+    Storage::FileSystem::{
+        CreateDirectoryW, FILE_ALL_ACCESS, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+        MoveFileExW,
+    },
     System::Threading::{GetCurrentProcess, OpenProcessToken},
 };
 
@@ -212,11 +215,23 @@ pub(super) fn check_private(path: &Path, directory: bool) -> io::Result<()> {
 }
 
 pub(super) fn publish_file(staging: &Path, published: &Path) -> io::Result<()> {
+    rename(staging, published, MOVEFILE_WRITE_THROUGH)
+}
+
+pub(super) fn replace_file(staging: &Path, published: &Path) -> io::Result<()> {
+    rename(
+        staging,
+        published,
+        MOVEFILE_WRITE_THROUGH | MOVEFILE_REPLACE_EXISTING,
+    )
+}
+
+fn rename(staging: &Path, published: &Path, flags: u32) -> io::Result<()> {
     let staging = wide(staging)?;
     let published = wide(published)?;
-    // SAFETY: both paths are terminated and live throughout the call. Omitting
-    // REPLACE_EXISTING preserves the no-identity-replacement rule.
-    if unsafe { MoveFileExW(staging.as_ptr(), published.as_ptr(), MOVEFILE_WRITE_THROUGH) } == 0 {
+    // SAFETY: both paths are terminated and live throughout the call. Session
+    // publication omits REPLACE_EXISTING; preference updates explicitly request it.
+    if unsafe { MoveFileExW(staging.as_ptr(), published.as_ptr(), flags) } == 0 {
         return Err(io::Error::last_os_error());
     }
     Ok(())

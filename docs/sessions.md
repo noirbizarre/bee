@@ -32,6 +32,9 @@ or archive the JSONL; a reader of an active journal must accept only its complet
 
 Embedded `Runtime` constructors default to isolated memory storage. Embedder-supplied `Runtime::with_history`
 enables the same durable store explicitly. Memory-only sessions do not survive destruction of their registry.
+Profile-wide recent models use a separate `model-preferences.json` file beside `sessions`, with independent locking
+and atomic replacement. Embedded callers opt in through `Runtime::with_preferences`; enabling session history alone
+does not enable persistent preferences. See [profile model resolution](profiles.md#configured-default-and-last-used-model).
 
 ### Journal and recovery format
 
@@ -49,9 +52,10 @@ The version 1 event types are:
   protocol and changed instruction/skill payloads.
 
 Version 2 adds `plan_updated` events. Version 3 makes profile ownership explicit in the immutable `session_created`
-snapshot. Writers emit version 3; readers also accept versions 1 and 2, whose missing profile means `default`.
-New records can append to legacy journals without rewriting their prefix. Older binaries reject version 3 rather than
-ignoring profile ownership.
+snapshot. Version 4 adds account-bound automatic-selection state and explicit-selection-required guards to creation and
+settings records. Writers emit version 4; readers also accept versions 1–3, whose missing selection state means the
+original explicit/default behavior and whose missing profile means `default`. New records can append to legacy journals
+without rewriting their prefix. Older binaries reject newer versions rather than ignoring profile ownership or guards.
 
 The terminal outcome and successful-context delta share one record. Unchanged retained context and guidance are not
 copied into the journal after every turn. Full visible history remains available after model-context eviction.
@@ -161,10 +165,9 @@ through the existing stop reason, since ACP has no standard failed entry status.
 If terminal persistence fails, Bee still cancels unfinished client-visible
 entries before error idle; reconnect recovery reconciles the last durable plan.
 
-New journal records use version 2; Bee can read existing version-1 records and
-append version-2 records to those sessions. Older Bee binaries cannot read the
-new records and report unsupported history versions. Plans are stored in the
-existing private journal, with no additional sidecar or executable replay data.
+Plans were introduced in journal version 2 and remain in the current version described above. Older Bee binaries that
+cannot read newer records report unsupported history versions. Plans are stored in the existing private journal,
+with no additional sidecar or executable replay data.
 
 ## Interruptions and unavailable history
 

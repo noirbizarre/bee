@@ -100,6 +100,14 @@ impl std::fmt::Debug for Registration {
 }
 
 impl Registration {
+    pub(super) fn selection_identity(&self) -> Value {
+        // Stable registration identity survives access/refresh-token rotation.
+        let mut scopes: Vec<_> = self.scopes.iter().collect();
+        // OAuth grants are a set: renewal may reorder or repeat them without changing authority.
+        scopes.sort_unstable();
+        scopes.dedup();
+        serde_json::json!(["oauth", ISSUER, self.client_id, self.subject, scopes])
+    }
     pub(super) fn same_discovery_account(&self, other: &Self) -> bool {
         // Token rotation changes neither registration identity nor granted visibility.
         self.client_id == other.client_id
@@ -790,6 +798,54 @@ mod tests {
     const KEY: &str = include_str!("../../tests/fixtures/oidc-test-key.pem");
     const SENTINEL: &str = "secret-token-must-not-escape";
 
+    #[test]
+    fn remembered_account_binding_survives_oauth_token_renewal_but_not_registration_replacement() {
+        let profile =
+            crate::test_support::configured_providers("[providers.account]\npreset='chatgpt'")
+                .get("account")
+                .unwrap()
+                .clone();
+        let mut credential = Credential {
+            secret: Secret::new("first-access"),
+            expires_at: Some(1),
+            oauth: Some(Registration {
+                client_id: "client".into(),
+                subject: "subject".into(),
+                refresh: Some(Secret::new("first-refresh")),
+                id_token: None,
+                scopes: vec![DIRECT.into(), "profile".into()],
+                earliest_refresh_at: None,
+            }),
+        };
+        let remembered =
+            crate::selection::Reference::new(&profile, "model".into(), Some(&credential));
+        assert!(credential.selection_oauth_usable());
+        credential.oauth.as_mut().unwrap().refresh = None;
+        assert!(!credential.selection_oauth_usable());
+        credential.secret = Secret::new("renewed-access");
+        credential.expires_at = Some(unix_now() + 3600);
+        credential.oauth.as_mut().unwrap().refresh = Some(Secret::new("renewed-refresh"));
+        assert!(credential.selection_oauth_usable());
+        assert!(remembered.matches(&profile, Some(&credential)));
+        credential.oauth.as_mut().unwrap().scopes =
+            vec!["profile".into(), DIRECT.into(), "profile".into()];
+        assert!(remembered.matches(&profile, Some(&credential)));
+        credential
+            .oauth
+            .as_mut()
+            .unwrap()
+            .scopes
+            .push("email".into());
+        assert!(!remembered.matches(&profile, Some(&credential)));
+        credential.oauth.as_mut().unwrap().scopes.pop();
+        credential.secret = Secret::new("");
+        assert!(!credential.selection_oauth_usable());
+        credential.secret = Secret::new("renewed-access");
+        credential.oauth.as_mut().unwrap().subject = "different-subject".into();
+        assert!(!remembered.matches(&profile, Some(&credential)));
+        assert!(!format!("{remembered:?}").contains("subject"));
+    }
+
     fn signed(mut claims: Value) -> (String, Value) {
         let private = rsa::RsaPrivateKey::from_pkcs1_pem(KEY).unwrap();
         let jwks = json!({"keys":[{"kty":"RSA","kid":"test","use":"sig","alg":"RS256","n":URL_SAFE_NO_PAD.encode(private.n().to_bytes_be()),"e":URL_SAFE_NO_PAD.encode(private.e().to_bytes_be())}]});
@@ -940,6 +996,39 @@ mod tests {
         store
             .put(Audience::Provider("account"), &credential)
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn temporary_renewal_rejection_preserves_automatic_selection_for_a_successful_retry() {
+        let (_root, store) = store();
+        install(&store, true);
+        let profile =
+            crate::test_support::configured_providers("[providers.account]\npreset='chatgpt'")
+                .get("account")
+                .unwrap()
+                .clone();
+        let credential = store.get(Audience::Provider("account")).unwrap().unwrap();
+        let reference =
+            crate::selection::Reference::new(&profile, "model".into(), Some(&credential));
+        let fake = Fake::new(token_json("retained-id-token"), Value::Null);
+        fake.response.lock().unwrap().0 = 503;
+        assert!(resolve(&store, "account", &fake).await.is_err());
+        assert_eq!(
+            crate::selection::authentication_failure(&reference, &profile, &store),
+            None
+        );
+        fake.response.lock().unwrap().0 = 200;
+        let renewed = resolve(&store, "account", &fake).await.unwrap();
+        assert!(reference.matches(&profile, Some(&renewed)));
+        assert_eq!(
+            crate::selection::authentication_failure(&reference, &profile, &store),
+            None
+        );
+        store.remove(Audience::Provider("account")).unwrap();
+        assert_eq!(
+            crate::selection::authentication_failure(&reference, &profile, &store),
+            Some(crate::selection::Reason::CredentialsUnavailable)
+        );
     }
 
     #[tokio::test]

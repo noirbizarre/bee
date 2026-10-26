@@ -45,3 +45,4 @@ by editing the old one. The history is the value.
 - [ADR-020](020-chatgpt-plan-authentication.md) — Authenticate ChatGPT-plan requests with official local/OSS OAuth
 - [ADR-021](021-openrouter-authentication.md) — Complete OpenRouter authentication using its documented PKCE-key flow
 - [ADR-022](022-named-profiles.md) — Scope connections, model preferences and durable sessions with named profiles
+- [ADR-023](023-profile-model-recency.md) — Persist account-bound per-profile recent model choices separately from defaults

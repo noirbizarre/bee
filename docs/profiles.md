@@ -76,6 +76,57 @@ shared connection affects every profile referencing it.
 Profile selection is fixed at launch. Restart Bee with another selector to switch contexts. ACP provider/model choices
 stay within the active profile; plan/build modes and mode-specific defaults are not part of this configuration.
 
+## Configured default and last-used model
+
+Each profile keeps two independent preferences:
+
+- Its **configured default** is the default connection's effective `model`, otherwise its first `models` entry.
+  Global configuration, the `BEE_CONFIG` file and project configuration merge in that order. For example,
+  `[profiles.work.models.work-api] model = "project-model"` in the project file overrides the same global field.
+- Its **last-used model** records the exact connection/model/account of a committed successful inference turn.
+  A normal completion or output-token-limit completion counts; errors, refusals and cancellations do not.
+  Opening sessions, refreshing discovery and changing selectors alone do not change this preference.
+
+New sessions resolve as follows:
+
+| Situation | Selection |
+| --- | --- |
+| Usable last-used choice in this profile/account | Reuse and pin that connection/model. |
+| No last-used choice | Use the configured default. |
+| No remembered or configured model | Use native server ordering on the selected connection, when available. |
+| Remembered model missing, usable default on the same connection/account | Warn and use that configured default. |
+| Removed connection, missing/rejected credentials, changed account/target, or no safe same-account fallback | Warn and require explicit provider/model selection. |
+| Discovery unknown, stale, unsupported or temporarily unavailable | Keep the exact remembered choice provisionally; recheck account/authentication before execution. |
+
+Recency takes precedence even over project-configured defaults; configuration precedence resolves the default used
+when recency does not apply. Bee never searches other connections for an authenticated model. A configured default on
+another account is not permission to switch to it after a remembered choice becomes unavailable.
+Confirm a provider or model through ACP to recover from a selection warning. Confirming the displayed provider also
+counts as explicit selection and restores that connection's default. A blocked session rejects prompts until confirmation,
+including after close/restart/resume. Fresh discovery can update an idle, automatically remembered choice, with a warning
+for fallback or blocked selection. An active turn always keeps its frozen input.
+
+Only current complete listings bound to the resolved account constrain automatic reuse. Listing absence does not prohibit
+an explicit custom ID; the public Models.dev catalog never establishes account access. Unknown availability does not force
+network discovery before a session opens. Actual inference can still fail even for a listed model.
+
+The production binary stores recent choices privately in `$XDG_STATE_HOME/bee/model-preferences.json`, falling back to
+`~/.local/state/bee/model-preferences.json`, beside session storage. A separate lock and atomic replacement preserve
+other profiles' entries across concurrent processes; the latest serialized update wins. The file contains model/connection
+IDs and private account/target continuity digests, never plaintext credentials. OAuth token renewal retains identity;
+replacing an account, API key, endpoint or authentication header requires explicit confirmation. API-key rotation is
+conservatively treated as a potential account change. This state is not an environment preference or a configuration write.
+Reordered OAuth scope sets preserve continuity. Temporary renewal failures remain retryable when the same renewable
+registration is retained; confirmed authorization loss and inference authentication rejection require selection again.
+
+Saving recency is a second transaction after successful history commit. If it fails, Bee retains the answer and current
+process's recent choice, warns before idle, and leaves the prior valid file intact when publication did not complete.
+Preference-lock acquisition is limited to one second, so contention cannot indefinitely delay idle or close.
+A crash between the two transactions can leave the older last-used value. Invalid/unreadable preference state fails
+startup with a path-only diagnostic; repair or remove that preference file after stopping Bee, then restart.
+Embedded runtimes default to isolated memory preferences; use `selection::Store::open` with `Runtime::with_preferences`
+to opt into persistence independently of `Runtime::with_history`.
+
 ## Default profile and migration
 
 Every configuration has a `default` profile, including a fresh installation with no connections.
@@ -97,6 +148,8 @@ Durable sessions belong to their original profile. Session listing is scoped, an
 recovery or replay, including when profiles share a connection. Old journals belong to `default`; resume those with that
 profile and appropriate membership. A removed explicitly selected connection causes resume to fail instead of choosing a
 new account. Unselected connection/model defaults continue to resolve from the current configuration within the owning
-profile. See [session history](sessions.md).
+profile. New sessions inheriting recency retain their own account-bound selection; another session's later success
+does not change them. Explicit and legacy pinned session choices retain their sticky/custom-ID behavior. See
+[session history](sessions.md) and [ADR-023](adr/023-profile-model-recency.md).
 
 See [ADR-022](adr/022-named-profiles.md) for the configuration and durability decisions.

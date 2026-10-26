@@ -156,7 +156,10 @@ promising permanent access. Empty observations mean unverified, not unavailable.
 ACP model options retain configured/default IDs first, then any selected custom ID, endpoint IDs and catalog IDs,
 without duplicates. Display names are labels; the exact ID is sent to inference. Descriptions and
 `_meta["bee.dev/models"]` expose provenance/freshness. Refresh sends complete `config_option_update` options to open
-sessions without replacing existing selections. When there is no selected/configured model, a native result initializes
+sessions without replacing explicit or legacy pinned selections. New sessions first consider their profile's
+[account-bound last-used model](profiles.md#configured-default-and-last-used-model); fresh account discovery can invalidate
+automatic reuse and warn about a safe fallback or required explicit selection. When there is no selected/configured
+model, a native result initializes
 the choice from provider ordering. That choice is pinned to the connection and durably saved before publication; later
 refreshes and restarts retain it, even if the model disappears from the listing. Active turns defer background selection
 initialization until idle. Public Models.dev entries never supply defaults. Without native results, clients can still set

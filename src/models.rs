@@ -774,6 +774,26 @@ impl Service {
         changed
     }
 
+    /// Only matching account evidence may constrain an automatically remembered model.
+    pub(crate) fn account_snapshot(
+        &self,
+        profile: &Profile,
+        credential: Option<&crate::auth::Credential>,
+    ) -> Snapshot {
+        // Match identity and copy visibility under the same lock order as account invalidation.
+        let identities = self
+            .endpoint_identities
+            .lock()
+            .expect("endpoint identities");
+        let mut snapshot = self.snapshot();
+        if identities.get(profile.name()).is_none_or(|(old, account)| {
+            old != profile || !native::same_account(account.as_ref(), credential)
+        }) {
+            snapshot.endpoints.remove(profile.name());
+        }
+        snapshot
+    }
+
     /// Record an actual completed inference only while the same account owns visibility.
     pub fn record_inference_success(
         &self,
