@@ -123,6 +123,23 @@ pub struct ToolResult {
 
 /// Implemented by a caller that owns actual tool execution.
 pub trait Executor: Send + Sync {
+    /// Publish execution start at dispatch time, after any implementation-owned authorization.
+    fn execute_observed<'a>(
+        &'a self,
+        call: &'a Call,
+        snapshot: Option<std::sync::Arc<str>>,
+        observer: Option<&'a dyn Observer>,
+    ) -> Pin<Box<dyn Future<Output = Result<ToolResult, Error>> + Send + 'a>> {
+        Box::pin(async move {
+            if let Some(observer) = observer {
+                observer.observe(call, Observation::Started).await?;
+            }
+            match snapshot {
+                Some(snapshot) => self.execute_snapshot(call, snapshot).await,
+                None => self.execute(call).await,
+            }
+        })
+    }
     /// Implementation-owned presentation, without interpreting arbitrary output.
     fn description(&self, call: &Call) -> crate::presentation::Description {
         crate::presentation::Description {
@@ -189,6 +206,14 @@ impl<'a> NativeExecutor<'a> {
 
     pub(crate) fn preflight(&self, call: &Call) -> Result<(), crate::tool::Failure> {
         self.registry.preflight(&call.name, &call.arguments)
+    }
+
+    pub(crate) fn permissions(&self, call: &Call) -> Vec<crate::permissions::Check> {
+        self.registry.permissions(&call.name, &call.arguments)
+    }
+
+    pub(crate) fn cwd(&self) -> &std::path::Path {
+        self.context.cwd()
     }
 }
 
@@ -317,7 +342,9 @@ pub(crate) async fn run_with_guidance(
     .await
 }
 
-pub(crate) trait Observer: Send + Sync {
+/// Bounded tool lifecycle publication, awaited before execution advances.
+pub trait Observer: Send + Sync {
+    /// Publish an accepted invocation, actual start, or completed result.
     fn observe<'a>(
         &'a self,
         call: &'a Call,
@@ -325,9 +352,13 @@ pub(crate) trait Observer: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'a>>;
 }
 
-pub(crate) enum Observation<'a> {
+/// Implementation-independent tool lifecycle events.
+pub enum Observation<'a> {
+    /// The invocation was admitted but has not started execution.
     Accepted(crate::presentation::Description),
+    /// Authorization is complete and execution is starting.
     Started,
+    /// Execution or pre-execution refusal produced a model-facing result.
     Finished(&'a ToolResult),
 }
 
@@ -435,9 +466,6 @@ pub(crate) async fn run_observed(
                     defer |= guidance.preflight(&target).await?;
                 }
             }
-            if let Some(observer) = observer {
-                observer.observe(&call, Observation::Started).await?;
-            }
             let result = if defer {
                 deferred()
             } else if let Some((guidance, skill)) = guidance.as_mut().and_then(|guidance| {
@@ -447,7 +475,11 @@ pub(crate) async fn run_observed(
                 match skill.snapshot() {
                     Ok(body) => {
                         let result = executor
-                            .execute_snapshot(&call, std::sync::Arc::from(body.as_str()))
+                            .execute_observed(
+                                &call,
+                                Some(std::sync::Arc::from(body.as_str())),
+                                observer,
+                            )
                             .await?;
                         if !result.is_error {
                             defer |= guidance.activate(&skill, body)?;
@@ -467,7 +499,7 @@ pub(crate) async fn run_observed(
                     }
                 }
             } else {
-                executor.execute(&call).await?
+                executor.execute_observed(&call, None, observer).await?
             };
             if result.output.len() > crate::tool::MAX_OUTPUT_BYTES {
                 return Err(Error::Limit);

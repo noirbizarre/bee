@@ -30,6 +30,13 @@ pub struct Output {
 }
 
 impl Tool for Edit {
+    fn permissions(&self, input: &Input) -> Vec<crate::permissions::Check> {
+        vec![crate::permissions::Check::path(
+            "edit",
+            &input.path,
+            crate::permissions::Effect::Ask,
+        )]
+    }
     fn kind(&self) -> &'static str {
         "edit"
     }

@@ -325,6 +325,24 @@ impl Composite<'_> {
 }
 
 impl Executor for Composite<'_> {
+    fn execute_observed<'a>(
+        &'a self,
+        call: &'a Call,
+        snapshot: Option<std::sync::Arc<str>>,
+        observer: Option<&'a dyn crate::agent::Observer>,
+    ) -> Pin<Box<dyn Future<Output = Result<ToolResult, crate::llm::Error>> + Send + 'a>> {
+        if !self.catalog.routes.contains_key(&call.name) {
+            return self.native.execute_observed(call, snapshot, observer);
+        }
+        Box::pin(async move {
+            if let Some(observer) = observer {
+                observer
+                    .observe(call, crate::agent::Observation::Started)
+                    .await?;
+            }
+            self.execute(call).await
+        })
+    }
     fn description(&self, call: &Call) -> crate::presentation::Description {
         if let Some(route) = self.catalog.routes.get(&call.name) {
             crate::presentation::Description {

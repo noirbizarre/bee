@@ -225,6 +225,14 @@ impl fmt::Debug for Failure {
 
 /// Implement a native operation; registration erases only its concrete types.
 pub trait Tool: Send + Sync + 'static {
+    /// Concrete authorization checks; custom tools ask unless explicitly described otherwise.
+    fn permissions(&self, _input: &Self::Input) -> Vec<crate::permissions::Check> {
+        vec![crate::permissions::Check::value(
+            self.name(),
+            "*",
+            crate::permissions::Effect::Ask,
+        )]
+    }
     /// Display kind is owned by the implementation, not guessed from its name.
     fn kind(&self) -> &'static str {
         "other"
@@ -295,6 +303,7 @@ impl fmt::Debug for Output {
 type Execution<'a> = Pin<Box<dyn Future<Output = Output> + Send + 'a>>;
 
 trait Erased: Send + Sync {
+    fn permissions(&self, arguments: Value) -> Vec<crate::permissions::Check>;
     fn kind(&self) -> &'static str;
     fn targets(&self, arguments: Value, context: &Context) -> Vec<Target>;
     fn preflight(&self, arguments: Value) -> Result<(), Failure>;
@@ -303,6 +312,11 @@ trait Erased: Send + Sync {
 }
 
 impl<T: Tool> Erased for T {
+    fn permissions(&self, arguments: Value) -> Vec<crate::permissions::Check> {
+        serde_json::from_value(arguments)
+            .ok()
+            .map_or_else(Vec::new, |input| Tool::permissions(self, &input))
+    }
     fn kind(&self) -> &'static str {
         Tool::kind(self)
     }
@@ -355,6 +369,15 @@ pub struct Registry {
 }
 
 impl Registry {
+    pub(crate) fn permissions(
+        &self,
+        name: &str,
+        arguments: &Value,
+    ) -> Vec<crate::permissions::Check> {
+        self.entries.get(name).map_or_else(Vec::new, |entry| {
+            entry.implementation.permissions(arguments.clone())
+        })
+    }
     pub(crate) fn targets(&self, name: &str, arguments: &Value, context: &Context) -> Vec<Target> {
         self.entries
             .get(name)

@@ -717,8 +717,17 @@ async fn tool_failures_reach_the_model_and_leave_the_session_usable(#[case] kind
     let http = model("anthropic-messages");
     let (tx, mut updates) = tokio::sync::mpsc::unbounded_channel();
     let mut ids = std::collections::HashSet::new();
+    let permission_requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_permissions = permission_requests.clone();
     let client = Client
         .v2()
+        .on_receive_request(
+            async move |_: v2::RequestPermissionRequest, responder, _| {
+                observed_permissions.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                responder.respond_with_error(Error::internal_error())
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
         .on_receive_notification(
             async move |update: v2::UpdateSessionNotification, _| {
                 tx.send(update).map_err(Error::into_internal_error)
@@ -815,6 +824,10 @@ async fn tool_failures_reach_the_model_and_leave_the_session_usable(#[case] kind
     .unwrap();
     http.request();
     let second = http.request().body;
+    assert_eq!(
+        permission_requests.load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
     assert!(second.to_string().contains("\"is_error\":true"));
     let output = result("anthropic-messages", &second);
     assert!(!output.to_string().contains("private-sentinel"));

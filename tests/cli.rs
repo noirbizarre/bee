@@ -98,6 +98,27 @@ fn invalid_catalog_settings_do_not_echo_values_or_unknown_keys() {
 }
 
 #[test]
+fn invalid_permission_rules_fail_before_protocol_traffic_without_exposing_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("selected.toml");
+    for rules in [
+        format!("permissions='{SECRET}'"),
+        format!("permissions=[{{action='read',resource='{SECRET}',effect='invalid'}}]"),
+        format!("permissions=[{{action='read',resource='*',effect='allow',{SECRET}=true}}]"),
+    ] {
+        std::fs::write(&config, rules).unwrap();
+        isolated(dir.path())
+            .env("BEE_CONFIG", &config)
+            .write_stdin("")
+            .assert()
+            .failure()
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::contains("bee::permissions::setting"))
+            .stderr(predicate::str::contains(SECRET).not());
+    }
+}
+
+#[test]
 fn the_help_flag_describes_bee_as_an_acpv2_runtime() {
     bee()
         .arg("--help")

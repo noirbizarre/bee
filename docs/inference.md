@@ -256,7 +256,8 @@ The boundary also supplies [`update_plan`](tools.md#execution-plans) to publish
 structured turn plans across all three provider protocols. Its definition and
 correlated call/results count toward model context and normal turn limits;
 `acp::plan_tool()` exposes its definition for host-side budget estimates.
-The ACP boundary requests client permission before Bash execution and adds `ask_user`
+The ACP boundary applies [native permission rules](tools.md#native-permission-rules),
+asks by default before Bash/mutations/custom tools, and adds `ask_user`
 when form elicitation is negotiated. Missing/expired stored credentials can initiate
 URL-based browser login before the first model request. See
 [ACP user interactions](tools.md#acp-user-interactions) for outcomes and cancellation.

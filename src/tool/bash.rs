@@ -284,6 +284,9 @@ impl Drop for Accounting<'_> {
 }
 
 impl Tool for Bash {
+    fn permissions(&self, input: &Input) -> Vec<crate::permissions::Check> {
+        vec![crate::permissions::Check::command(&input.command)]
+    }
     fn kind(&self) -> &'static str {
         "execute"
     }

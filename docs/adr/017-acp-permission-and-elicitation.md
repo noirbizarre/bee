@@ -3,6 +3,7 @@
 ## Status
 
 Accepted. Extends ADR-005, ADR-008 and ADR-015 for issue #46.
+Extended for #78 with ordered native routing and client-owned always decisions.
 
 ## Context
 
@@ -19,11 +20,22 @@ to affect a replacement turn.
 ## Decision
 
 Keep interactions in a private ACP module, wrapping the native executor while
-preserving guidance/snapshot dispatch. Request permission for each validated Bash
-call using its exact command, cwd and model call ID. Offer allow-once/reject-once;
-only the offered allow ID permits execution. The client may apply its own automatic
-policy. Do not classify shell text, cache grants, gate all native tools, or add
-another authorization layer to client-hosted MCP.
+preserving guidance/snapshot dispatch. The original #46 subset requested permission
+for each validated Bash call with allow-once/reject-once. The #78 extension replaces
+that subset: support all registry-native tools with typed action/resource checks.
+Reads/searches/listing default allow; Bash, mutations and custom tools default ask.
+Ordered TOML rules adapt OpenCode v2's action/resource/effect syntax. Last matching
+trusted rule wins; project policy independently tightens the result and cannot
+erase a trusted ask/deny. Multi-resource deny dominates ask, then allow.
+
+Ask uses an exact command/cwd subject for Bash and a pending tool-call subject for
+other native operations, correlated with Bee's announced ID. Offer all four
+standard allow/reject once/always choices; only an exact offered allow ID permits
+this invocation. Clients alone own always persistence and matching. Bee stores
+no grants or rejections and still sends later ask-routed requests. Shell matching
+uses whole raw command text without parsing. Native rules do not add another
+authorization layer to client-hosted MCP. Form input and plan updates retain their
+own flows. Keep tool presentation pending until actual authorized dispatch.
 
 Negotiate form and URL capabilities independently. Form support adds `ask_user`,
 with one bounded required string answer. This deliberately avoids a generic

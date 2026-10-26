@@ -23,6 +23,7 @@ pub mod instructions;
 pub mod llm;
 pub mod login;
 pub mod models;
+pub mod permissions;
 mod plan;
 pub mod presentation;
 pub mod preset;
@@ -81,6 +82,7 @@ pub fn run() -> Result<()> {
     let history = history::Store::from_environment(&environment)?;
     let preferences = selection::Store::open(&history)?;
     let runtime_options = acp::Runtime::new(agent::Limits::from_config(&config)?, tools)
+        .with_permissions(permissions::Settings::from_config(&config, &environment)?)
         .with_history(history)
         .with_preferences(preferences)
         .with_history_settings(history::Settings::from_config(&config)?)

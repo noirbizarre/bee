@@ -147,6 +147,27 @@ impl Agent {
         }
     }
 
+    fn until_idle_approving_tools(&mut self) -> Vec<Value> {
+        let mut messages = Vec::new();
+        loop {
+            let message = self.recv();
+            if message["method"] == "session/request_permission" {
+                assert_eq!(message["params"]["subject"]["type"], "tool_call");
+                assert_eq!(
+                    message["params"]["subject"]["toolCall"]["status"],
+                    "pending"
+                );
+                assert_eq!(message["params"]["options"].as_array().unwrap().len(), 4);
+                self.send(&json!({"jsonrpc":"2.0","id":message["id"],"result":{"outcome":{"outcome":"selected","optionId":"allow_always"}}}));
+            }
+            let done = message["params"]["update"]["state"] == "idle";
+            messages.push(message);
+            if done {
+                return messages;
+            }
+        }
+    }
+
     fn resume(&mut self, session: &Value, cwd: &std::path::Path, replay: bool) -> Vec<Value> {
         let mut params = json!({"sessionId":session,"cwd":cwd});
         if replay {
@@ -321,7 +342,7 @@ fn a_new_process_restores_native_identity_transcript_selection_and_tool_context_
     assert!(selected.get("result").is_some(), "{selected}");
     let prompt = json!([{"type":"text","text":"remember this"},{"type":"resource_link","uri":"file:///reference","name":"reference"}]);
     first.send(&json!({"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"sessionId":session,"prompt":prompt}}));
-    let first_turn = first.until_idle();
+    let first_turn = first.until_idle_approving_tools();
     assert_eq!(first_turn[0]["result"]["messageId"], "user-1");
     assert_eq!(
         first_turn.last().unwrap()["params"]["update"]["stopReason"],
@@ -1157,7 +1178,7 @@ fn every_file_change_operation_is_serialized_as_standard_v2_diff_content() {
         .send(&json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":root.path()}}));
     let session = agent.recv()["result"]["sessionId"].clone();
     agent.send(&json!({"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"text","text":"work"}]}}));
-    let messages = agent.until_idle();
+    let messages = agent.until_idle_approving_tools();
     let diffs = messages
         .iter()
         .filter_map(|m| {
@@ -1210,14 +1231,34 @@ fn every_file_change_operation_is_serialized_as_standard_v2_diff_content() {
 }
 
 #[rstest::rstest]
-#[case::malformed(false)]
-#[case::direct_close(true)]
+#[case::malformed(false, "bash", json!({}))]
+#[case::null_outcome(false, "bash", json!({"outcome":null}))]
+#[case::wrong_outcome(false, "write", json!({"outcome":42}))]
+#[case::missing_id(false, "write", json!({"outcome":{"outcome":"selected"}}))]
+#[case::null_id(false, "bash", json!({"outcome":{"outcome":"selected","optionId":null}}))]
+#[case::numeric_id(false, "write", json!({"outcome":{"outcome":"selected","optionId":42}}))]
+#[case::unknown_id(false, "write", json!({"outcome":{"outcome":"selected","optionId":"unoffered"}}))]
+#[case::unknown_outcome(false, "bash", json!({"outcome":{"outcome":"future"}}))]
+#[case::cancelled(false, "write", json!({"outcome":{"outcome":"cancelled"}}))]
+#[case::reject_always(false, "write", json!({"outcome":{"outcome":"selected","optionId":"reject_always"}}))]
+#[case::request_error(false, "write", Value::Null)]
+#[case::direct_close(true, "bash", json!({}))]
+#[case::close_mutation(true, "write", json!({}))]
 #[test]
-fn unapproved_stdio_commands_never_run_and_close_follows_request_cleanup(#[case] close: bool) {
+fn unapproved_stdio_commands_never_run_and_close_follows_request_cleanup(
+    #[case] close: bool,
+    #[case] tool: &str,
+    #[case] response: Value,
+) {
     let root = tempfile::tempdir().unwrap();
+    let arguments = if tool == "bash" {
+        json!({"command":"printf bad > sentinel"})
+    } else {
+        json!({"path":"sentinel","content":"bad"})
+    };
     let server = support::Server::start(vec![
         support::Response::json(
-            json!({"choices":[{"index":0,"message":{"tool_calls":[{"id":"protected","type":"function","function":{"name":"bash","arguments":"{\"command\":\"printf bad > sentinel\"}"}}]},"finish_reason":"tool_calls"}]}),
+            json!({"choices":[{"index":0,"message":{"tool_calls":[{"id":"protected","type":"function","function":{"name":tool,"arguments":arguments.to_string()}}]},"finish_reason":"tool_calls"}]}),
         ),
         support::Response::json(support::chat_text("declined")),
     ]);
@@ -1232,14 +1273,36 @@ fn unapproved_stdio_commands_never_run_and_close_follows_request_cleanup(#[case]
     agent.send(&json!({"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"text","text":"run"}]}}));
     let permission = loop {
         let message = agent.recv();
+        assert_ne!(message["params"]["update"]["status"], "in_progress");
+        assert_ne!(
+            message["params"]["update"]["sessionUpdate"],
+            "terminal_update"
+        );
+        assert_ne!(message["params"]["update"]["content"]["type"], "diff");
         if message["method"] == "session/request_permission" {
             break message;
         }
     };
+    assert_eq!(permission["params"]["sessionId"], session);
+    assert_eq!(permission["params"]["options"].as_array().unwrap().len(), 4);
+    if tool == "bash" {
+        assert_eq!(
+            permission["params"]["subject"],
+            json!({"type":"command","command":"printf bad > sentinel","cwd":root.path(),"toolCallId":"tool-1-1"})
+        );
+    } else {
+        let subject = &permission["params"]["subject"];
+        assert_eq!(subject["type"], "tool_call");
+        assert_eq!(subject["toolCall"]["toolCallId"], "tool-1-1");
+        assert_eq!(subject["toolCall"]["rawInput"], arguments);
+        assert_eq!(subject["toolCall"]["status"], "pending");
+    }
     if close {
         agent.send(&json!({"jsonrpc":"2.0","id":4,"method":"session/close","params":{"sessionId":session}}));
+    } else if response.is_null() {
+        agent.send(&json!({"jsonrpc":"2.0","id":permission["id"],"error":{"code":-32603,"message":"CLIENT-SECRET"}}));
     } else {
-        agent.send(&json!({"jsonrpc":"2.0","id":permission["id"],"result":{}}));
+        agent.send(&json!({"jsonrpc":"2.0","id":permission["id"],"result":response}));
     }
     let mut cancelled = false;
     let mut terminal = false;
@@ -1266,7 +1329,7 @@ fn unapproved_stdio_commands_never_run_and_close_follows_request_cleanup(#[case]
         }
     }
     if close {
-        agent.send(&json!({"jsonrpc":"2.0","id":permission["id"],"result":{"outcome":{"outcome":"selected","optionId":"allow_once"}}}));
+        agent.send(&json!({"jsonrpc":"2.0","id":permission["id"],"result":{"outcome":{"outcome":"selected","optionId":"allow_always"}}}));
         agent.send(&json!({"jsonrpc":"2.0","id":5,"method":"session/list","params":{}}));
         assert_eq!(agent.recv()["id"], 5);
     }

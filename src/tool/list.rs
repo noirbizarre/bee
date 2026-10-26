@@ -31,6 +31,13 @@ fn limit() -> usize {
 }
 
 impl Tool for List {
+    fn permissions(&self, input: &Input) -> Vec<crate::permissions::Check> {
+        vec![crate::permissions::Check::path(
+            "list",
+            &input.path,
+            crate::permissions::Effect::Allow,
+        )]
+    }
     fn kind(&self) -> &'static str {
         "search"
     }

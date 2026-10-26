@@ -47,6 +47,13 @@ pub struct Output {
 }
 
 impl Tool for Read {
+    fn permissions(&self, input: &Input) -> Vec<crate::permissions::Check> {
+        vec![crate::permissions::Check::path(
+            "read",
+            &input.path,
+            crate::permissions::Effect::Allow,
+        )]
+    }
     fn kind(&self) -> &'static str {
         "read"
     }

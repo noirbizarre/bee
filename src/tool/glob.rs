@@ -42,6 +42,13 @@ fn limit() -> usize {
 }
 
 impl Tool for Glob {
+    fn permissions(&self, input: &Input) -> Vec<crate::permissions::Check> {
+        vec![crate::permissions::Check::value(
+            "glob",
+            &input.pattern,
+            crate::permissions::Effect::Allow,
+        )]
+    }
     fn kind(&self) -> &'static str {
         "search"
     }

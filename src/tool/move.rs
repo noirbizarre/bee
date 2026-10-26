@@ -27,6 +27,16 @@ pub struct Output {
 }
 
 impl Tool for Move {
+    fn permissions(&self, input: &Input) -> Vec<crate::permissions::Check> {
+        vec![
+            crate::permissions::Check::path("edit", &input.source, crate::permissions::Effect::Ask),
+            crate::permissions::Check::path(
+                "edit",
+                &input.destination,
+                crate::permissions::Effect::Ask,
+            ),
+        ]
+    }
     type Input = Input;
     type Output = Output;
     fn kind(&self) -> &'static str {
