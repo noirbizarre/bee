@@ -96,6 +96,18 @@ pub enum Error {
         /// Static classification, never the offending value or unknown key.
         reason: &'static str,
     },
+    /// Invalid native permission routing; rule values never enter diagnostics.
+    #[error("permissions configuration in `{path}` {reason}")]
+    #[diagnostic(
+        code(bee::permissions::setting),
+        help("use [[permissions]] rules with action, resource, and effect = allow, ask, or deny")
+    )]
+    PermissionSetting {
+        /// File supplying the rules.
+        path: String,
+        /// Static classification, never configuration content.
+        reason: &'static str,
+    },
     /// Invalid Bash policy; configuration values never enter diagnostics.
     #[error("Bash setting `{key}` in `{path}` {reason}")]
     #[diagnostic(code(bee::bash::setting), help("{instruction}"))]

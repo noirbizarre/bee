@@ -30,6 +30,20 @@ pub struct Output {
 }
 
 impl Tool for Copy {
+    fn permissions(&self, input: &Input) -> Vec<crate::permissions::Check> {
+        vec![
+            crate::permissions::Check::path(
+                "read",
+                &input.source,
+                crate::permissions::Effect::Allow,
+            ),
+            crate::permissions::Check::path(
+                "edit",
+                &input.destination,
+                crate::permissions::Effect::Ask,
+            ),
+        ]
+    }
     type Input = Input;
     type Output = Output;
     fn kind(&self) -> &'static str {

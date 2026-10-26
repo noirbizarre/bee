@@ -239,31 +239,37 @@ impl Reply {
         receive.await.unwrap_or(Err(Error::Cancelled))
     }
 
-    async fn permission(&self, call: &Call) -> Result<bool, Error> {
+    async fn permission(
+        &self,
+        subject: v2::RequestPermissionSubject,
+        title: String,
+    ) -> Result<bool, Error> {
         self.phase(true).await?;
-        let cwd = self.input.as_ref().ok_or(Error::Tool)?.cwd.clone();
-        let subject = v2::CommandPermissionSubject::new(
-            call.arguments["command"].as_str().ok_or(Error::Tool)?,
-            cwd,
-        )
-        .tool_call_id(v2::ToolCallId::new(self.tool_id(call)));
-        let request = v2::RequestPermissionRequest::new(
-            self.session_id.clone(),
-            "Run Bash command",
-            vec![
-                v2::PermissionOption::new(
-                    "allow_once",
-                    "Allow once",
-                    v2::PermissionOptionKind::AllowOnce,
-                ),
-                v2::PermissionOption::new(
-                    "reject_once",
-                    "Reject once",
-                    v2::PermissionOptionKind::RejectOnce,
-                ),
-            ],
-        )
-        .subject(v2::RequestPermissionSubject::Command(subject));
+        let options = vec![
+            v2::PermissionOption::new(
+                "allow_once",
+                "Allow once",
+                v2::PermissionOptionKind::AllowOnce,
+            ),
+            v2::PermissionOption::new(
+                "reject_once",
+                "Reject once",
+                v2::PermissionOptionKind::RejectOnce,
+            ),
+            v2::PermissionOption::new(
+                "allow_always",
+                "Allow always",
+                v2::PermissionOptionKind::AllowAlways,
+            ),
+            v2::PermissionOption::new(
+                "reject_always",
+                "Reject always",
+                v2::PermissionOptionKind::RejectAlways,
+            ),
+        ];
+        let request =
+            v2::RequestPermissionRequest::new(self.session_id.clone(), title, options.clone())
+                .subject(subject);
         let pending = {
             // SDK send_request publishes immediately, so gate publication too.
             let sessions = lock(&self.sessions);
@@ -275,10 +281,11 @@ impl Reply {
         let response =
             tokio::time::timeout(crate::login::DEFAULT_TIMEOUT, pending.block_task()).await;
         self.phase(false).await?;
-        // Selection alone is not approval: resolve only the exact offered allow ID.
+        // “Always” changes client policy only; Bee resolves this invocation and stores nothing.
         Ok(matches!(response, Ok(Ok(v2::RequestPermissionResponse {
             outcome: v2::RequestPermissionOutcome::Selected(ref selected), ..
-        })) if selected.option_id.to_string() == "allow_once"))
+        })) if options.iter().any(|option| option.option_id == selected.option_id
+            && matches!(option.kind, v2::PermissionOptionKind::AllowOnce | v2::PermissionOptionKind::AllowAlways))))
     }
 
     async fn ask(&self, call: &Call, limit: usize) -> Result<ToolResult, Error> {
@@ -364,9 +371,103 @@ fn failure(message: &str) -> ToolResult {
 pub(super) struct Native<'a> {
     pub inner: NativeExecutor<'a>,
     pub reply: &'a Reply,
+    pub permissions: &'a crate::permissions::Settings,
 }
 
 impl Native<'_> {
+    fn dispatch<'a>(
+        &'a self,
+        call: &'a Call,
+        snapshot: Option<std::sync::Arc<str>>,
+        observer: Option<&'a dyn crate::agent::Observer>,
+    ) -> Pin<Box<dyn Future<Output = Result<ToolResult, Error>> + Send + 'a>> {
+        Box::pin(async move {
+            use crate::agent::{Executor, Observation};
+            use crate::permissions::{Effect, Resource};
+            if matches!(call.name.as_str(), "update_plan" | "ask_user") {
+                if let Some(observer) = observer {
+                    observer.observe(call, Observation::Started).await?;
+                }
+                return if call.name == "update_plan" {
+                    self.reply.update_plan(call).await
+                } else {
+                    self.reply.ask(call, self.output_limit()).await
+                };
+            }
+            if self.inner.preflight(call).is_err() {
+                // Never delegate invalid input, including to an injected custom implementation.
+                return Ok(ToolResult {
+                    output: json!({"error":{"code":"invalid_arguments","message":"Tool arguments are invalid; follow the schema and configured host ceilings."}}).to_string(),
+                    is_error: true,
+                });
+            }
+            let checks = self.inner.permissions(call);
+            match self.permissions.evaluate(&checks, self.inner.cwd()) {
+                Effect::Deny => {
+                    return Ok(failure(
+                        "The configured permission policy denied this operation; it was not executed.",
+                    ));
+                }
+                Effect::Allow => {}
+                Effect::Ask => {
+                    let (subject, title) = if let Some(command) = checks.iter().find_map(|check| {
+                        if let Resource::Command(command) = &check.resource {
+                            Some(command)
+                        } else {
+                            None
+                        }
+                    }) {
+                        let cwd = self.reply.input.as_ref().ok_or(Error::Tool)?.cwd.clone();
+                        (
+                            v2::RequestPermissionSubject::Command(
+                                v2::CommandPermissionSubject::new(command.clone(), cwd)
+                                    .tool_call_id(v2::ToolCallId::new(self.reply.tool_id(call))),
+                            ),
+                            "Run Bash command".into(),
+                        )
+                    } else {
+                        let description = self.inner.description(call);
+                        let update = serde_json::from_value::<v2::ToolCallUpdate>(json!({
+                            "toolCallId": self.reply.tool_id(call),
+                            "title": description.name,
+                            "kind": description.kind,
+                            "status": "pending",
+                            "locations": description.locations.iter().map(|path| json!({"path":path})).collect::<Vec<_>>(),
+                            "rawInput": crate::presentation::bounded_value(&call.arguments),
+                        })).map_err(|_| Error::Tool)?;
+                        (
+                            v2::RequestPermissionSubject::from(update),
+                            format!("Run {} tool", call.name),
+                        )
+                    };
+                    if !self.reply.permission(subject, title).await? {
+                        return Ok(failure(
+                            "The operation was not approved; it was not executed.",
+                        ));
+                    }
+                }
+            }
+            if !self.reply.current() {
+                return Err(Error::Cancelled);
+            }
+            if let Some(observer) = observer {
+                observer.observe(call, Observation::Started).await?;
+            }
+            let mut execution = match snapshot {
+                Some(snapshot) => self.inner.execute_snapshot(call, snapshot),
+                None => self.inner.execute(call),
+            };
+            // Linearize native startup/publication against cancel, including snapshot execution.
+            futures::future::poll_fn(|cx| {
+                let sessions = lock(&self.reply.sessions);
+                if !sessions.is_current(&self.reply.id, self.reply.token) {
+                    return std::task::Poll::Ready(Err(Error::Cancelled));
+                }
+                execution.as_mut().poll(cx)
+            })
+            .await
+        })
+    }
     pub fn definitions(&self) -> Vec<Tool> {
         let mut definitions = self.inner.definitions();
         definitions.push(super::plans::definition());
@@ -382,6 +483,14 @@ impl Native<'_> {
 }
 
 impl crate::agent::Executor for Native<'_> {
+    fn execute_observed<'a>(
+        &'a self,
+        call: &'a Call,
+        snapshot: Option<std::sync::Arc<str>>,
+        observer: Option<&'a dyn crate::agent::Observer>,
+    ) -> Pin<Box<dyn Future<Output = Result<ToolResult, Error>> + Send + 'a>> {
+        self.dispatch(call, snapshot, observer)
+    }
     fn description(&self, call: &Call) -> crate::presentation::Description {
         self.inner.description(call)
     }
@@ -399,53 +508,12 @@ impl crate::agent::Executor for Native<'_> {
         call: &'a Call,
         snapshot: std::sync::Arc<str>,
     ) -> Pin<Box<dyn Future<Output = Result<ToolResult, Error>> + Send + 'a>> {
-        // Snapshot activation cannot bypass authorization for a custom native target.
-        if matches!(call.name.as_str(), "bash" | "ask_user" | "update_plan") {
-            return self.execute(call);
-        }
-        self.inner.execute_snapshot(call, snapshot)
+        self.dispatch(call, Some(snapshot), None)
     }
     fn execute<'a>(
         &'a self,
         call: &'a Call,
     ) -> Pin<Box<dyn Future<Output = Result<ToolResult, Error>> + Send + 'a>> {
-        Box::pin(async move {
-            if call.name == "update_plan" {
-                return self.reply.update_plan(call).await;
-            }
-            if call.name == "ask_user" {
-                return self.reply.ask(call, self.output_limit()).await;
-            }
-            if call.name == "bash" {
-                if self.inner.preflight(call).is_err() {
-                    // Even a custom implementation named bash must not execute
-                    // after preflight rejection; never delegate this failure.
-                    return Ok(ToolResult {
-                        output: json!({"error":{"code":"invalid_arguments","message":"Bash arguments are invalid; follow the schema and configured host ceilings."}}).to_string(),
-                        is_error: true,
-                    });
-                }
-                if !self.reply.permission(call).await? {
-                    return Ok(failure(
-                        "Bash was not approved; the command was not executed.",
-                    ));
-                }
-                if !self.reply.current() {
-                    return Err(Error::Cancelled);
-                }
-                let mut execution = self.inner.execute(call);
-                // Polling under the cancellation gate linearizes process startup
-                // against cancel even on a multi-threaded embedded runtime.
-                return futures::future::poll_fn(|cx| {
-                    let sessions = lock(&self.reply.sessions);
-                    if !sessions.is_current(&self.reply.id, self.reply.token) {
-                        return std::task::Poll::Ready(Err(Error::Cancelled));
-                    }
-                    execution.as_mut().poll(cx)
-                })
-                .await;
-            }
-            self.inner.execute(call).await
-        })
+        self.dispatch(call, None, None)
     }
 }

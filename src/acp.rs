@@ -121,6 +121,7 @@ pub struct Runtime {
     instructions: Option<crate::instructions::Sources>,
     limits: crate::agent::Limits,
     tools: crate::tool::Registry,
+    permissions: crate::permissions::Settings,
     auth_environment: Option<crate::config::Environment>,
     login_http: Arc<dyn crate::http::LoginHttp>,
     discovery: Option<Arc<crate::models::Service>>,
@@ -130,6 +131,12 @@ pub struct Runtime {
 }
 
 impl Runtime {
+    /// Configure native-tool routing without storing client approval decisions.
+    #[must_use]
+    pub fn with_permissions(mut self, settings: crate::permissions::Settings) -> Self {
+        self.permissions = settings;
+        self
+    }
     /// Supply isolated or durable profile-scoped recent model preferences.
     #[must_use]
     pub fn with_preferences(mut self, store: crate::selection::Store) -> Self {
@@ -143,6 +150,7 @@ impl Runtime {
             inference_http: None,
             limits,
             tools,
+            permissions: Default::default(),
             instructions: None,
             auth_environment: None,
             login_http: Arc::new(crate::http::AsyncLoginHttp),
@@ -590,6 +598,7 @@ async fn inference(
     let native = interactions::Native {
         inner: crate::agent::NativeExecutor::new(&runtime.tools, context),
         reply: &reply,
+        permissions: &runtime.permissions,
     };
     let catalog = mcp::Catalog::discover(
         &reply.connection,

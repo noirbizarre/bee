@@ -27,7 +27,8 @@ Standard tool lifecycles, committed structured diffs and agent-owned terminal by
 independent of successful context; unfinished execution presentation closes before idle and reconciles on recovery.
 Client-hosted MCP tools are discovered per prompt and invoked through ACP's MCP transport, with session-scoped
 attachments, offline schema validation and complete JSON result envelopes. The client owns permission policy.
-Production ACP requests permission for Bash only, adds `ask_user` for form-capable clients,
+Production ACP applies ordered native permission rules (reads default allow; Bash, mutations and custom tools default ask),
+with project-only tightening and client-owned always decisions, adds `ask_user` for form-capable clients,
 and provides `update_plan` for explicit per-turn ACP item plans. Latest snapshots are durable,
 replayed independently of model context, and unfinished entries are cancelled before terminal idle.
 Bee initiates cancellable provider browser login for missing/expired stored credentials when URL elicitation is supported.

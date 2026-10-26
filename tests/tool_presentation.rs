@@ -149,12 +149,25 @@ async fn committed_file_and_directory_changes_have_correlated_lifecycles_and_ide
             runtime.with_history(bee::history::Store::open(root.path().join("state")).unwrap());
     }
     let (send, mut updates) = tokio::sync::mpsc::unbounded_channel();
-    let client = Client.v2().on_receive_notification(
-        async move |update: v2::UpdateSessionNotification, _| {
-            send.send(update).map_err(Error::into_internal_error)
-        },
-        agent_client_protocol::on_receive_notification!(),
-    );
+    let client = Client
+        .v2()
+        .on_receive_request(
+            async |_: v2::RequestPermissionRequest, responder, _| {
+                responder.respond(
+                    serde_json::from_value::<v2::RequestPermissionResponse>(
+                        json!({"outcome":{"outcome":"selected","optionId":"allow_once"}}),
+                    )
+                    .unwrap(),
+                )
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_notification(
+            async move |update: v2::UpdateSessionNotification, _| {
+                send.send(update).map_err(Error::into_internal_error)
+            },
+            agent_client_protocol::on_receive_notification!(),
+        );
     tokio::time::timeout(
         Duration::from_secs(30),
         client.connect_with(
@@ -189,21 +202,21 @@ async fn committed_file_and_directory_changes_have_correlated_lifecycles_and_ide
                             u["sessionUpdate"] == "tool_call_update" && u["toolCallId"] == id
                         })
                         .collect::<Vec<_>>();
-                    assert_eq!(states.len(), 3);
+                    let invalid = index == operations.len() - 1;
+                    assert_eq!(states.len(), if invalid { 2 } else { 3 });
                     assert_eq!(states[0]["name"], *name);
                     assert_eq!(states[0]["status"], "pending");
-                    assert_eq!(states[1]["status"], "in_progress");
+                    if !invalid {
+                        assert_eq!(states[1]["status"], "in_progress");
+                    }
+                    let finished = states.last().unwrap();
                     assert_eq!(
-                        states[2]["status"],
-                        if index == operations.len() - 1 {
-                            "failed"
-                        } else {
-                            "completed"
-                        },
+                        finished["status"],
+                        if invalid { "failed" } else { "completed" },
                         "{name}: {}",
-                        states[2]
+                        finished
                     );
-                    assert!(states[2].get("rawOutput").is_some());
+                    assert!(finished.get("rawOutput").is_some());
                 }
                 let diffs = live
                     .iter()
@@ -467,12 +480,25 @@ async fn nested_directory_guidance_reaches_the_model_before_any_mutation(
     )
     .with_instructions(bee::instructions::Sources::new(None));
     let (send, mut updates) = tokio::sync::mpsc::unbounded_channel();
-    let client = Client.v2().on_receive_notification(
-        async move |update: v2::UpdateSessionNotification, _| {
-            send.send(update).map_err(Error::into_internal_error)
-        },
-        agent_client_protocol::on_receive_notification!(),
-    );
+    let client = Client
+        .v2()
+        .on_receive_request(
+            async |_: v2::RequestPermissionRequest, responder, _| {
+                responder.respond(
+                    serde_json::from_value::<v2::RequestPermissionResponse>(
+                        json!({"outcome":{"outcome":"selected","optionId":"allow_once"}}),
+                    )
+                    .unwrap(),
+                )
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_notification(
+            async move |update: v2::UpdateSessionNotification, _| {
+                send.send(update).map_err(Error::into_internal_error)
+            },
+            agent_client_protocol::on_receive_notification!(),
+        );
     tokio::time::timeout(
         Duration::from_secs(15),
         client.connect_with(
@@ -540,12 +566,25 @@ async fn storage_failure_after_execution_closes_the_published_card_without_expos
     let runtime = bee::acp::Runtime::new(bee::agent::Limits::default(), registry)
         .with_history(bee::history::Store::open(root.path().join("state")).unwrap());
     let (send, mut updates) = tokio::sync::mpsc::unbounded_channel();
-    let client = Client.v2().on_receive_notification(
-        async move |update: v2::UpdateSessionNotification, _| {
-            send.send(update).map_err(Error::into_internal_error)
-        },
-        agent_client_protocol::on_receive_notification!(),
-    );
+    let client = Client
+        .v2()
+        .on_receive_request(
+            async |_: v2::RequestPermissionRequest, responder, _| {
+                responder.respond(
+                    serde_json::from_value::<v2::RequestPermissionResponse>(
+                        json!({"outcome":{"outcome":"selected","optionId":"allow_once"}}),
+                    )
+                    .unwrap(),
+                )
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_notification(
+            async move |update: v2::UpdateSessionNotification, _| {
+                send.send(update).map_err(Error::into_internal_error)
+            },
+            agent_client_protocol::on_receive_notification!(),
+        );
     tokio::time::timeout(
         Duration::from_secs(15),
         client.connect_with(

@@ -26,7 +26,9 @@ using each session's working directory.
 Client-hosted MCP tools are discovered and invoked through ACPv2's `session.mcp.acp` transport alongside the native
 catalog. The client supplies server attachments and enforces permissions. See [tools](tools.md) for the contracts,
 execution context and supported MCP subset.
-Native Bash calls request client permission. Form-capable clients also receive
+Native Bash and mutation calls request client permission by default; read-only tools
+run directly. [Ordered permission rules](tools.md#native-permission-rules) can allow,
+ask or deny native operations, with project-only tightening. Form-capable clients also receive
 `ask_user`; URL-capable clients can perform provider browser login. See
 [ACP user interactions](tools.md#acp-user-interactions) for capability and outcome handling.
 

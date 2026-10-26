@@ -58,6 +58,11 @@ change is an error rather than a silent override because it is almost always a
 mistake (`retries = "3"` over `retries = 3`) that would otherwise surface far
 from its cause. Integers and floats are different types.
 
+ADR-017's #78 extension retains source-layer permission arrays separately from
+the generic merged table: trusted `[[permissions]]` arrays concatenate, while
+project rules can only tighten their evaluated result. This explicit consumer
+does not change generic array replacement for other settings.
+
 ### Errors
 
 | Code                            | When                                                          |

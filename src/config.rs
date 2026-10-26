@@ -279,6 +279,8 @@ pub struct Config {
     // The project file's path, whether or not it exists, so a setting can be
     // refused when that file is where it came from.
     project: Option<PathBuf>,
+    // Generic merging replaces arrays; permission provenance must survive that replacement.
+    permission_layers: Vec<(PathBuf, bool, Value)>,
 }
 
 // Written by hand: a derived `Debug` would print `table`, and the table holds
@@ -322,16 +324,16 @@ impl Config {
         project_dir: &Path,
         replacement: Option<&Table>,
     ) -> Result<Self> {
-        // (path, required), lowest precedence first. Order is the whole
+        // (path, required, project), lowest precedence first. Order is the whole
         // precedence rule, so it lives in one visible place.
-        let mut layers: Vec<(PathBuf, bool)> = Vec::new();
+        let mut layers: Vec<(PathBuf, bool, bool)> = Vec::new();
         if let Some(global) = environment.global_config_path() {
-            layers.push((global, false));
+            layers.push((global, false, false));
         }
         if let Some(selected) = environment.selected_config_path() {
-            layers.push((selected.to_path_buf(), true));
+            layers.push((selected.to_path_buf(), true, false));
         }
-        layers.push((project_config_path(project_dir), false));
+        layers.push((project_config_path(project_dir), false, true));
 
         let mut config = Self {
             project: Some(project_config_path(project_dir)),
@@ -340,7 +342,7 @@ impl Config {
         if environment.global_config_path().is_none() {
             config.merge_profile_environment(environment)?;
         }
-        for (index, (path, required)) in layers.into_iter().enumerate() {
+        for (index, (path, required, project)) in layers.into_iter().enumerate() {
             let table = if index == 0
                 && environment.global_config_path().is_some()
                 && replacement.is_some()
@@ -350,6 +352,12 @@ impl Config {
                 read_layer(&path, required)?
             };
             if let Some(table) = table {
+                if let Some(value) = table.get("permissions") {
+                    // Trust follows the selected layer, even when BEE_CONFIG names the project file.
+                    config
+                        .permission_layers
+                        .push((path.clone(), project, value.clone()));
+                }
                 config.sources.push(path.clone());
                 merge(&mut config.table, table, "", &path, &mut config.origins)?;
             }
@@ -381,6 +389,12 @@ impl Config {
     #[must_use]
     pub fn table(&self) -> &Table {
         &self.table
+    }
+
+    pub(crate) fn permission_layers(&self) -> impl Iterator<Item = (&Path, bool, &Value)> {
+        self.permission_layers
+            .iter()
+            .map(|(path, project, value)| (path.as_path(), *project, value))
     }
 
     /// The value at a dotted key such as `provider.name`.

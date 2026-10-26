@@ -36,6 +36,11 @@ were rechecked against official main `9eaeebbe4dbadb6f3eed74aca41758960e75c6c4`:
 that adjacent tool text chunks may render continuously is compatible with the pinned append semantics.
 Its newer initialization version-negotiation rules are separate from this presentation implementation.
 
+The #78 permission implementation also retains the audited revision. Permission schema
+definitions and semantics were rechecked against official main
+`5aa293599e554ca3a5751f27022519dd3cd4768c` and are unchanged. It introduces no
+permission capability flag or newer version-negotiation behavior.
+
 The three official tags `v1.12.0`, `schema-v1.26.0` and `schema-v2.0.0-alpha.9` resolve to
 the specification commit above. These are independent version namespaces: schema crate `1.12.0`
 does not mean wire version 1, and SDK `3.5.0` does not mean wire version 3.
@@ -216,10 +221,11 @@ except `auth/login` and `auth/logout`, which run client → agent.
 
 | Feature | Status | Behavior, limitation and evidence / tracking |
 | --- | --- | --- |
-| `session/request_permission`, command subject | Implemented and supported | Native Bash only, after argument validation; command/cwd and tool-call ID supplied. The client decides. [Approval tests][test-interactions], [request construction][interaction-code]. |
-| `allow_once`, `reject_once`; selected/cancelled outcomes | Implemented and supported | Only the offered `allow_once` ID executes. Denial, unknown/malformed outcome, cancellation, timeout or error never authorize work. [Fail-closed tests][test-interactions], [wire cleanup][test-stdio]. |
-| `allow_always`, `reject_always` | Planned | No persistent choices/cache today; client-owned policy semantics tracked in [#78](https://github.com/noirbizarre/bee/issues/78). |
-| Tool-call/subjectless permission subjects and broader operation coverage | Planned | Read/write/edit do not request ACP permission; current requests use `command`, not `tool_call` subjects. [#78](https://github.com/noirbizarre/bee/issues/78). MCP authorization remains client-owned. |
+| `session/request_permission`, command subject | Implemented and supported | Validated native Bash when routing resolves to ask; exact command, absolute cwd and announced tool-call ID. No permission capability flag. [Approval tests][test-interactions], [request construction][interaction-code]. |
+| `allow_once`, `reject_once`; selected/cancelled outcomes | Implemented and supported | Exact offered IDs resolve to allow/reject kinds. Denial, unknown/malformed outcome or ID, cancellation, timeout and request errors never authorize work. [Fail-closed tests][test-interactions], [wire cleanup][test-stdio]. |
+| `allow_always`, `reject_always` | Implemented and supported | Client-owned persistence only. Both allow kinds approve this invocation; both reject kinds refuse it. Bee caches nothing and later ask-routed calls still request permission. `native_routing_and_snapshot_reads_preserve_client_owned_always_decisions` in [interaction tests][test-interactions]. |
+| Tool-call subjects and broader native coverage | Implemented and supported | Native read/glob/grep/list/write/edit/delete/move/copy and registered custom tools support ask routing. Reads/searches/listing default allow; mutations and custom tools default ask. Correlated pending tool-call subjects include bounded input and trusted presentation. Ordinary/snapshot paths share gating. [Rules and exact mapping](tools.md#native-permission-rules), [interaction tests][test-interactions], [wire tests][test-stdio]. MCP policy remains client-owned. |
+| Subjectless permission requests | Not implemented | Every current protected operation has a command or tool-call subject. No production subjectless workflow is claimed. |
 | `elicitation/create`, form mode; `client.elicitation.form` | Partially supported | Negotiated `ask_user` form has one required string `answer`, bounded to 4096 bytes. Accept validates data; decline/cancel/invalid becomes tool failure. Richer forms: [#77](https://github.com/noirbizarre/bee/issues/77). [Form tests][test-interactions]. |
 | `elicitation/create`, URL mode; `client.elicitation.url` | Partially supported | Configured provider-login flows for missing/expired stored credentials only. Acceptance is not login completion. Successful browser scenarios are Unix-only. [Login tests][test-interactions]; broader workflows: [#77](https://github.com/noirbizarre/bee/issues/77). |
 | Provider OAuth through URL elicitation | Implemented and supported | ChatGPT browser login uses standard URL elicitation; subsequent token renewal is provider-side, not `auth/login`. `chatgpt_browser_login_renews_between_native_tool_requests_and_commits_history` in [OAuth boundary tests][test-oauth]. |
@@ -372,7 +378,8 @@ Paths below are relative to the repository root.
 | Native-tool failures, limits and recovery through production ACP | `tests/e2e.rs`, `tests/inference.rs` |
 | Per-tool invalid inputs, failure preservation and output limits | `tests/read.rs`, `tests/discovery.rs`, `tests/grep.rs`, `tests/write.rs`, `tests/edit.rs`, `tests/bash.rs`, `tests/tools.rs` |
 | Malformed requests, errors, protocol-only stdout, EOF shutdown | `tests/stdio.rs`, `tests/cli.rs`, `tests/cancel.rs` |
-| Bash permission allow/reject/cancel/unknown/error/timeout, no nonapproval side effects | `tests/interactions.rs`; malformed replies and direct-close wire ordering in `tests/stdio.rs` |
+| Native permission routing, four choices, snapshot reads, repeated always decisions, fail-closed responses | `native_routing_and_snapshot_reads_preserve_client_owned_always_decisions` and `only_an_offered_bash_approval_can_create_a_file` in `tests/interactions.rs`; ordered policy/project tightening in `tests/permissions.rs` |
+| Serialized command/tool-call subjects, malformed/unknown/error/reject responses and close cleanup | `unapproved_stdio_commands_never_run_and_close_follows_request_cleanup` and `every_file_change_operation_is_serialized_as_standard_v2_diff_content` in `tests/stdio.rs` |
 | Independent form/URL negotiation, validated form responses, model-call correlation | `tests/interactions.rs`, across all three inference protocols |
 | Real provider browser callback/exchange/store workflow; URL acceptance distinct from completion | `tests/interactions.rs`, with an injected credential exchange transport |
 | Login transport HTTPS-only policy, redirect refusal, bounded/framed bodies, cancellation and deadlines | Unit tests in `src/http.rs` |

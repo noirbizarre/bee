@@ -81,6 +81,13 @@ pub struct Output {
 }
 
 impl Tool for Grep {
+    fn permissions(&self, input: &Input) -> Vec<crate::permissions::Check> {
+        vec![crate::permissions::Check::value(
+            "grep",
+            &input.pattern,
+            crate::permissions::Effect::Allow,
+        )]
+    }
     fn kind(&self) -> &'static str {
         "search"
     }

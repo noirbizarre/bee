@@ -84,13 +84,21 @@ end the plan. See [plan retention and replay](sessions.md#execution-plan-retenti
 
 ## ACP user interactions
 
-Before each validated native `bash` call, Bee sends `session/request_permission`
-with the command, absolute session cwd and originating tool-call ID. Options are
-`allow_once` and `reject_once`. Only the exact offered allow ID permits execution;
-rejection, unknown IDs/outcomes, cancellation, malformed replies, request errors and
-timeouts execute nothing. The client decides policy and can answer automatically.
-Bee does not classify commands or cache approval. Command timeout starts after approval.
-Other native tools keep their existing contracts; client-hosted MCP has its own policy.
+Native tools resolve [configured permission rules](#native-permission-rules) after
+argument validation. By default, reads/searches/listing run without prompting;
+Bash, filesystem mutations and custom tools ask the client. An ask sends
+`session/request_permission`: Bash supplies the exact command, absolute session cwd
+and announced tool-call ID; other tools supply a correlated `tool_call` subject
+with pending status, bounded input and implementation-owned description/locations.
+Tool cards remain pending until approval, then execution starts.
+
+Options are `allow_once`, `reject_once`, `allow_always`, and `reject_always`.
+Only an exact offered ID with an allow kind permits this invocation. Rejection,
+unknown IDs/outcomes, cancellation, malformed replies, request errors and timeouts
+execute nothing. **The client owns persistence:** an always selection neither
+changes Bee's configuration nor caches a decision. Every later ask-routed call
+still requests permission; the client may answer automatically using its policy.
+Command timeout starts after approval. Client-hosted MCP has its own policy.
 
 A client advertising `capabilities.elicitation.form` receives an additional ACP tool,
 `ask_user`. Input is `{"question":"Which environment should I use?"}`; the question
@@ -115,6 +123,79 @@ listeners are dropped before the single terminal idle; direct close responds aft
 Late replies cannot authorize work or revive an ended turn. Active resume snapshots
 `requires_action` when appropriate. ACP interactions do not implement MCP
 `input_required` or task continuation.
+
+### Native permission rules
+
+Adapted from [OpenCode v2's ordered rules](https://opencode.ai/v2/docs/permissions/),
+Bee uses TOML arrays of rules with three required string fields:
+
+```toml
+[[permissions]]
+action = "shell"
+resource = "*"
+effect = "ask"
+
+[[permissions]]
+action = "shell"
+resource = "git status *"
+effect = "allow"
+
+[[permissions]]
+action = "read"
+resource = "secrets/*"
+effect = "deny"
+```
+
+`allow` executes without contacting the client, `ask` requests a decision, and
+`deny` returns a tool failure without executing or prompting. The last matching
+rule wins within each policy. Actions and resources use whole-value wildcards:
+`*` matches any characters including `/`, `?` matches one Unicode character, and
+other characters are literal. A shell pattern ending in a space followed by `*` also matches the
+command without arguments. Shell matching uses the **complete raw command**,
+without shell parsing, compound-command splitting, or directory inference.
+
+| Tools | Action | Resource | Unmatched default |
+| --- | --- | --- | --- |
+| `bash` | `shell` | Complete command | ask |
+| `read` | `read` | Requested path | allow |
+| `list` | `list` | Requested directory | allow |
+| `glob` | `glob` | Requested glob pattern | allow |
+| `grep` | `grep` | Requested regular expression | allow |
+| `write`, `edit`, `delete` | `edit` | Requested path | ask |
+| `move` | `edit` | Source and destination | ask |
+| `copy` | `read`, `edit` | Source, destination respectively | allow, ask |
+| Custom native tools | Registered name by default | `*` by default | ask |
+
+Implementation-owned typed checks determine defaults and resources; a custom
+tool named `read` does not inherit the shipped reader's default allow. Embedders
+can override `Tool::permissions`. Several checks form one operation: any deny
+denies it, otherwise any ask requests one decision, otherwise it runs directly.
+
+Global and `BEE_CONFIG` rule arrays concatenate in that order into trusted policy.
+Project rules evaluate independently: unmatched project rules are neutral, and
+the stricter result wins (`deny > ask > allow`). A project can add restrictions
+but cannot weaken a trusted ask/deny or erase it with an empty array. Settings
+load once at launch, from the launch directory's project configuration; session
+cwd controls resource matching, not configuration discovery. Invalid rules fail
+launch with `bee::permissions::setting`, without quoting rule values.
+
+Path resources and patterns resolve `.`/`..` lexically against session cwd. Paths
+inside cwd are relative; external paths are absolute.
+Absolute and home-expanded patterns retain their directory scope and match
+against absolute requested paths, including when that scope is cwd. Windows normalizes
+backslashes to slashes and matches path resources case-insensitively. Leading
+`~`, `~/`, `$HOME`, `$HOME/` expand for path patterns, not commands or queries.
+Rules match the requested symlink spelling, not its canonical referent. Directory
+operations check their requested roots; grep/glob rules check query patterns,
+not every returned file. These are operation-routing rules, not a filesystem
+sandbox. Internal instruction discovery and skill snapshot preparation may read
+files before authorization; tool execution, result publication and skill
+activation remain gated, including the snapshot dispatch path.
+
+`ask_user` and `update_plan` keep their dedicated ACP flows. Native rules do not
+gate client-hosted MCP, infer approval from MCP errors, or persist client choices.
+Direct SDK-free registry/executor users retain caller-owned execution policy;
+embedded ACP runtimes can inject settings with `Runtime::with_permissions`.
 
 ## Client-hosted MCP tools
 
@@ -628,7 +709,8 @@ have no subsequent model request. See [turn execution limits](inference.md#turn-
 The caller supplies the session/project working directory, a cancellation token,
 and a per-result byte budget. Use `context.cwd().join(relative_path)` for relative
 paths. Bee neither changes process cwd nor canonicalizes the supplied path. This
-base directory is not a sandbox, and this contract defines no permission framework.
+base directory is not a sandbox. ACP runtimes apply the native permission routing
+above; direct registry users own their authorization boundary.
 
 `MAX_OUTPUT_BYTES` is the default ceiling of 1 MiB; pass it to `Context::new` for
 the standard budget. Custom budgets range from `MIN_OUTPUT_BYTES` (256) through

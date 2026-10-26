@@ -65,9 +65,232 @@ fn permission(outcome: &str) -> v2::RequestPermissionResponse {
     serde_json::from_value(json!({"outcome":value})).unwrap()
 }
 
+struct CustomRead(Arc<std::sync::atomic::AtomicUsize>);
+
+impl bee::tool::Tool for CustomRead {
+    type Input = bee::tool::read::Input;
+    type Output = Value;
+    fn name(&self) -> &str {
+        "read"
+    }
+    fn kind(&self) -> &'static str {
+        "read"
+    }
+    fn description(&self) -> &str {
+        "A custom tool whose name and display kind must not imply authorization"
+    }
+    fn preflight(&self, input: &Self::Input) -> Result<(), bee::tool::Failure> {
+        if input.path == "reject" {
+            return Err(bee::tool::Failure::new(
+                bee::tool::Code::InvalidArguments,
+                "Rejected by semantic preflight",
+            ));
+        }
+        Ok(())
+    }
+    async fn execute(
+        &self,
+        _: Self::Input,
+        _: &bee::tool::Context,
+    ) -> Result<Value, bee::tool::Failure> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(json!({"custom":true}))
+    }
+}
+
+#[rstest::rstest]
+#[case("write", "", "allow_always", 2, true)]
+#[case("write", "", "reject_always", 2, false)]
+#[case("write", "allow", "reject_once", 0, true)]
+#[case("write", "deny", "allow_once", 0, false)]
+#[case("read", "", "reject_once", 0, true)]
+#[case("read", "ask", "allow_always", 2, true)]
+#[case("read", "ask", "reject_always", 2, false)]
+#[case("read", "deny", "allow_once", 0, false)]
+#[case("custom", "", "allow_always", 2, true)]
+#[case("custom", "", "reject_always", 2, false)]
+#[case("invalid_custom", "", "allow_always", 0, false)]
+#[case("copy", "source_deny", "allow_once", 0, false)]
+#[case("move", "source_deny", "allow_once", 0, false)]
+#[case("copy", "source_ask", "reject_always", 2, false)]
+#[tokio::test]
+async fn native_routing_and_snapshot_reads_preserve_client_owned_always_decisions(
+    #[case] operation: &str,
+    #[case] effect: &str,
+    #[case] outcome: &'static str,
+    #[case] expected_requests: usize,
+    #[case] succeeds: bool,
+) {
+    let root = tempfile::tempdir().unwrap();
+    let skill_path = ".agents/skills/demo/SKILL.md";
+    std::fs::create_dir_all(root.path().join(".agents/skills/demo")).unwrap();
+    std::fs::write(
+        root.path().join(skill_path),
+        "---\nname: demo\ndescription: Demo skill\n---\nACTIVATED-BODY\n",
+    )
+    .unwrap();
+    let config_path = root.path().join("settings.toml");
+    std::fs::write(root.path().join("source.txt"), "source").unwrap();
+    std::fs::write(
+        &config_path,
+        if effect.starts_with("source_") {
+            format!("[[permissions]]\naction='edit'\nresource='*'\neffect='allow'\n[[permissions]]\naction='{}'\nresource='source.txt'\neffect='{}'\n", if operation == "move" { "edit" } else { "read" }, effect.strip_prefix("source_").unwrap())
+        } else if effect.is_empty() {
+            String::new()
+        } else {
+            format!("[[permissions]]\naction='*'\nresource='*'\neffect='{effect}'\n")
+        },
+    )
+    .unwrap();
+    let environment = bee::config::Environment::new(None, None, Some(config_path));
+    let config = bee::config::Config::load(&environment, root.path()).unwrap();
+    let settings = bee::permissions::Settings::from_config(&config, &environment).unwrap();
+    let sources =
+        bee::instructions::Sources::from_config(&config, &environment, root.path()).unwrap();
+    let name = match operation {
+        "write" => "write",
+        "copy" => "copy",
+        "move" => "move",
+        _ => "read",
+    };
+    let arguments = if matches!(operation, "copy" | "move") {
+        json!({"source":"source.txt","destination":"sentinel"})
+    } else if operation == "invalid_custom" {
+        json!({"path":"reject"})
+    } else if operation == "write" {
+        json!({"path":"sentinel","content":"approved","overwrite":true})
+    } else {
+        json!({"path":skill_path})
+    };
+    let server = Server::start(
+        (0..2)
+            .flat_map(|_| {
+                [
+                    Response::json(tool_call("openai-chat", name, arguments.clone())),
+                    Response::json(answer("openai-chat")),
+                ]
+            })
+            .collect(),
+    );
+    let executions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let registry = if matches!(operation, "custom" | "invalid_custom") {
+        let mut registry = bee::tool::Registry::default();
+        registry.register(CustomRead(executions.clone())).unwrap();
+        registry
+    } else {
+        bee::tool::builtins().unwrap()
+    };
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let observed = requests.clone();
+    let (tx, mut updates) = tokio::sync::mpsc::unbounded_channel();
+    let client = Client
+        .v2()
+        .on_receive_request(
+            async move |request: v2::RequestPermissionRequest,
+                        responder: Responder<v2::RequestPermissionResponse>,
+                        _| {
+                let request = serde_json::to_value(request).unwrap();
+                assert_eq!(request["subject"]["type"], "tool_call");
+                assert_eq!(request["subject"]["toolCall"]["status"], "pending");
+                assert_eq!(request["subject"]["toolCall"]["title"], name);
+                observed.lock().unwrap().push(request);
+                responder.respond(permission(outcome))
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_notification(
+            async move |update: v2::UpdateSessionNotification, _| {
+                tx.send(update).unwrap();
+                Ok(())
+            },
+            agent_client_protocol::on_receive_notification!(),
+        );
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        client.connect_with(
+            bee::acp::agent_with_runtime(
+                support::providers("openai-chat", &server.url, ""),
+                bee::acp::Runtime::new(bee::agent::Limits::default(), registry)
+                    .with_permissions(settings)
+                    .with_instructions(sources),
+            ),
+            async |connection| {
+                initialize(&connection, json!({})).await?;
+                let session = connection
+                    .send_request(v2::NewSessionRequest::new(root.path()))
+                    .block_task()
+                    .await?
+                    .session_id;
+                for _ in 0..2 {
+                    connection
+                        .send_request(v2::PromptRequest::new(
+                            session.clone(),
+                            vec!["execute".into()],
+                        ))
+                        .block_task()
+                        .await?;
+                    assert_eq!(
+                        idle(&mut updates).await.stop_reason,
+                        Some(v2::StopReason::EndTurn)
+                    );
+                }
+                Ok(())
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(requests.lock().unwrap().len(), expected_requests);
+    if matches!(operation, "write" | "copy" | "move") {
+        assert_eq!(root.path().join("sentinel").exists(), succeeds);
+    }
+    if matches!(operation, "copy" | "move") {
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("source.txt")).unwrap(),
+            "source"
+        );
+    }
+    if matches!(operation, "custom" | "invalid_custom") {
+        assert_eq!(
+            executions.load(std::sync::atomic::Ordering::SeqCst),
+            if succeeds { 2 } else { 0 }
+        );
+    }
+    for _ in 0..2 {
+        server.request();
+        let continuation = server.request().body;
+        let result = continuation["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|m| m["role"] == "tool")
+            .unwrap();
+        let output: Value = serde_json::from_str(result["content"].as_str().unwrap()).unwrap();
+        assert_eq!(output.get("error").is_none(), succeeds);
+        if operation == "read" {
+            let system = continuation["messages"][0]["content"].as_str().unwrap();
+            assert_eq!(system.contains("ACTIVATED-BODY"), succeeds);
+            if succeeds {
+                assert!(
+                    output["data"]["content"]
+                        .as_str()
+                        .unwrap()
+                        .contains("ACTIVATED-BODY")
+                );
+            }
+        }
+    }
+}
+
 #[rstest::rstest]
 #[case("allow_once")]
+#[case("allow_always")]
 #[case("reject_once")]
+#[case("reject_always")]
+#[case("allow_once ")]
+#[case("")]
 #[case("unoffered")]
 #[case("cancel")]
 #[case("unknown")]
@@ -144,7 +367,7 @@ async fn only_an_offered_bash_approval_can_create_a_file(#[case] outcome: &'stat
                     );
                     assert_eq!(
                         root.path().join("sentinel").exists(),
-                        outcome == "allow_once"
+                        matches!(outcome, "allow_once" | "allow_always")
                     );
                     let requests = requests.lock().unwrap();
                     assert_eq!(requests.len(), usize::from(outcome != "invalid"));
@@ -154,6 +377,8 @@ async fn only_an_offered_bash_approval_can_create_a_file(#[case] outcome: &'stat
                         assert_eq!(request["subject"]["toolCallId"], "tool-1-1");
                         assert_eq!(request["options"][0]["kind"], "allow_once");
                         assert_eq!(request["options"][1]["kind"], "reject_once");
+                        assert_eq!(request["options"][2]["kind"], "allow_always");
+                        assert_eq!(request["options"][3]["kind"], "reject_always");
                     }
                     Ok(())
                 },
@@ -168,7 +393,7 @@ async fn only_an_offered_bash_approval_can_create_a_file(#[case] outcome: &'stat
         assert!(!continuation.contains("CLIENT-SECRET"));
         assert_eq!(
             continuation.contains("not approved"),
-            outcome != "allow_once" && outcome != "invalid"
+            !matches!(outcome, "allow_once" | "allow_always" | "invalid")
         );
     }
 }
@@ -894,7 +1119,7 @@ impl Pending {
     fn accept(self) {
         // A response can race SDK cancellation; either result must be harmless.
         let _ = match self {
-            Self::Permission(r) => r.respond(permission("allow_once")),
+            Self::Permission(r) => r.respond(permission("allow_always")),
             Self::Form(r) => r.respond(
                 serde_json::from_value(
                     json!({"action":"accept","content":{"answer":"late-answer"}}),
@@ -906,21 +1131,22 @@ impl Pending {
 }
 
 #[rstest::rstest]
-#[case(false, false)]
-#[case(false, true)]
-#[case(true, false)]
-#[case(true, true)]
+#[case("bash")]
+#[case("write")]
+#[case("ask_user")]
 #[tokio::test]
 async fn stopping_pending_interactions_cleans_up_before_idle_and_isolates_sessions(
-    #[case] form: bool,
-    #[case] close: bool,
+    #[case] name: &str,
+    #[values(false, true)] close: bool,
     #[values(false, true)] start: bool,
 ) {
     let root = tempfile::tempdir().unwrap();
     let other_root = tempfile::tempdir().unwrap();
-    let name = if form { "ask_user" } else { "bash" };
+    let form = name == "ask_user";
     let arguments = if form {
         json!({"question":"answer?"})
+    } else if name == "write" {
+        json!({"path":"sentinel","content":"approved"})
     } else {
         json!({"command":"printf approved > sentinel"})
     };
@@ -991,6 +1217,12 @@ async fn stopping_pending_interactions_cleans_up_before_idle_and_isolates_sessio
                 let mut snapshot = updates.recv().await.unwrap().update;
                 if start {
                     assert!(matches!(snapshot, v2::SessionUpdate::ToolCallUpdate(_)));
+                    if !form {
+                        assert_eq!(
+                            serde_json::to_value(&snapshot).unwrap()["status"],
+                            "pending"
+                        );
+                    }
                     snapshot = updates.recv().await.unwrap().update;
                 }
                 assert!(matches!(

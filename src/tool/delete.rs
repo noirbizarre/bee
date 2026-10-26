@@ -27,6 +27,13 @@ pub struct Output {
 }
 
 impl Tool for Delete {
+    fn permissions(&self, input: &Input) -> Vec<crate::permissions::Check> {
+        vec![crate::permissions::Check::path(
+            "edit",
+            &input.path,
+            crate::permissions::Effect::Ask,
+        )]
+    }
     type Input = Input;
     type Output = Output;
     fn kind(&self) -> &'static str {
