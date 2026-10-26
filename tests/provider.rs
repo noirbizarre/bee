@@ -1003,16 +1003,28 @@ fn no_diagnostic_repeats_a_value_from_the_file(#[case] text: String) {
 }
 
 #[test]
-fn the_debug_output_of_providers_hides_header_values() {
+fn direct_and_enclosing_provider_debug_output_hides_configured_strings() {
     let providers = load(&format!(
-        "[providers.p]\nprotocols = {{ openai-chat = {{}} }}\nheaders = {{ \"Authorization\" = \"Bearer {SECRET}\" }}"
+        "[providers.{SECRET}]\nmodel='{SECRET}'\nmodels=['{SECRET}']\ncredential={{env='SECRET_ENV_SENTINEL'}}\nheaders = {{ \"{SECRET}\" = \"Bearer {SECRET}\" }}\n[providers.{SECRET}.protocols.anthropic-messages]\nbase_url='https://gateway.example/{SECRET}'\noptions.version='{SECRET}'"
     ))
     .unwrap();
-
-    let debug = format!("{providers:?}");
-    assert!(
-        debug.contains("Authorization"),
-        "names stay visible: {debug}"
-    );
-    assert!(!debug.contains(SECRET), "{debug}");
+    let profile = providers.get(SECRET).unwrap();
+    let endpoint = profile.preferred();
+    for debug in [
+        format!("{providers:?}"),
+        format!("{profile:?}"),
+        format!("{endpoint:?}"),
+        format!("{:?}", endpoint.options()),
+        format!("{:?}", profile.credential()),
+        format!(
+            "{:?}",
+            CredentialSource::Store {
+                login: Some(SECRET.into())
+            }
+        ),
+    ] {
+        assert!(!debug.contains(SECRET), "{debug}");
+        assert!(!debug.contains("SECRET_ENV_SENTINEL"), "{debug}");
+    }
+    assert!(format!("{endpoint:?}").contains("AnthropicMessages"));
 }
