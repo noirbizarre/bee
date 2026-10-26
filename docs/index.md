@@ -398,8 +398,10 @@ During a prompt, a missing or expired stored credential starts browser sign-in w
 the connection names a login flow and the client advertises `capabilities.elicitation.url`.
 Bee sends session-scoped `elicitation/create` with a unique ID. Accepting the URL
 means the browser interaction may proceed, not that authentication succeeded.
-Bee waits for the loopback callback, validates state, exchanges the code over HTTPS,
-and persists the credential before sending `elicitation/complete` with that same ID.
+For PKCE-key and ChatGPT callback flows, Bee waits for the loopback callback, validates state,
+and exchanges the code over HTTPS. For GitHub device login, the browser interaction presents the code to enter
+on GitHub while Bee polls for authorization; no loopback callback is needed.
+Bee persists the credential before sending `elicitation/complete` with that same ID.
 Credentials and callback/exchange secrets never enter model context.
 
 ACP browser sign-in requires Bee's private credential store, currently supported on
@@ -413,9 +415,10 @@ exchange before terminal idle; late responses cannot store a credential. A crede
 already committed before cancellation remains stored. Final store commits are
 serialized across processes using a stable sibling lock and preserve other providers.
 
-The browser must be able to reach the Bee host's loopback callback. URL capability
-does not imply that a remote client shares that host; use `bee auth login` on the
-agent host when it does not. Missing environment variables, invalid/insecure stores,
+For callback flows, the browser must be able to reach the Bee host's loopback listener. URL capability
+does not imply that a remote client shares that host; arrange secure loopback forwarding or use `bee auth login`
+on the agent host when necessary. GitHub device login can use a browser on another host without callback forwarding.
+Missing environment variables, invalid/insecure stores,
 missing login flows and unsupported URL mode remain configuration errors with CLI
 guidance. A provider's inference 401/403 does not automatically retry login or inference.
 
