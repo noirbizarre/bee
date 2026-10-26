@@ -30,8 +30,8 @@ Native Bash calls request client permission. Form-capable clients also receive
 `ask_user`; URL-capable clients can perform provider browser login. See
 [ACP user interactions](tools.md#acp-user-interactions) for capability and outcome handling.
 
-See [ACPv2 compatibility](compatibility.md) for the version baseline, automated workflow
-coverage, official TCK results and outstanding protocol gaps.
+See the [ACP / ACPv2 compatibility matrix](compatibility.md) for the complete versioned feature inventory,
+supported subsets, planned and not-planned features, implementation evidence and pinned interoperability results.
 
 Bee loads project and nested `AGENTS.md` instructions, additive `~/.agents/AGENTS.md`, and standard Agent Skills from
 project/user `.agents/skills` directories. Additional skill roots use `[skills] extra_roots = ["/opt/team/skills"]` in the
@@ -476,8 +476,8 @@ platform from the [latest release](https://github.com/noirbizarre/bee/releases/l
 ## Usage
 
 An ACPv2 client launches `bee` as a subprocess and speaks the protocol on its stdin and stdout. Stdout carries protocol
-traffic only; diagnostics go to stderr. Closing stdin ends the session and Bee exits with status 0. `bee auth` is the
-one command a person runs by hand.
+traffic only; diagnostics go to stderr. Closing stdin ends the connection and Bee exits with status 0.
+People can use `bee auth` for provider credentials and `bee models` for model discovery.
 
 ```bash
 bee --help

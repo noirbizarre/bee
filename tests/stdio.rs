@@ -804,8 +804,8 @@ fn pending_inference_can_be_stopped_over_stdio_and_the_session_recovers(#[case] 
         "[providers.test]\nmodel='test'\n[providers.test.protocols.openai-chat]\nbase_url='{}'",
         http.url
     ));
-    // Supporting interaction modes on the client does not make Bee advertise
-    // or invoke flows it has not implemented.
+    // Client interaction support does not trigger a form or login by itself:
+    // this fixture exercises cancellation while the model response is pending.
     agent.send(
         &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
             "protocolVersion":2,"info":{"name":"compatibility-test","version":"0"},

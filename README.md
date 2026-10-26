@@ -44,8 +44,8 @@ an `ask_user` tool; URL-capable clients can handle provider browser sign-in when
 stored credential is missing or expired. See [user interactions](docs/tools.md#acp-user-interactions).
 All three protocols use native wire adapters, with provider identity, model, endpoint and authentication kept separate.
 
-See [ACPv2 compatibility](docs/compatibility.md) for automated workflow coverage, pinned
-tooling, the official TCK result and unsupported protocol features.
+See the [ACP / ACPv2 compatibility matrix](docs/compatibility.md) for the complete versioned feature inventory,
+supported subsets, planned and not-planned features, implementation evidence and pinned interoperability results.
 
 Project and nested `AGENTS.md` instructions and additive `~/.agents/AGENTS.md` guide execution. Standard Agent Skills are
 discovered from project/user `.agents/skills` directories and configurable extra roots, then loaded progressively through
