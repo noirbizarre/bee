@@ -34,6 +34,9 @@ Optional Models.dev discovery enriches selection without blocking inference; pub
 listings stay separate. Explicit configuration wins over opted-in catalog protocol hints/context budgets, frozen per turn.
 Named profiles scope connection references, model preferences and durable sessions; existing connections migrate into
 the default profile in memory. Selector precedence is global, BEE_PROFILE, BEE_CONFIG file, then project configuration.
+New sessions prefer the profile's account-bound last-used model, recorded after committed successful inference;
+configured defaults remain layered preferences. Private runtime state survives restart, and unavailable automatic
+choices require explicit selection before crossing accounts. Preference-write failures warn without undoing answers.
 Project/nested AGENTS.md and additive user instructions feed a separate counted system payload. Standard Agent Skills
 use metadata-first discovery and read-based activation; semantic snapshots commit with successful history and survive
 whole-turn eviction. Typed native targets defer calls when new scoped guidance must first reach the model.
@@ -69,6 +72,7 @@ src/
 ├── acp/interactions.rs client-owned Bash authorization, form input and URL login correlation
 ├── acp/plans.rs turn-owned plan operations and standard ACP item-plan publication
 ├── session.rs  session state, free of the SDK
+├── selection.rs profile-scoped recent models, account continuity and private preference persistence
 ├── history.rs  private durable sessions, ordered JSONL journals and successful-context projections, free of the SDK
 ├── config.rs   layered XDG configuration (ADR-006), free of the SDK
 ├── provider.rs provider profiles from the configuration (ADR-007), free of the SDK

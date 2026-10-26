@@ -74,6 +74,21 @@ pub struct Credential {
 }
 
 impl Credential {
+    pub(crate) fn selection_oauth_usable(&self) -> bool {
+        // An expired renewable token is usable, but logout preserves registration identity without authority.
+        self.oauth.is_some()
+            && matches!(
+                chatgpt::store_state(self, unix_now()),
+                StoreState::LoggedIn | StoreState::Refreshable
+            )
+    }
+    pub(crate) fn selection_identity(&self) -> serde_json::Value {
+        // This value is immediately hashed by selection; never expose it through Debug.
+        match &self.oauth {
+            Some(registration) => registration.selection_identity(),
+            None => serde_json::json!(["key", self.secret.expose()]),
+        }
+    }
     /// A credential that does not expire.
     #[must_use]
     pub fn new(secret: Secret) -> Self {

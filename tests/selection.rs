@@ -2,8 +2,9 @@
 //!
 //! The provider and model a session uses are session settings the client may
 //! change; the profile's endpoint, headers and credential are configuration it
-//! may not (ADR-007). No LLM is called yet, so these pin the options and their
-//! precedence, independent of model I/O.
+//! may not (ADR-007). Wire fixtures also exercise successful-run recency.
+
+mod support;
 
 use std::fs;
 use std::future;
@@ -114,6 +115,210 @@ fn selector(options: &[v2::SessionConfigOption], id: &str) -> (String, Vec<Strin
 
 fn invalid_params(error: &Error) -> bool {
     error.code == ErrorCode::InvalidParams
+}
+
+#[rstest::rstest]
+#[case("error")]
+#[case("refusal")]
+#[case("cancel")]
+#[case("max_tokens")]
+#[case("preference_write_failure")]
+#[case("preference_lock_contention")]
+#[tokio::test]
+async fn only_committed_successful_inference_changes_recency_across_new_sessions_and_restarts(
+    #[case] outcome: &str,
+) {
+    use std::sync::Arc;
+    let root = tempfile::tempdir().unwrap();
+    let mut second = support::Response::json(support::chat_text("second answer"));
+    match outcome {
+        "error" => second.status = 500,
+        "refusal" => second.body = serde_json::json!({"choices":[{"index":0,"message":{"role":"assistant","refusal":"declined"},"finish_reason":"stop"}]}).to_string(),
+        "max_tokens" => second.body = serde_json::json!({"choices":[{"index":0,"message":{"role":"assistant","content":"partial"},"finish_reason":"length"}]}).to_string(),
+        "cancel" => second.delay = Duration::from_millis(300),
+        "preference_write_failure" | "preference_lock_contention" => {}
+        _ => unreachable!(),
+    }
+    let server = support::Server::start(vec![
+        support::Response::json(support::chat_text("first answer")),
+        second,
+    ]);
+    let profiles = support::providers("openai-chat", &server.url, "");
+    for phase in 0..3 {
+        let history = bee::history::Store::open(root.path().join("state")).unwrap();
+        let preferences = bee::selection::Store::open(&history).unwrap();
+        let runtime = bee::acp::Runtime::new(Default::default(), Default::default())
+            .with_history(history)
+            .with_preferences(preferences)
+            .with_auth(Environment::default(), Arc::new(bee::http::AsyncLoginHttp));
+        let (tx, mut updates) = tokio::sync::mpsc::unbounded_channel();
+        let client = Client.v2().on_receive_notification(
+            async move |update: v2::UpdateSessionNotification, _| {
+                tx.send(update).map_err(Error::into_internal_error)
+            },
+            agent_client_protocol::on_receive_notification!(),
+        );
+        let server = &server;
+        let cwd = root.path().to_owned();
+        tokio::time::timeout(
+            TIMEOUT,
+            client.connect_with(
+                bee::acp::agent_with_runtime(profiles.clone(), runtime),
+                async move |connection| {
+                    connection
+                        .send_request(v2::InitializeRequest::new(
+                            ProtocolVersion::V2,
+                            v2::Implementation::new("test", "0"),
+                        ))
+                        .block_task()
+                        .await?;
+                    let session = connection
+                        .send_request(v2::NewSessionRequest::new(cwd.clone()))
+                        .block_task()
+                        .await?;
+                    let expected = if phase == 0 {
+                        "private-model"
+                    } else if phase == 2 && outcome == "max_tokens" {
+                        "candidate"
+                    } else {
+                        "recent"
+                    };
+                    assert_eq!(selector(&session.config_options, "model").0, expected);
+                    if phase < 2 {
+                        let model = if phase == 0 { "recent" } else { "candidate" };
+                        set(&connection, &session.session_id, "model", model).await?;
+                        // A selector change alone must not seed the next session.
+                        let sibling = connection
+                            .send_request(v2::NewSessionRequest::new(cwd.clone()))
+                            .block_task()
+                            .await?;
+                        assert_eq!(selector(&sibling.config_options, "model").0, expected);
+                        let preference_path = cwd.join("state/model-preferences.json");
+                        let preference_lock =
+                            if phase == 1 && outcome == "preference_lock_contention" {
+                                let file = fs::OpenOptions::new()
+                                    .read(true)
+                                    .write(true)
+                                    .open(cwd.join("state/model-preferences.lock"))
+                                    .unwrap();
+                                fs2::FileExt::lock_exclusive(&file).unwrap();
+                                Some(file)
+                            } else {
+                                None
+                            };
+                        let previous_state = if phase == 1
+                            && matches!(
+                                outcome,
+                                "preference_write_failure" | "preference_lock_contention"
+                            ) {
+                            let bytes = fs::read(&preference_path).unwrap();
+                            // Corruption after startup exercises a failing second transaction without harming history.
+                            if outcome == "preference_write_failure" {
+                                fs::write(&preference_path, b"invalid-state").unwrap();
+                            }
+                            Some(bytes)
+                        } else {
+                            None
+                        };
+                        connection
+                            .send_request(v2::PromptRequest::new(
+                                session.session_id.clone(),
+                                vec!["hello".into()],
+                            ))
+                            .block_task()
+                            .await?;
+                        if phase == 1 && outcome == "cancel" {
+                            let request = server.request_async().await;
+                            assert_eq!(request.body["model"], model);
+                            connection.send_notification(v2::CancelSessionNotification::new(
+                                session.session_id.clone(),
+                            ))?;
+                        }
+                        let mut warned = false;
+                        loop {
+                            let update = updates.recv().await.unwrap();
+                            warned |= matches!(&update.update, v2::SessionUpdate::Notice(_))
+                                && serde_json::to_string(&update.update)
+                                    .unwrap()
+                                    .contains("could not be saved");
+                            if let v2::SessionUpdate::StateUpdate(v2::StateUpdate::Idle(idle)) =
+                                update.update
+                            {
+                                let reason = idle.stop_reason.unwrap();
+                                if phase == 0 {
+                                    assert_eq!(reason, v2::StopReason::EndTurn);
+                                } else {
+                                    match outcome {
+                                        "error" => {
+                                            assert!(matches!(reason, v2::StopReason::Error(_)))
+                                        }
+                                        "refusal" => assert_eq!(reason, v2::StopReason::Refusal),
+                                        "cancel" => assert_eq!(reason, v2::StopReason::Cancelled),
+                                        "max_tokens" => {
+                                            assert_eq!(reason, v2::StopReason::MaxTokens)
+                                        }
+                                        "preference_write_failure"
+                                        | "preference_lock_contention" => {
+                                            assert_eq!(reason, v2::StopReason::EndTurn)
+                                        }
+                                        _ => unreachable!(),
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                        if phase == 0 || outcome != "cancel" {
+                            assert_eq!(server.request_async().await.body["model"], model);
+                        }
+                        if let Some(previous_state) = previous_state {
+                            assert!(warned);
+                            let expected_bytes: &[u8] = if outcome == "preference_write_failure" {
+                                b"invalid-state"
+                            } else {
+                                &previous_state
+                            };
+                            assert_eq!(fs::read(&preference_path).unwrap(), expected_bytes);
+                            let fresh = connection
+                                .send_request(v2::NewSessionRequest::new(cwd.clone()))
+                                .block_task()
+                                .await?;
+                            assert_eq!(selector(&fresh.config_options, "model").0, "candidate");
+                            connection
+                                .send_request(v2::CloseSessionRequest::new(fresh.session_id))
+                                .block_task()
+                                .await?;
+                            // Restore the old valid disk state: the next process must still see its prior recency.
+                            if outcome == "preference_write_failure" {
+                                fs::write(&preference_path, previous_state).unwrap();
+                            }
+                        }
+                        drop(preference_lock);
+                        // Existing siblings never track later profile-wide recency.
+                        let resumed = connection
+                            .send_request(v2::ResumeSessionRequest::new(
+                                sibling.session_id.clone(),
+                                cwd.clone(),
+                            ))
+                            .block_task()
+                            .await?;
+                        assert_eq!(selector(&resumed.config_options, "model").0, expected);
+                        connection
+                            .send_request(v2::CloseSessionRequest::new(sibling.session_id))
+                            .block_task()
+                            .await?;
+                    }
+                    connection
+                        .send_request(v2::CloseSessionRequest::new(session.session_id))
+                        .block_task()
+                        .await?;
+                    Ok(())
+                },
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]

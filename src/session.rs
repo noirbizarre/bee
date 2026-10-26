@@ -19,6 +19,11 @@ use crate::provider::{Providers, check_model_id};
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum SessionError {
+    /// Automatic recency must not choose a different account without confirmation.
+    #[error(
+        "model selection requires confirmation; choose a provider and model explicitly over ACP before prompting"
+    )]
+    SelectionRequired,
     /// A durable session cannot import another profile's context or settings.
     #[error(
         "session belongs to a different profile; restart Bee with the session's original profile or create a new session"
@@ -183,6 +188,7 @@ struct Session {
     provider: Option<String>,
     /// The model the client chose, if it overrode the profile's.
     model: Option<String>,
+    selection_state: crate::selection::State,
     history: Vec<Message>,
 }
 
@@ -210,9 +216,142 @@ pub struct Sessions {
     by_id: HashMap<String, Session>,
     providers: Providers,
     discovery: Option<std::sync::Arc<crate::models::Service>>,
+    preferences: crate::selection::Store,
+    environment: crate::config::Environment,
 }
 
 impl Sessions {
+    pub(crate) fn with_preferences(
+        mut self,
+        preferences: crate::selection::Store,
+        environment: crate::config::Environment,
+    ) -> Self {
+        self.preferences = preferences;
+        self.environment = environment;
+        self
+    }
+
+    pub(crate) fn recent(&self) -> Option<crate::selection::Reference> {
+        self.preferences.get(self.profile_name())
+    }
+
+    pub(crate) fn selection_notice(&self, id: &str) -> Option<&'static str> {
+        match &self.by_id.get(id)?.selection_state {
+            crate::selection::State::Blocked(reason) => Some(reason.message()),
+            crate::selection::State::Automatic(reference) => reference.fallback_notice(),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn automatic(&self, id: &str) -> Option<crate::selection::Reference> {
+        match &self.by_id.get(id)?.selection_state {
+            crate::selection::State::Automatic(reference) => Some(reference.clone()),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn seed_recent(&mut self, id: &str) {
+        let (provider, model, state) = self.initial_selection();
+        let session = self.by_id.get_mut(id).expect("new session");
+        session.provider = provider;
+        session.model = model;
+        session.selection_state = state;
+    }
+
+    pub(crate) fn block_automatic(&mut self, id: &str, reason: crate::selection::Reason) {
+        if let Some(session) = self.by_id.get_mut(id)
+            && matches!(
+                session.selection_state,
+                crate::selection::State::Automatic(_)
+            )
+        {
+            // Confirmation may restore a different default model on this connection.
+            portable(&mut session.history);
+            session.model = None;
+            session.selection_state = crate::selection::State::Blocked(reason);
+        }
+    }
+
+    pub(crate) fn initial_selection(
+        &self,
+    ) -> (Option<String>, Option<String>, crate::selection::State) {
+        let Some(reference) = self.recent() else {
+            return (None, None, Default::default());
+        };
+        match crate::selection::resolve(
+            &reference,
+            &self.providers,
+            &self.environment,
+            self.discovery.as_deref(),
+        ) {
+            Ok(reference) => (
+                Some(reference.connection.clone()),
+                Some(reference.model.clone()),
+                crate::selection::State::Automatic(reference),
+            ),
+            Err(reason) => (
+                self.providers
+                    .get(&reference.connection)
+                    .map(|_| reference.connection),
+                None,
+                crate::selection::State::Blocked(reason),
+            ),
+        }
+    }
+
+    /// Reconsider automatic choices only while idle; active turns use their frozen input.
+    pub(crate) fn refresh_recent(&mut self, id: &str) -> bool {
+        if self
+            .by_id
+            .get(id)
+            .is_none_or(|session| session.active.is_some())
+        {
+            return false;
+        }
+        let Some(reference) = self.automatic(id) else {
+            return false;
+        };
+        let resolved = crate::selection::resolve(
+            &reference,
+            &self.providers,
+            &self.environment,
+            self.discovery.as_deref(),
+        );
+        let session = self.by_id.get_mut(id).expect("existing session");
+        let before = (
+            session.provider.clone(),
+            session.model.clone(),
+            session.selection_state.clone(),
+        );
+        match resolved {
+            Ok(reference) => {
+                if session.provider.as_deref() != Some(&reference.connection)
+                    || session.model.as_deref() != Some(&reference.model)
+                {
+                    portable(&mut session.history);
+                }
+                session.provider = Some(reference.connection.clone());
+                session.model = Some(reference.model.clone());
+                session.selection_state = crate::selection::State::Automatic(reference);
+            }
+            Err(reason) => {
+                portable(&mut session.history);
+                // Never retain a removed provider in the snapshot: resume must expose a selector to recover.
+                session.provider = self
+                    .providers
+                    .get(&reference.connection)
+                    .map(|_| reference.connection);
+                session.model = None;
+                session.selection_state = crate::selection::State::Blocked(reason);
+            }
+        }
+        before
+            != (
+                session.provider.clone(),
+                session.model.clone(),
+                session.selection_state.clone(),
+            )
+    }
     /// An empty registry with no provider configured.
     #[must_use]
     pub fn new() -> Self {
@@ -248,8 +387,8 @@ impl Sessions {
 
     /// The provider and model `id` would use for its next turn.
     ///
-    /// Precedence: the client's choice for this session, then the
-    /// configuration's default, then (for the provider) the only profile.
+    /// Precedence: the client's choice or the recent choice pinned at creation,
+    /// then the configuration's default, then (for the provider) the only connection.
     /// `None` when no provider is configured at all.
     ///
     /// # Errors
@@ -275,6 +414,9 @@ impl Sessions {
     /// Called under the same registry lock that registers the turn.
     pub(crate) fn inference(&self, id: &str) -> Option<InferenceInput> {
         let session = self.by_id.get(id)?;
+        if matches!(session.selection_state, crate::selection::State::Blocked(_)) {
+            return None;
+        }
         // Inference only needs the selected ID, never the potentially large
         // selector projection of every catalog model under the registry lock.
         let name = session
@@ -317,6 +459,7 @@ impl Sessions {
             return false;
         };
         if !session.open
+            || matches!(session.selection_state, crate::selection::State::Blocked(_))
             || session.model.is_some()
             || match active_token {
                 Some(token) => session
@@ -395,6 +538,11 @@ impl Sessions {
             .model
             .clone()
             .or_else(|| profile.default_model().map(str::to_owned));
+        let model = if matches!(session.selection_state, crate::selection::State::Blocked(_)) {
+            None
+        } else {
+            model
+        };
         let snapshot = self
             .discovery
             .as_ref()
@@ -438,6 +586,7 @@ impl Sessions {
             portable(&mut session.history);
         }
         session.provider = Some(name.to_owned());
+        session.selection_state = crate::selection::State::Explicit;
         Ok(())
     }
 
@@ -459,6 +608,7 @@ impl Sessions {
             portable(&mut session.history);
         }
         session.model = Some(model.to_owned());
+        session.selection_state = crate::selection::State::Explicit;
         Ok(())
     }
 
@@ -491,9 +641,11 @@ impl Sessions {
                 active: None,
                 provider: None,
                 model: None,
+                selection_state: Default::default(),
                 history: Vec::new(),
             },
         );
+        self.seed_recent(&id);
         id
     }
 
@@ -512,6 +664,9 @@ impl Sessions {
         cancel: impl FnOnce() + Send + 'static,
     ) -> Result<Turn, SessionError> {
         let session = self.open_session(id)?;
+        if matches!(session.selection_state, crate::selection::State::Blocked(_)) {
+            return Err(SessionError::SelectionRequired);
+        }
         // Refused rather than queued: two turns writing to one conversation
         // would interleave their updates, and a client cannot tell whose is whose.
         if session.active.is_some() {
@@ -559,9 +714,19 @@ impl Sessions {
         if current && let Some(session) = self.by_id.get_mut(id) {
             session.active = None;
         }
+        if current
+            && self.automatic(id).is_some()
+            && let Some(service) = &self.discovery
+        {
+            // A refresh skipped while busy must still validate remembered selection at idle.
+            service.notify();
+        }
         // Discovery deferred during a turn must be reconsidered after terminal idle.
         if self.by_id.get(id).is_some_and(|session| {
-            session.model.is_none() && session.active.is_none() && session.turns == token
+            session.model.is_none()
+                && !matches!(session.selection_state, crate::selection::State::Blocked(_))
+                && session.active.is_none()
+                && session.turns == token
         }) && let Some(profile) = self.selected_profile(id)
             && profile.default_model().is_none()
             && let Some(service) = &self.discovery
@@ -676,6 +841,7 @@ impl Sessions {
             turns: session.turns,
             provider: session.provider.clone(),
             model: session.model.clone(),
+            selection_state: session.selection_state.clone(),
             protocol: session.protocol,
             messages: session.history.clone(),
             instructions: session.instructions.clone(),
@@ -693,10 +859,11 @@ impl Sessions {
         if snapshot.profile != self.providers.profile_name() {
             return Err(SessionError::ProfileMismatch);
         }
-        if snapshot
-            .provider
-            .as_ref()
-            .is_some_and(|name| self.providers.get(name).is_none())
+        if matches!(snapshot.selection_state, crate::selection::State::Explicit)
+            && snapshot
+                .provider
+                .as_ref()
+                .is_some_and(|name| self.providers.get(name).is_none())
         {
             return Err(SessionError::ConnectionMismatch);
         }
@@ -719,8 +886,11 @@ impl Sessions {
                 finalizing: false,
                 cwd: snapshot.cwd,
                 turns: snapshot.turns,
-                provider: snapshot.provider,
+                provider: snapshot
+                    .provider
+                    .filter(|name| self.providers.get(name).is_some()),
                 model: snapshot.model,
+                selection_state: snapshot.selection_state,
                 protocol: snapshot.protocol,
                 history: snapshot.messages,
                 instructions: snapshot.instructions,
@@ -745,6 +915,7 @@ impl Sessions {
         if let Some(session) = self.by_id.get_mut(id) {
             session.provider = snapshot.provider;
             session.model = snapshot.model;
+            session.selection_state = snapshot.selection_state;
             session.history = snapshot.messages;
             session.protocol = snapshot.protocol;
             session.instructions = snapshot.instructions;

@@ -122,9 +122,16 @@ pub struct Runtime {
     discovery: Option<Arc<crate::models::Service>>,
     history: Option<crate::history::Store>,
     history_settings: crate::history::Settings,
+    preferences: crate::selection::Store,
 }
 
 impl Runtime {
+    /// Supply isolated or durable profile-scoped recent model preferences.
+    #[must_use]
+    pub fn with_preferences(mut self, store: crate::selection::Store) -> Self {
+        self.preferences = store;
+        self
+    }
     /// Supply a complete catalog, which may be empty or extended by the caller.
     pub fn new(limits: crate::agent::Limits, tools: crate::tool::Registry) -> Self {
         Self {
@@ -138,6 +145,7 @@ impl Runtime {
             discovery: None,
             history: None,
             history_settings: Default::default(),
+            preferences: Default::default(),
         }
     }
 
@@ -227,6 +235,9 @@ pub struct Reply {
     protocol: Arc<Mutex<Option<crate::provider::Protocol>>>,
     tasks: Tasks,
     completed: Arc<Mutex<Option<crate::agent::Outcome>>>,
+    used: Arc<Mutex<Option<crate::selection::Reference>>>,
+    selection_failure: Arc<Mutex<Option<crate::selection::Reason>>>,
+    preferences: crate::selection::Store,
     plan: Arc<Mutex<Option<crate::plan::Entries>>>,
     mcp: Arc<Mutex<mcp::Bindings>>,
     servers: Vec<mcp::Server>,
@@ -234,6 +245,11 @@ pub struct Reply {
 }
 
 impl Reply {
+    fn selection_failed(&self, reason: crate::selection::Reason) {
+        if lock(&self.sessions).automatic(&self.id).is_some() {
+            *lock(&self.selection_failure) = Some(reason);
+        }
+    }
     fn diagnostic(&self, diagnostic: &crate::instructions::Diagnostic) {
         let sessions = lock(&self.sessions);
         if sessions.is_current(&self.id, self.token) {
@@ -366,8 +382,15 @@ async fn inference(
                 },
             )?
         }
-        Err(error) if chatgpt => return Err(TurnFailure::new(error.to_string())),
+        Err(error) if chatgpt => {
+            if let Some(reference) = lock(&reply.sessions).automatic(&reply.id) {
+                *lock(&reply.selection_failure) =
+                    crate::selection::authentication_failure(&reference, &profile, &store);
+            }
+            return Err(TurnFailure::new(error.to_string()));
+        }
         Err(_) => {
+            reply.selection_failed(crate::selection::Reason::CredentialsUnavailable);
             return Err(TurnFailure::new(
                 "cannot resolve the model credential; check its environment variable or run `bee auth login`",
             ));
@@ -403,6 +426,30 @@ async fn inference(
         );
     }
     let crate::session::InferenceInput { profile, model, messages, cwd, instructions, selection } = reply.input.clone().ok_or_else(|| TurnFailure::new("no native model is available; refresh the connection catalogue or select a model over ACP"))?;
+    if let Some(reference) = lock(&reply.sessions).automatic(&reply.id) {
+        // Login/renewal can replace an account after the initial preference check.
+        if !reference.matches(&profile, credential.as_ref()) {
+            *lock(&reply.selection_failure) = Some(crate::selection::Reason::AccountChanged);
+            return Err(TurnFailure::new(
+                crate::selection::Reason::AccountChanged.message(),
+            ));
+        }
+        if let Some(reason) = runtime.discovery.as_ref().and_then(|service| {
+            crate::selection::unavailable(
+                &service.account_snapshot(&profile, credential.as_ref()),
+                &profile,
+                &model,
+            )
+        }) {
+            *lock(&reply.selection_failure) = Some(reason);
+            return Err(TurnFailure::new(reason.message()));
+        }
+    }
+    *lock(&reply.used) = Some(crate::selection::Reference::new(
+        &profile,
+        model.clone(),
+        credential.as_ref(),
+    ));
     *lock(&reply.protocol) = Some(selection.protocol);
     let session = if chatgpt {
         Some(
@@ -498,7 +545,12 @@ async fn inference(
         guidance,
     )
     .await
-    .map_err(|error| TurnFailure::new(error.to_string()))?;
+    .map_err(|error| {
+        if error == crate::llm::Error::Authentication {
+            reply.selection_failed(crate::selection::Reason::CredentialsUnavailable);
+        }
+        TurnFailure::new(error.to_string())
+    })?;
     if let Some(discovery) = &runtime.discovery {
         discovery.record_inference_success(
             &observed_profile,
@@ -615,6 +667,7 @@ pub fn agent_with_runtime(providers: Providers, runtime: Runtime) -> impl Connec
         environment,
         history,
         history_settings,
+        runtime.preferences.clone(),
         move |reply| inference(reply, Arc::clone(&runtime)),
     )
 }
@@ -633,6 +686,7 @@ where
         None,
         crate::config::Environment::default(),
         None,
+        Default::default(),
         Default::default(),
         body,
     )
@@ -654,6 +708,7 @@ where
         crate::config::Environment::default(),
         None,
         Default::default(),
+        Default::default(),
         body,
     )
 }
@@ -664,6 +719,7 @@ fn build<F, Fut>(
     environment: crate::config::Environment,
     history: Option<crate::history::Store>,
     history_settings: crate::history::Settings,
+    preferences: crate::selection::Store,
     body: F,
 ) -> impl ConnectTo<Client>
 where
@@ -678,7 +734,9 @@ where
         .cloned()
         .collect();
     let sessions = Arc::new(Mutex::new(
-        Sessions::with_providers(providers).with_discovery(discovery.clone()),
+        Sessions::with_providers(providers)
+            .with_discovery(discovery.clone())
+            .with_preferences(preferences.clone(), environment.clone()),
     ));
     let mcp = Arc::new(Mutex::new(mcp::Bindings::default()));
     let tasks: Tasks = Arc::default();
@@ -769,6 +827,7 @@ where
                                     let encoded =
                                         serde_json::to_value(&options).unwrap_or_default();
                                     if sent.get(&id) != Some(&encoded) {
+                                        if let Some(reason) = sessions.selection_notice(&id) { send_selection_notice(&updates, &id, reason); }
                                         let _ = send_update(
                                             &updates,
                                             &id.clone().into(),
@@ -808,10 +867,13 @@ where
                         let mcp = Arc::clone(&mcp);
                         let gates = Arc::clone(&gates);
                         let tasks = Arc::clone(&tasks);
+                        let updates = connection.clone();
                         return connection.spawn(async move {
+                            let (provider, model, selection_state) = lock(&sessions).initial_selection();
                             let snapshot = crate::history::Snapshot {
                                 profile: lock(&sessions).profile_name().to_owned(),
-                                cwd: request.cwd.into_inner(), turns: 0, provider: None, model: None,
+                                cwd: request.cwd.into_inner(), turns: 0, provider, model,
+                                selection_state,
                                 protocol: None, messages: Vec::new(), instructions: Default::default(),
                             };
                             let (id, handle) = match store.create(snapshot.clone()).await {
@@ -829,6 +891,7 @@ where
                                 return responder.respond_with_error(history_error(error));
                             }
                             let options = config_options(lock(&sessions).settings(&id).ok().flatten());
+                            selection_notice(&sessions, &updates, &id);
                             drop(_gate);
                             responder.respond(v2::NewSessionResponse::new(id).config_options(options))
                         });
@@ -839,6 +902,7 @@ where
                     sessions.initialize_native(&id, None);
                     lock(&mcp).sessions.insert(id.clone(), servers);
                     let options = config_options(sessions.settings(&id).ok().flatten());
+                    if let Some(reason) = sessions.selection_notice(&id) { send_selection_notice(&connection, &id, reason); }
                     responder.respond(v2::NewSessionResponse::new(id).config_options(options))
                 }
             },
@@ -987,6 +1051,7 @@ where
                                     interactions::phase(lock(&interactions).waiting.contains_key(&id))
                                 } else { idle(None) };
                                 let options = config_options(sessions.settings(&id).ok().flatten());
+                                if let Some(reason) = sessions.selection_notice(&id) { send_selection_notice(&updates, &id, reason); }
                                 // Release on this publication lane, before the
                                 // client can observe the snapshot/response. The
                                 // awaiting continuation may not be scheduled yet.
@@ -1003,6 +1068,7 @@ where
                             return responder.respond_with_error(session_error(error));
                         }
                         if !lock(&tasks).contains_key(&id) {
+                            sessions.refresh_recent(&id);
                             sessions.initialize_native(&id, None);
                         }
                         // Always replace, including an empty list: old routes are not authorization.
@@ -1038,6 +1104,7 @@ where
                         // Snapshot and send share the session lock so a finishing
                         // turn cannot send idle before a stale running snapshot.
                         send_update(&connection, &request.session_id, state)?;
+                        if let Some(reason) = sessions.selection_notice(&id) { send_selection_notice(&connection, &id, reason); }
                         config_options(sessions.settings(&id).ok().flatten())
                     };
                     // The protocol requires a current-state snapshot before the
@@ -1149,6 +1216,7 @@ where
                 let tasks = Arc::clone(&tasks);
                 let interactions = Arc::clone(&interactions);
                 let gates = Arc::clone(&gates);
+                let preferences = preferences.clone();
                 async move |request: v2::PromptRequest,
                             responder: Responder<v2::PromptResponse>,
                             connection: V2ConnectionTo<Client>| {
@@ -1202,6 +1270,7 @@ where
                     let mcp = Arc::clone(&mcp);
                     let interactions = Arc::clone(&interactions);
                     let body = Arc::clone(&body);
+                    let preferences = preferences.clone();
                     let updates = connection.clone();
                     connection.spawn(async move {
                     let connection = updates;
@@ -1282,6 +1351,9 @@ where
                         tasks: Arc::clone(&tasks),
                         input,
                         completed: Arc::new(Mutex::new(None)),
+                        used: Arc::new(Mutex::new(None)),
+                        selection_failure: Arc::new(Mutex::new(None)),
+                        preferences,
                         plan: Arc::new(Mutex::new(None)),
                         mcp: Arc::clone(&mcp),
                         servers,
@@ -1334,7 +1406,8 @@ async fn initialize_native(
             return Ok(());
         }
         let previous = registry.snapshot(id);
-        if !registry.initialize_native(id, active_token) {
+        let refreshed = active_token.is_none() && registry.refresh_recent(id);
+        if !registry.initialize_native(id, active_token) && !refreshed {
             return Ok(());
         }
         registry.history(id).map(|handle| {
@@ -1356,6 +1429,30 @@ async fn initialize_native(
         }
     }
     Ok(())
+}
+
+fn send_selection_notice(connection: &V2ConnectionTo<Client>, id: &str, reason: &str) {
+    let _ = send_update(
+        connection,
+        &id.to_owned().into(),
+        v2::SessionUpdate::Notice(
+            v2::Notice::new(
+                v2::NoticeSeverity::Warning,
+                "Recent model selection needs attention",
+            )
+            .description(reason),
+        ),
+    );
+}
+
+fn selection_notice(
+    sessions: &Arc<Mutex<Sessions>>,
+    connection: &V2ConnectionTo<Client>,
+    id: &str,
+) {
+    if let Some(reason) = lock(sessions).selection_notice(id) {
+        send_selection_notice(connection, id, reason);
+    }
 }
 
 async fn close_session(
@@ -1504,6 +1601,10 @@ where
     let completed = Arc::clone(&reply.completed);
     let plan = Arc::clone(&reply.plan);
     let selected_protocol = Arc::clone(&reply.protocol);
+    let used = Arc::clone(&reply.used);
+    let selection_failure = Arc::clone(&reply.selection_failure);
+    let preferences = reply.preferences.clone();
+    let grouping_profile = lock(&sessions).profile_name().to_owned();
     let interactions = Arc::clone(&reply.interactions);
     let history = lock(&sessions).history(&id);
 
@@ -1541,6 +1642,9 @@ where
     // an already durable successful context snapshot.
     let mut outcome = lock(&completed).take();
     let protocol = *lock(&selected_protocol);
+    if history.is_none() && !lock(&sessions).finalize(&id, token) {
+        stop_reason = v2::StopReason::Cancelled;
+    }
     if let Some(history) = &history {
         let snapshot = {
             let mut sessions = lock(&sessions);
@@ -1577,6 +1681,50 @@ where
         }
     }
     let durable = history.is_some();
+    let selection_failure = *lock(&selection_failure);
+    if let Some(reason) = selection_failure
+        && matches!(stop_reason, v2::StopReason::Error(_))
+        && lock(&sessions).is_current(&id, token)
+    {
+        let pending = {
+            let mut registry = lock(&sessions);
+            let previous = registry.snapshot(&id).expect("current session");
+            registry.block_automatic(&id, reason);
+            (previous, registry.snapshot(&id).expect("current session"))
+        };
+        // Terminal history is already closed; a settings event can now retain the safety guard.
+        if let Some(history) = &history
+            && history.save(pending.1).await.is_err()
+        {
+            lock(&sessions).rollback(&id, pending.0);
+        }
+        send_selection_notice(&connection, &id, reason.message());
+    }
+    if outcome
+        .as_ref()
+        .is_some_and(|outcome| outcome.stop != crate::llm::Stop::Refusal)
+        && matches!(
+            stop_reason,
+            v2::StopReason::EndTurn | v2::StopReason::MaxTokens
+        )
+        && lock(&sessions).is_current(&id, token)
+    {
+        let reference = lock(&used).take();
+        if let Some(reference) = reference {
+            // Disk work is outside the registry lock and after history commit. Failure cannot undo an answer.
+            let saved = tokio::task::spawn_blocking(move || {
+                preferences.remember(&grouping_profile, reference)
+            })
+            .await;
+            if !matches!(saved, Ok(Ok(()))) {
+                send_selection_notice(
+                    &connection,
+                    &id,
+                    "Answer completed, but the recent model preference could not be saved. Check private state-directory permissions before restarting Bee.",
+                );
+            }
+        }
+    }
     let publish = move || {
         let mut sessions = lock(&sessions);
         lock(&interactions).waiting.remove(&id);
@@ -1749,7 +1897,7 @@ fn session_error(error: SessionError) -> agent_client_protocol::Error {
         SessionError::History(error) => history_error(error),
         // A well-formed request, sent at a moment it cannot be honoured: not a
         // problem with its parameters, so not `-32602`.
-        SessionError::Busy(_) | SessionError::SettingsBusy(_) => {
+        SessionError::Busy(_) | SessionError::SettingsBusy(_) | SessionError::SelectionRequired => {
             agent_client_protocol::Error::invalid_request().data(error.to_string())
         }
         // Everything else names a session or directory the client got wrong.
@@ -1804,6 +1952,7 @@ mod gate_tests {
             Sessions::with_providers(providers).with_discovery(Some(discovery)),
         ));
         let snapshot = crate::history::Snapshot {
+            selection_state: Default::default(),
             profile: "default".into(),
             cwd: root.path().into(),
             turns: 0,

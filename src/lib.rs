@@ -27,6 +27,7 @@ mod plan;
 pub mod preset;
 mod profile;
 pub mod provider;
+pub mod selection;
 pub mod session;
 pub mod skills;
 pub mod tool;
@@ -76,8 +77,11 @@ pub fn run() -> Result<()> {
         models::Settings::from_config(&config)?,
         &environment,
     ));
+    let history = history::Store::from_environment(&environment)?;
+    let preferences = selection::Store::open(&history)?;
     let runtime_options = acp::Runtime::new(agent::Limits::from_config(&config)?, tools)
-        .with_history(history::Store::from_environment(&environment)?)
+        .with_history(history)
+        .with_preferences(preferences)
         .with_history_settings(history::Settings::from_config(&config)?)
         .with_instructions(instructions::Sources::from_config(
             &config,

@@ -168,6 +168,8 @@ pub(crate) struct Snapshot {
     pub(crate) turns: u64,
     pub(crate) provider: Option<String>,
     pub(crate) model: Option<String>,
+    #[serde(default)]
+    pub(crate) selection_state: crate::selection::State,
     pub(crate) protocol: Option<crate::provider::Protocol>,
     pub(crate) messages: Vec<crate::llm::Message>,
     pub(crate) instructions: crate::instructions::State,
@@ -201,7 +203,7 @@ pub(crate) struct Listing {
 /// Durable storage root. Cloning does not attach or authorize any session.
 #[derive(Clone, Debug)]
 pub struct Store {
-    root: PathBuf,
+    pub(crate) root: PathBuf,
 }
 
 impl Store {
@@ -391,7 +393,7 @@ fn create_directory(path: &Path) -> std::io::Result<()> {
     std::fs::DirBuilder::new().mode_private().create(path)
 }
 
-fn check_private(path: &Path, directory: bool) -> Result<()> {
+pub(crate) fn check_private(path: &Path, directory: bool) -> Result<()> {
     let metadata =
         std::fs::symlink_metadata(path).map_err(|_| error(path, "history is unavailable"))?;
     if metadata.file_type().is_symlink()
@@ -433,7 +435,7 @@ fn open_options() -> OpenOptions {
     OpenOptions::new()
 }
 
-fn open_private_file(path: &Path, create: bool, write: bool) -> Result<File> {
+pub(crate) fn open_private_file(path: &Path, create: bool, write: bool) -> Result<File> {
     if !create {
         check_private(path, false)?;
     }
@@ -448,7 +450,7 @@ fn open_private_file(path: &Path, create: bool, write: bool) -> Result<File> {
     Ok(file)
 }
 
-fn sync_directory(path: &Path) -> Result<()> {
+pub(crate) fn sync_directory(path: &Path) -> Result<()> {
     // Windows has no unprivileged directory-fsync equivalent; publication below
     // uses a write-through rename, and journal commits still use FlushFileBuffers.
     #[cfg(windows)]
@@ -465,6 +467,13 @@ fn sync_directory(path: &Path) -> Result<()> {
 fn publish_file(staging: &Path, published: &Path) -> std::io::Result<()> {
     #[cfg(windows)]
     return windows::publish_file(staging, published);
+    #[cfg(not(windows))]
+    std::fs::rename(staging, published)
+}
+
+pub(crate) fn replace_file(staging: &Path, published: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    return windows::replace_file(staging, published);
     #[cfg(not(windows))]
     std::fs::rename(staging, published)
 }
