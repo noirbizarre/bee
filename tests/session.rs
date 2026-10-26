@@ -457,6 +457,46 @@ async fn resuming_from_start_replays_full_messages_before_current_state() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn opaque_prompt_blocks_survive_memory_echo_and_repeated_start_replay() {
+    run(async |connection, mut updates| {
+        let cwd = dir("opaque-content");
+        let session = new_session(&connection, cwd.clone()).await?;
+        let content = serde_json::json!([
+            {"type":"text","text":"understood"},
+            {"type":"_vendor","text":"opaque instructions","payload":[null, {"nested":true}],"_meta":{"vendor/key":42}},
+            {"type":"future_card","payload":{"items":[1,"two"]}},
+            {"type":"resource_link","uri":"file:///reference","name":"reference"}
+        ]);
+        let accepted = connection.send_request(v2::PromptRequest::new(
+            session.clone(), serde_json::from_value(content.clone()).unwrap(),
+        )).block_task().await?;
+        let live = until_idle(&mut updates).await;
+        assert_eq!(live.len(), 4);
+        let user = serde_json::to_value(&live[0].update).unwrap();
+        assert_eq!(user["content"], content);
+        assert_eq!(user["messageId"], accepted.message_id.to_string());
+        assert!(is_running(&live[1].update));
+        let mut previous = None;
+        for _ in 0..2 {
+            let mut request = v2::ResumeSessionRequest::new(session.clone(), cwd.clone());
+            request.replay_from = Some(v2::ReplayFrom::Start(v2::ReplayFromStart::new()));
+            connection.send_request(request).block_task().await?;
+            let replay = until_idle(&mut updates).await;
+            assert_eq!(replay.len(), 3);
+            assert_eq!(serde_json::to_value(&replay[0].update).unwrap(), user);
+            let snapshot = serde_json::to_value(&replay).unwrap();
+            if let Some(previous) = &previous {
+                assert_eq!(&snapshot, previous);
+            }
+            previous = Some(snapshot);
+        }
+        prompt(&connection, &session, "next turn").await?;
+        assert_eq!(until_idle(&mut updates).await.len(), 4);
+        Ok(())
+    }).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn unsupported_replay_cursors_do_not_reopen_closed_sessions() {
     run(async |connection, mut updates| {
         let cwd = dir("a");

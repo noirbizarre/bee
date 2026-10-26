@@ -380,6 +380,110 @@ fn a_new_process_restores_native_identity_transcript_selection_and_tool_context_
 }
 
 #[test]
+fn opaque_prompts_replay_after_restart_without_entering_current_or_later_model_input() {
+    let root = tempfile::tempdir().unwrap();
+    let state = root.path().join("state");
+    let server = support::Server::start(vec![
+        support::Response::json(support::chat_text("mixed answer")),
+        support::Response::json(support::chat_text("opaque answer")),
+        support::Response::json(support::chat_text("continued answer")),
+    ]);
+    let config = format!(
+        "[providers.test]\nmodel='test'\nprotocols={{openai-chat={{base_url='{}'}}}}",
+        server.url
+    );
+    let opaque = json!({"type":"_private_card","text":"opaque-text-sentinel","payload":[null,{"command":"opaque-command-sentinel"}],"_meta":{"vendor/key":"opaque-meta-sentinel"}});
+    let future = json!({"type":"future_card_sentinel","payload":{"uri":"opaque-uri-sentinel"}});
+    let mixed = json!([
+        {"type":"text","text":"understood text","extra":"ignored-text-sentinel"},
+        opaque,
+        {"type":"resource_link","uri":"file:///reference","name":"reference","extra":"ignored-link-sentinel"},
+        future
+    ]);
+    let normalized = json!([
+        {"type":"text","text":"understood text"}, opaque,
+        {"type":"resource_link","uri":"file:///reference","name":"reference"}, future
+    ]);
+    let unknown_only = json!([future, opaque]);
+    let marker = "[Prompt contains content Bee does not understand; its contents were not sent to the model.]";
+    let projection = "understood text\n[Resource link, contents not fetched: file:///reference]";
+    let mut first = Agent::configured_with_state(&config, Some(&state));
+    first.initialize(1);
+    first
+        .send(&json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":root.path()}}));
+    let session = first.recv()["result"]["sessionId"].clone();
+    for (id, prompt, expected_echo, expected_input) in [
+        (3, mixed, normalized.clone(), projection),
+        (4, unknown_only.clone(), unknown_only.clone(), marker),
+    ] {
+        first.send(&json!({"jsonrpc":"2.0","id":id,"method":"session/prompt","params":{"sessionId":session,"prompt":prompt,"extra":"ignored-request-sentinel"}}));
+        let messages = first.until_idle();
+        let response = messages.iter().find(|message| message["id"] == id).unwrap();
+        let user = messages
+            .iter()
+            .find(|message| message["params"]["update"]["sessionUpdate"] == "user_message")
+            .unwrap();
+        assert_eq!(
+            user["params"]["update"]["messageId"],
+            response["result"]["messageId"]
+        );
+        assert_eq!(user["params"]["update"]["content"], expected_echo);
+        assert_eq!(
+            messages.last().unwrap()["params"]["update"]["stopReason"],
+            "end_turn"
+        );
+        let request = server.request();
+        let users: Vec<_> = request.body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| message["role"] == "user")
+            .collect();
+        assert_eq!(users.last().unwrap()["content"], expected_input);
+        assert_eq!(users[0]["content"], projection);
+        assert!(!request.body.to_string().contains("sentinel"));
+        assert!(!request.body.to_string().contains("_private_card"));
+    }
+    assert!(first.finish().0.success());
+
+    let mut second = Agent::configured_with_state(&config, Some(&state));
+    second.initialize(1);
+    let replay = second.resume(&session, root.path(), true);
+    let users: Vec<_> = replay
+        .iter()
+        .filter(|message| message["params"]["update"]["sessionUpdate"] == "user_message")
+        .collect();
+    assert_eq!(users.len(), 2);
+    assert_eq!(users[0]["params"]["update"]["content"], normalized);
+    assert_eq!(users[0]["params"]["update"]["messageId"], "user-1");
+    assert_eq!(users[1]["params"]["update"]["content"], unknown_only);
+    assert_eq!(users[1]["params"]["update"]["messageId"], "user-2");
+    assert_eq!(second.resume(&session, root.path(), true), replay);
+    server.assert_no_more_requests();
+
+    second.send(&json!({"jsonrpc":"2.0","id":5,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"text","text":"continue"}]}}));
+    second.until_idle();
+    let request = server.request();
+    let users: Vec<_> = request.body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|message| message["role"] == "user")
+        .collect();
+    assert_eq!(users.len(), 3);
+    assert_eq!(users[0]["content"], projection);
+    assert_eq!(users[1]["content"], marker);
+    assert_eq!(users[2]["content"], "continue");
+    let history = request.body.to_string();
+    assert!(history.contains("mixed answer"));
+    assert!(history.contains("opaque answer"));
+    assert!(!history.contains("sentinel"));
+    assert!(!history.contains("_private_card"));
+    server.assert_no_more_requests();
+    assert!(second.finish().0.success());
+}
+
+#[test]
 fn profile_ownership_isolates_history_and_models_across_process_restarts() {
     let root = tempfile::tempdir().unwrap();
     let state = root.path().join("state");
@@ -1567,6 +1671,55 @@ fn a_prompt_with_unsupported_content_gets_invalid_params_over_the_wire() {
     let (status, stderr) = agent.finish();
     assert!(status.success(), "exit status was {status}");
     assert_eq!(stderr, "");
+}
+
+#[test]
+fn invalid_and_unadvertised_content_is_rejected_before_insertion() {
+    let mut agent = Agent::spawn();
+    agent.initialize(1);
+    let session = new_session(&mut agent, 2);
+    let mut prompts = vec![json!("not an array")];
+    for block in [
+        json!(null),
+        json!(7),
+        json!([]),
+        json!({}),
+        json!({"type":null}),
+        json!({"type":42}),
+        json!({"type":"text"}),
+        json!({"type":"text","text":7}),
+        json!({"type":"image"}),
+        json!({"type":"image","data":7,"mimeType":"image/png"}),
+        json!({"type":"audio"}),
+        json!({"type":"audio","data":"aGk=","mimeType":7}),
+        json!({"type":"resource_link","uri":"file:///x"}),
+        json!({"type":"resource_link","name":"x","uri":7}),
+        json!({"type":"resource"}),
+        json!({"type":"resource","resource":7}),
+        json!({"type":"image","data":"aGk=","mimeType":"image/png"}),
+        json!({"type":"audio","data":"aGk=","mimeType":"audio/wav"}),
+        json!({"type":"resource","resource":{"uri":"file:///x","text":"hello"}}),
+        json!({"type":"resource","resource":{"uri":"file:///x","blob":"aGk="}}),
+    ] {
+        // A valid sibling must not let a malformed or unsupported block be skipped.
+        prompts.push(json!([{"type":"text","text":"must not be inserted"}, block]));
+    }
+    for (index, prompt) in prompts.into_iter().enumerate() {
+        let id = index + 3;
+        agent.send(&json!({"jsonrpc":"2.0","id":id,"method":"session/prompt","params":{"sessionId":session,"prompt":prompt}}));
+        let error = agent.recv();
+        // Reading the error first also proves no acceptance/update preceded it.
+        assert_eq!(error["id"], id, "{error}");
+        assert_eq!(error["error"]["code"], -32602, "{error}");
+    }
+    agent.send(&json!({"jsonrpc":"2.0","id":100,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"text","text":"valid"}]}}));
+    let messages = agent.until_idle();
+    assert_eq!(messages[0]["result"]["messageId"], "user-1");
+    assert_eq!(
+        messages[1]["params"]["update"]["content"],
+        json!([{"type":"text","text":"valid"}])
+    );
+    assert!(agent.finish().0.success());
 }
 
 #[test]
