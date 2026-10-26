@@ -264,7 +264,9 @@ URL-based browser login before the first model request. See
 Client-hosted [MCP tools](tools.md#client-hosted-mcp-tools) join this catalog through the ACP boundary's composite
 executor. Catalog discovery runs on each prompt; permission denials and invocation failures are correlated tool
 results. Complete MCP result/error envelopes are JSON strings in each provider's native tool-result representation.
-They resolve relative paths against the session cwd, while configuration is loaded from the launch directory.
+Native filesystem tools resolve relative paths against the session cwd, while configuration is loaded from the launch
+directory. MCP arguments are forwarded unchanged; their path resolution, working directory and filesystem authority
+belong to the client/server integration.
 Cancelling or closing a session drops pending inference and tool futures and signals native-tool cancellation tokens.
 Executors must cooperate with cancellation, and external side effects cannot be rolled back.
 Library callers can use `agent::run_with_limits` for explicit policy or `acp::Runtime` for a custom catalog and policy.
