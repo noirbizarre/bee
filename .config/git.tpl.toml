@@ -9,6 +9,7 @@ source = "https://github.com/noirbizarre/rust.tpl"
 [answers]
 archive = false
 aur = true
+aur_package_name = "bee-agent"
 author = "Axel H. <noirbizarre@gmail.com>"
 bin_name = "bee"
 categories = "command-line-utilities,development-tools"

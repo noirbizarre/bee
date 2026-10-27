@@ -5,17 +5,13 @@
 # assets, and the result is pushed to the AUR. Edit this template, never the
 # PKGBUILD in the AUR repository: that one is regenerated at every release.
 
-pkgname=bee-bin
-_pkgname=bee
+pkgname=bee-agent
 pkgver=@VERSION@
 pkgrel=1
 pkgdesc="A minimal, headless Rust agent runtime implementing ACPv2. (prebuilt binary)"
 arch=('x86_64' 'aarch64')
 url="https://github.com/noirbizarre/bee"
 license=('MIT')
-
-provides=("$_pkgname=$pkgver")
-conflicts=("$_pkgname")
 
 # !strip because the release profile already sets `strip = true`, and !debug
 # for the same reason: there is no debug data left to split into a -debug
@@ -49,3 +45,8 @@ package() {
 # `depends=(...)` belongs here once `namcap` on a built package says what the
 # binary actually links: a vendored dependency needs nothing declared, a
 # dynamically linked one (a system OpenSSL, for example) does.
+
+# These unrelated packages install the same /usr/bin/bee executable.
+conflicts=('bee' 'bee-bin')
+# namcap detects glibc/libgcc linkage; native tool execution also invokes Bash.
+depends=('glibc' 'libgcc' 'bash')

@@ -52,10 +52,11 @@ brew install noirbizarre/homebrew-tap/bee
 The formula supports Intel/Apple Silicon macOS and x86-64 Linux (musl asset); it does not currently provide Linux ARM64.
 
 ```bash
-paru -S bee-bin
+paru -S bee-agent
 ```
 
-The AUR package supports x86-64 and ARM64 Linux using GNU assets. Use your preferred AUR helper or review/build the
+The `bee-agent` AUR package installs the `bee` command and supports x86-64 and ARM64 Linux using GNU assets.
+Use your preferred AUR helper or review/build the
 PKGBUILD manually. Package publication follows the core GitHub release, so availability can lag that release.
 
 ## From source
