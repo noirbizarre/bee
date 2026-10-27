@@ -2,14 +2,14 @@
 
 ## Setup
 
-The toolchain is managed by [mise](https://mise.jdx.dev/); every tool is pinned
-to an exact build in `mise.lock`, so a local run and a CI run use the same
-versions.
+Development tools are managed by [mise](https://mise.jdx.dev/), with resolved
+versions in `mise.lock`. Rust selects the moving stable channel separately;
+the documentation application currently runs through unversioned `uvx zensical`.
 
 ```bash
 mise install          # the tools
 prek install          # the Git hooks
-mise run ci           # everything CI runs
+mise run ci           # local checks, tests and documentation build
 ```
 
 Rust itself is not managed by mise: `rust-toolchain.toml` pins the channel, and
@@ -72,6 +72,9 @@ reporting `changed: false`.
 `gh ship validate` runs on every pull request, so a broken release contract
 fails on the PR rather than mid-release.
 
+See the [release-readiness runbook](docs/releasing.md) for platform and asset checks,
+verification coverage, and external release gates.
+
 ### Repository requirements
 
 The release jobs authenticate as a GitHub App, not with `GITHUB_TOKEN` — the
@@ -103,9 +106,9 @@ git tpl merge          # take it
 `tpl:update` is safe to run at any time: it only advances the rendered ref.
 Nothing reaches your branch until the merge.
 
-Requires git-tpl on your PATH (`cargo install git-tpl`). It is not declared in
-`mise.toml`'s `[tools]` on purpose — it vendors libgit2, so a global entry
-would make every CI job compile a tool no CI job runs.
+git-tpl is declared in `mise.toml`'s `[tools]`; `mise install` installs it using
+its prebuilt release metadata through cargo-binstall. A separate manual source
+installation is not required.
 
 Files carrying template-owned content — `mise.toml`, `prek.toml`, `Cargo.toml` —
 end with a `# --- project-specific ---` marker. Add below it; Git's 3-way merge

@@ -510,7 +510,8 @@ Incoming batch handling and unknown initialization fields also pass their pinned
 The fixture still does not produce permission, elicitation, tool-update, terminal or plan scenarios;
 those paths are skipped or outside this TCK run's coverage. Bee's own suites cover its implemented interactions
 and item plans. The newer specification's unknown-content fallback requirement is not established by this
-older TCK's passing extensibility checks; the matrix records the #83 gap explicitly.
+older TCK's passing extensibility checks. The current matrix above records Bee's implemented unknown-content
+preservation separately from this historical TCK result.
 The local JSON report was written to `/tmp/bee-acp-tck.json`; it can be regenerated with the command above.
 
 ### Recorded result — 2026-10-25

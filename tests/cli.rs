@@ -8,12 +8,80 @@ fn bee() -> Command {
 }
 
 #[test]
-fn the_version_flag_names_the_binary() {
-    bee()
-        .arg("--version")
-        .assert()
-        .success()
-        .stdout(predicate::str::starts_with("bee "));
+fn version_aliases_report_the_package_version_without_loading_configuration() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("selected.toml");
+    std::fs::write(&config, format!("invalid = {SECRET}")).unwrap();
+    for flag in ["--version", "-V"] {
+        isolated(dir.path())
+            .env("BEE_CONFIG", &config)
+            .arg(flag)
+            .assert()
+            .success()
+            .stdout(format!("bee {}\n", env!("CARGO_PKG_VERSION")))
+            .stderr(predicate::str::is_empty());
+    }
+}
+
+#[test]
+fn help_for_every_command_is_available_before_configuration_is_loaded() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("selected.toml");
+    std::fs::write(&config, format!("invalid = {SECRET}")).unwrap();
+    // Help must also work for a missing selected file so it can explain how to repair a broken launch.
+    for selected in [config, dir.path().join("absent.toml")] {
+        for command in [
+            vec![],
+            vec!["auth"],
+            vec!["auth", "login"],
+            vec!["auth", "logout"],
+            vec!["auth", "status"],
+            vec!["models"],
+            vec!["models", "providers"],
+            vec!["models", "list"],
+            vec!["models", "refresh"],
+        ] {
+            for flag in ["--help", "-h"] {
+                isolated(dir.path())
+                    .env("BEE_CONFIG", &selected)
+                    .args(&command)
+                    .arg(flag)
+                    .assert()
+                    .success()
+                    .stdout(predicate::str::contains("Usage:"))
+                    .stdout(predicate::str::contains(SECRET).not())
+                    .stderr(predicate::str::is_empty());
+            }
+        }
+    }
+}
+
+#[test]
+fn invalid_arguments_and_conflicting_flags_exit_before_protocol_startup() {
+    let dir = tempfile::tempdir().unwrap();
+    for args in [
+        vec!["unknown-command"],
+        vec!["--unknown-option"],
+        vec!["auth", "login", "--with-token", "--paste-code"],
+        vec!["auth", "login", "--with-token", "--no-browser"],
+        vec!["auth", "login", "--paste-code", "--no-browser"],
+        vec!["models", "list", "local", "--catalog-provider", "openai"],
+        vec![
+            "models",
+            "list",
+            "--catalog-provider",
+            "openai",
+            "--endpoint",
+        ],
+    ] {
+        isolated(dir.path())
+            .args(args)
+            .assert()
+            .code(2)
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::contains("error:"))
+            .stderr(predicate::str::contains("--help"));
+    }
 }
 
 #[test]
@@ -240,9 +308,12 @@ fn a_missing_bee_config_file_fails_startup() {
         .env("BEE_CONFIG", dir.path().join("absent.toml"))
         .write_stdin("")
         .assert()
-        .failure()
+        .code(1)
         .stdout(predicate::str::is_empty())
-        .stderr(predicate::str::contains("bee::config::selected_missing"));
+        .stderr(predicate::str::contains("bee::config::selected_missing"))
+        .stderr(predicate::str::contains("absent.toml"))
+        .stderr(predicate::str::contains("create the file, fix the path"))
+        .stderr(predicate::str::contains("BEE_CONFIG"));
 }
 
 #[test]

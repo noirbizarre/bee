@@ -364,7 +364,8 @@ See [ADR-014](adr/014-conversation-context-and-token-limits.md) for the design d
 
 ## Chat Completions manual smoke test
 
-Use an ACPv2 client to launch `bee` from a directory with this configuration, supplying your own key and a model that
+Save this configuration as `.config/bee.toml` and use an ACPv2 client to launch `bee` from its containing workspace,
+supplying your own key and a model that
 supports Chat Completions. The example deliberately selects Chat even if a preset's default is Responses:
 
 ```toml
@@ -375,7 +376,9 @@ model = "YOUR_CHAT_MODEL_ID"
 timeout_ms = 120000
 ```
 
-1. Supply `OPENAI_API_KEY` in the client's launch environment, or configure a stored credential with `bee auth login`.
+1. Supply `OPENAI_API_KEY` in the client's launch environment. Alternatively, on Unix add
+   `credential = { store = true }` under `[providers.smoke]`, then run `bee auth login smoke --with-token`
+   with the token supplied through standard input. Login alone does not change an environment-backed credential reference.
 2. Initialize, create a session and prompt for a short answer. Expect running, streamed text, then idle/end-turn.
 3. Ask a follow-up referring to the answer. Check that context is retained.
 4. Submit a longer prompt and cancel after output begins. Expect exactly one cancelled idle and no later chunks.

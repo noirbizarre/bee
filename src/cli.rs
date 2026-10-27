@@ -24,7 +24,7 @@ pub struct Cli {
     #[arg(long, value_parser = scenario_parser())]
     pub scenario: Option<bee::scenario::Scenario>,
 
-    /// Increase verbosity. Repeat for more.
+    /// Show detailed diagnostics.
     #[arg(short, long, global = true, action = clap::ArgAction::Count)]
     pub verbose: u8,
 
@@ -50,7 +50,7 @@ pub enum Command {
     /// Discover model IDs and metadata without making the catalog an allowlist.
     #[command(subcommand)]
     Models(ModelsCommand),
-    /// Manage the credentials of provider profiles.
+    /// Manage the credentials of provider connections.
     #[command(subcommand)]
     Auth(AuthCommand),
 }

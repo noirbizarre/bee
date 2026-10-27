@@ -25,9 +25,10 @@ loop and LLM provider integration, allowing it to work with any compatible ACPv2
 
 ## Status
 
-Bee is at the **bootstrap stage**. The repository, tooling, CI and release automation are in place, and the `bee`
-binary serves ACPv2 over stdio: a client can start it, complete the `initialize` handshake, create sessions and submit
-prompts. Bee advertises the baseline session lifecycle (`session/new`, `list`, `resume`, `close`, `prompt`, `cancel`).
+Bee implements a standalone headless agent runtime for its initial **0.1.0 release**. The `bee`
+binary serves draft ACP wire-v2 over stdio: a compatible client can start it, complete the `initialize` handshake,
+create sessions and submit prompts. Bee advertises the baseline session lifecycle
+(`session/new`, `list`, `resume`, `close`, `prompt`, `cancel`).
 
 **Chat Completions, Responses and Anthropic Messages inference are implemented.** Prompts stream responses from the
 selected endpoint. Turns can be cancelled or closed, and another prompt is refused until the session is idle. Context is
@@ -52,7 +53,9 @@ Project and nested `AGENTS.md` instructions and additive `~/.agents/AGENTS.md` g
 discovered from project/user `.agents/skills` directories and configurable extra roots, then loaded progressively through
 the native tools. See [instructions and skills](docs/instructions.md) for scope and precedence.
 
-The "Scope" and "Non-goals" sections describe the intended design, not current behaviour.
+Start with [installation](docs/installation.md) and the [first-use guide](docs/getting-started.md).
+Wire-v1 interoperability is not implemented. See [known limitations](docs/getting-started.md#known-limitations)
+before configuring a client.
 
 ## Configuration
 
@@ -68,7 +71,9 @@ See [test-agent scenarios](docs/scenarios.md) for launch examples and client int
 Bee merges up to three TOML files, lowest precedence first: the global
 `$XDG_CONFIG_HOME/bee/config.toml` (or `~/.config/bee/config.toml`, on every platform), the file named by
 `BEE_CONFIG`, and the project's `.config/bee.toml`. Tables merge key by key, higher layers win for scalars, and arrays
-are replaced rather than extended. A malformed or unreadable file, or a missing `BEE_CONFIG` file, stops Bee at launch
+are replaced rather than extended. Effective [permission rules](docs/tools.md#native-permission-rules) are an exception:
+trusted global and `BEE_CONFIG` rules concatenate, and project rules can only tighten decisions.
+A malformed or unreadable file, or a missing `BEE_CONFIG` file, stops Bee at launch
 with an actionable error that never repeats the file's contents. Provider connections (`[providers.<name>]`: the protocols
 the provider speaks, each with its base URL and options, plus model, credential reference and headers) are validated and
 selectable per ACPv2 session. An optional `model_protocols = { "vendor/model.v2" = "openai-responses" }` table
@@ -102,7 +107,7 @@ authorization is a separate audience and is not implemented. Credentials are res
 ## Scope
 
 Bee is meant to be the agent side of an ACPv2 connection: it runs the agentic loop and talks to LLM providers, and
-leaves everything about presentation and orchestration to the client. The planned boundaries are:
+leaves everything about presentation and orchestration to the client. Its responsibilities are:
 
 - ACPv2 protocol integration
 - agent execution and the agentic loop
@@ -122,7 +127,7 @@ handling are implemented. Richer observability remains future work.
 - MCP configuration and orchestration are not Bee-specific responsibilities. Bee should use the capabilities provided
   through the ACPv2 client-agent contract, where the protocol supports them.
 - WebAssembly-based extensions are a possible future direction, not an initial requirement.
-- Bee does not assume ACPv2 provides a universal implementation of provider authentication. Each browser sign-in is a
+- Bee does not assume ACPv2 provides a universal implementation of provider authentication. Each browser sign-in is
   described in data and limited to one mechanism, not a generic OAuth client.
 
 ## Installation
@@ -143,6 +148,8 @@ Or download a binary for your platform from the
 
 The Homebrew and AUR packages only exist once the first release has been published.
 
+See [installation](docs/installation.md) for platform selection, checksum verification and building from source.
+
 ## Usage
 
 An ACPv2 client launches `bee` as a subprocess and speaks the protocol on its stdin and stdout. Stdout carries protocol
@@ -152,6 +159,9 @@ traffic only; diagnostics go to stderr. Closing stdin ends the session.
 bee --help
 bee --version
 ```
+
+Follow the [first-use guide](docs/getting-started.md) to configure a provider, pass credentials through the client's
+environment and launch Bee. See the [CLI reference](docs/cli.md) for commands and troubleshooting.
 
 ## Documentation
 

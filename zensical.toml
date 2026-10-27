@@ -21,6 +21,10 @@ Copyright &copy; 2026 Axel H. — MIT licensed
 # meaningfully conflict with additions here.
 nav = [
   { "Home" = "index.md" },
+  { "Getting started" = "getting-started.md" },
+  { "Installation" = "installation.md" },
+  { "CLI and troubleshooting" = "cli.md" },
+  { "Inference" = "inference.md" },
   { "Profiles" = "profiles.md" },
   { "Tools" = "tools.md" },
   { "Session history" = "sessions.md" },
@@ -29,6 +33,7 @@ nav = [
   { "Test-agent scenarios" = "scenarios.md" },
   { "Instructions and skills" = "instructions.md" },
   { "About" = [
+    { "Releasing" = "releasing.md" },
     { "Architecture Decisions" = "adr/README.md" },
   ] },
 ]
