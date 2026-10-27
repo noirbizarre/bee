@@ -264,16 +264,23 @@ URL-based browser login before the first model request. See
 Client-hosted [MCP tools](tools.md#client-hosted-mcp-tools) join this catalog through the ACP boundary's composite
 executor. Catalog discovery runs on each prompt; permission denials and invocation failures are correlated tool
 results. Complete MCP result/error envelopes are JSON strings in each provider's native tool-result representation.
-They resolve relative paths against the session cwd, while configuration is loaded from the launch directory.
+Native filesystem tools resolve relative paths against the session cwd, while configuration is loaded from the launch
+directory. MCP arguments are forwarded unchanged; their path resolution, working directory and filesystem authority
+belong to the client/server integration.
 Cancelling or closing a session drops pending inference and tool futures and signals native-tool cancellation tokens.
 Executors must cooperate with cancellation, and external side effects cannot be rolled back.
 Library callers can use `agent::run_with_limits` for explicit policy or `acp::Runtime` for a custom catalog and policy.
 
 ## Conversation context and token budgets
 
-Each accepted ACP prompt becomes one user message: text blocks and resource-link descriptions are joined in order
+Each accepted ACP prompt projects to one model user message: text blocks and resource-link descriptions are joined in order
 with newlines. Links are represented as `[Resource link, contents not fetched: URI]`; Bee does not fetch their contents.
-Unsupported block types are rejected before the turn starts. Successful history includes assistant text, complete
+Known but unadvertised image, audio and embedded-resource blocks are rejected before the turn starts. Schema-valid
+unknown/custom envelopes are accepted, echoed and retained opaquely in visible history, including durable replay,
+without sending their payloads to the model. Mixed prompts project only understood blocks; unknown-only prompts use
+the fixed marker `[Prompt contains content Bee does not understand; its contents were not sent to the model.]`.
+See the [content compatibility contract](compatibility.md#content-blocks).
+Successful history includes assistant text, complete
 function calls, their correlated results and any protocol-native continuation. Output-limited answers are retained;
 failed, cancelled, refused and context-exhausted turns are not.
 

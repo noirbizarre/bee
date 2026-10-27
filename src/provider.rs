@@ -149,11 +149,9 @@ impl Protocol {
 ///
 /// Only a reference: resolving it, and any secret handling, is `auth`'s
 /// (ADR-008). It says *where* the secret is, never how a request presents it:
-/// that is the protocol's business. Adding a source kind later is a new variant
-/// and a new accepted key.
-// `Debug` is safe to derive: the payloads are a variable *name* (which
-// validation guarantees is not a pasted key) and a flow name.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// that depends on the protocol and native authentication mode. Adding a source
+/// kind later is a new variant and a new accepted key.
+#[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CredentialSource {
     /// The environment variable with this name.
@@ -165,6 +163,15 @@ pub enum CredentialSource {
         /// be stored.
         login: Option<String>,
     },
+}
+
+impl fmt::Debug for CredentialSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Even references are user-configured strings, not safe diagnostic material.
+        f.debug_tuple("CredentialSource")
+            .field(&self.kind())
+            .finish()
+    }
 }
 
 impl CredentialSource {
@@ -193,7 +200,7 @@ pub enum MaxTokensField {
 ///
 /// Typed per protocol, so an option for one backend cannot be given to a
 /// profile that uses the other.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ProtocolOptions {
     /// For [`Protocol::OpenAiChat`].
@@ -217,6 +224,36 @@ pub enum ProtocolOptions {
         /// Explicit opt-in to Anthropic cache writes.
         cache: AnthropicCache,
     },
+}
+
+impl fmt::Debug for ProtocolOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::OpenAiChat {
+                max_tokens_field,
+                cache,
+            } => f
+                .debug_struct("OpenAiChat")
+                .field("max_tokens_field", max_tokens_field)
+                .field("cache", cache)
+                .finish(),
+            Self::OpenAiResponses { cache } => f
+                .debug_struct("OpenAiResponses")
+                .field("cache", cache)
+                .finish(),
+            Self::AnthropicMessages {
+                version,
+                max_tokens,
+                cache,
+            } => f
+                .debug_struct("AnthropicMessages")
+                // A version can contain any accepted text, including an accidentally pasted secret.
+                .field("has_version", &version.is_some())
+                .field("has_max_tokens", &max_tokens.is_some())
+                .field("cache", cache)
+                .finish(),
+        }
+    }
 }
 
 impl ProtocolOptions {
@@ -260,11 +297,22 @@ impl ProtocolOptions {
 /// The unit a backend is handed: the URL and the options belong to the
 /// protocol, since a provider that serves two usually serves them from two
 /// places.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Endpoint {
     protocol: Protocol,
     base_url: String,
     options: ProtocolOptions,
+}
+
+impl fmt::Debug for Endpoint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Gateway paths may carry credentials even when URL userinfo is forbidden.
+        f.debug_struct("Endpoint")
+            .field("protocol", &self.protocol)
+            .field("base_url", &"[redacted]")
+            .field("options", &self.options)
+            .finish()
+    }
 }
 
 impl Endpoint {
@@ -317,28 +365,18 @@ pub struct Profile {
     model_metadata: BTreeMap<String, crate::models::Metadata>,
 }
 
-// Written by hand: header values are routinely secrets (`Authorization`), and
-// a derived `Debug` would print them into assertion failures and logs. Names
-// and the credential's *kind* are enough to debug a configuration.
+// Configuration strings can contain secrets regardless of the field's intended purpose.
 impl fmt::Debug for Profile {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Profile")
-            .field("name", &self.name)
             .field("endpoints", &self.endpoints)
-            .field("model", &self.model)
-            .field("models", &self.models)
+            .field("has_model", &self.model.is_some())
+            .field("model_count", &self.models.len())
             .field(
                 "credential",
                 &self.credential.as_ref().map(CredentialSource::kind),
             )
-            .field(
-                "header_names",
-                &self
-                    .headers
-                    .iter()
-                    .map(|(name, _)| name)
-                    .collect::<Vec<_>>(),
-            )
+            .field("header_count", &self.headers.len())
             .finish()
     }
 }
@@ -535,12 +573,22 @@ impl Profile {
 }
 
 /// The active grouping profile's connections and default connection.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Providers {
     pub(crate) profiles: BTreeMap<String, Profile>,
     // Always names a profile, and is `Some` whenever there is one.
     pub(crate) default: Option<String>,
     pub(crate) profile_name: String,
+}
+
+impl fmt::Debug for Providers {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Map keys and selected names are configuration values too; format only their structure.
+        f.debug_struct("Providers")
+            .field("profiles", &self.profiles.values().collect::<Vec<_>>())
+            .field("has_default", &self.default.is_some())
+            .finish()
+    }
 }
 
 impl Default for Providers {

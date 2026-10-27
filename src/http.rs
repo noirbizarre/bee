@@ -146,6 +146,12 @@ impl InferenceHttp {
         match response.status().as_u16() {
             200..=299 => {}
             status => {
+                // Optional diagnostic content must not change status-based recovery semantics.
+                let fallback = match status {
+                    401 | 403 => Error::Authentication,
+                    429 => Error::RateLimit,
+                    _ => Error::Http(status),
+                };
                 // Error bodies can contain credentials or prompts; inspect a bounded
                 // prefix privately and retain the status when classification is unknown.
                 let mut stream = response.bytes_stream();
@@ -153,7 +159,7 @@ impl InferenceHttp {
                 while let Some(chunk) = stream.next().await {
                     let chunk = chunk.map_err(transport_error)?;
                     if bytes.len().saturating_add(chunk.len()) > 64 * 1024 {
-                        return Err(Error::Http(status));
+                        return Err(fallback);
                     }
                     bytes.extend_from_slice(&chunk);
                 }
@@ -163,11 +169,7 @@ impl InferenceHttp {
                         return Err(error);
                     }
                 }
-                return Err(match status {
-                    401 | 403 => Error::Authentication,
-                    429 => Error::RateLimit,
-                    _ => Error::Http(status),
-                });
+                return Err(fallback);
             }
         }
         let streaming = response

@@ -26,6 +26,9 @@ struct Anchor {
 struct Staging<'a> {
     directory: Option<tempfile::TempDir>,
     context: &'a Context,
+    // Open handles let failed publication restore cleanup access even after a mode removes it.
+    #[cfg(unix)]
+    directories: Vec<(File, u32)>,
 }
 
 impl Staging<'_> {
@@ -37,6 +40,12 @@ impl Staging<'_> {
 impl Drop for Staging<'_> {
     fn drop(&mut self) {
         if let Some(directory) = self.directory.take() {
+            #[cfg(unix)]
+            for (file, _) in &self.directories {
+                use std::os::unix::fs::PermissionsExt;
+                // These handles only name unpublished staging entries, never the committed tree.
+                let _ = file.set_permissions(std::fs::Permissions::from_mode(0o700));
+            }
             let path = directory.path().to_path_buf();
             if directory.close().is_err() {
                 // Cancellation may skip ordinary results, so preserve actual cleanup failures as observations.
@@ -713,7 +722,11 @@ impl Manifest {
         let staging = Staging {
             directory: Some(staging),
             context,
+            #[cfg(unix)]
+            directories: Vec::new(),
         };
+        #[cfg(unix)]
+        let mut staging = staging;
         let root = staging.path().join("content");
         let mut copied = 0_u64;
         for entry in &self.entries {
@@ -722,6 +735,11 @@ impl Manifest {
             let target = under(&root, &entry.relative);
             if entry.original.directory {
                 std::fs::create_dir(&target).map_err(mutation::io)?;
+                #[cfg(unix)]
+                staging.directories.push((
+                    File::open(&target).map_err(mutation::io)?,
+                    (entry.original.key[2] & 0o777) as u32,
+                ));
             } else {
                 let mut input = entry.reader()?;
                 let mut output = std::fs::OpenOptions::new()
@@ -759,6 +777,14 @@ impl Manifest {
         }
         self.validate()?;
         mutation::check(context)?;
+        #[cfg(unix)]
+        for (directory, mode) in staging.directories.iter().rev() {
+            use std::os::unix::fs::PermissionsExt;
+            // Postorder keeps descendants writable during construction without widening published access.
+            directory
+                .set_permissions(std::fs::Permissions::from_mode(*mode))
+                .map_err(mutation::io)?;
+        }
         // No await between final validation, atomic publication, and committed receipts.
         let staging_parent = Anchor::open(staging.path())?;
         let destination_parent = Anchor::open(parent)?;
@@ -768,6 +794,8 @@ impl Manifest {
             &destination_parent,
             destination.file_name().ok_or_else(unsupported)?,
         )?;
+        #[cfg(unix)]
+        staging.directories.clear();
         self.receipts(context, "copy")?;
         Ok(self.entries.len())
     }
@@ -929,6 +957,70 @@ mod tests {
             super::super::MAX_OUTPUT_BYTES,
         )
         .unwrap()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn recursive_copy_preserves_private_directory_modes_and_cleans_failed_publication() {
+        use std::os::unix::fs::PermissionsExt;
+        for publish in [true, false] {
+            let root = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(root.path().join("source/nested")).unwrap();
+            std::fs::write(root.path().join("source/nested/file"), "private").unwrap();
+            for (path, mode) in [("source", 0o700), ("source/nested", 0o500)] {
+                std::fs::set_permissions(
+                    root.path().join(path),
+                    std::fs::Permissions::from_mode(mode),
+                )
+                .unwrap();
+            }
+            let context = context(&root);
+            let manifest =
+                Manifest::prepare(&context, "source", Some("copy"), true, "copy").unwrap();
+            if !publish {
+                // Force failure after staging modes have been restored, without racing a task.
+                std::fs::write(root.path().join("copy"), "untouched").unwrap();
+            }
+            let result = manifest.copy(&context).await;
+            if publish {
+                assert_eq!(result.unwrap(), 3);
+                for (path, mode) in [("copy", 0o700), ("copy/nested", 0o500)] {
+                    assert_eq!(
+                        std::fs::metadata(root.path().join(path))
+                            .unwrap()
+                            .permissions()
+                            .mode()
+                            & 0o7777,
+                        mode,
+                    );
+                }
+                assert_eq!(
+                    std::fs::read(root.path().join("copy/nested/file")).unwrap(),
+                    b"private"
+                );
+                std::fs::set_permissions(
+                    root.path().join("copy/nested"),
+                    std::fs::Permissions::from_mode(0o700),
+                )
+                .unwrap();
+            } else {
+                assert!(result.is_err());
+                assert_eq!(
+                    std::fs::read(root.path().join("copy")).unwrap(),
+                    b"untouched"
+                );
+            }
+            assert_eq!(
+                std::fs::read_dir(root.path()).unwrap().count(),
+                2,
+                "no staging remains"
+            );
+            std::fs::set_permissions(
+                root.path().join("source/nested"),
+                std::fs::Permissions::from_mode(0o700),
+            )
+            .unwrap();
+        }
     }
 
     #[cfg(windows)]

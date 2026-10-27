@@ -8,11 +8,13 @@
 //! - [`CredentialStore`] and [`FileStore`]: where `bee auth login` keeps what
 //!   it obtains, in a private file.
 //! - [`resolve`]: fixed-credential lookup; [`chatgpt`] owns renewable sessions.
-//! - [`header_for`]: how a protocol presents that secret.
+//! - [`header_for`]: the ordinary protocol defaults for presenting that secret.
 //!
 //! Authentication is configured apart from the protocol and the models: a
-//! profile may use any protocol with any source, and the protocol only decides
-//! how the resolved secret is *presented*. LLM provider credentials and MCP
+//! profile may use any protocol with any source. Protocols supply default secret
+//! presentation; native authentication can override it. In particular, Copilot
+//! uses bearer authentication across all three protocols, including Messages.
+//! LLM provider credentials and MCP
 //! server authorization are different audiences and are stored apart
 //! ([`Audience`]), so a token for one can never be returned for the other. See
 //! ADR-008.
@@ -36,6 +38,8 @@ pub mod copilot;
 
 /// The version of the credential file's layout.
 const STORE_VERSION: u64 = 1;
+// Publication and bounded reads must agree, or one successful login can disable every account.
+const MAX_STORE_BYTES: usize = 4 * 1024 * 1024;
 
 /// A credential that cannot be printed by accident.
 ///
@@ -288,10 +292,14 @@ impl FileStore {
         let Some(bytes) = platform::read_private(&self.path)? else {
             return Ok(Document::default());
         };
+        self.parse(&bytes)
+    }
+
+    fn parse(&self, bytes: &[u8]) -> Result<Document> {
         // `Value`, not a derived type: serde's type errors quote the offending
         // value, and this file is full of secrets. Syntax errors only say what
         // was expected, and are reduced to a category and a position anyway.
-        let root: Value = serde_json::from_slice(&bytes).map_err(|error| {
+        let root: Value = serde_json::from_slice(bytes).map_err(|error| {
             let what = match error.classify() {
                 serde_json::error::Category::Eof => "the file ends unexpectedly",
                 _ => "the file is not valid JSON",
@@ -456,6 +464,12 @@ impl FileStore {
         let mut bytes = serde_json::to_vec_pretty(&Value::Object(root))
             .map_err(|_| self.parse_error("the credentials could not be serialized"))?;
         bytes.push(b'\n');
+        if bytes.len() > MAX_STORE_BYTES {
+            return Err(self.parse_error("credential file is too large"));
+        }
+        // Use the actual reader schema before replacement, including OAuth's empty-token states.
+        // This also rejects invalid public CredentialStore::put inputs without corrupting other accounts.
+        self.parse(&bytes)?;
         platform::write_private(&self.path, &bytes)
     }
 }
@@ -597,13 +611,13 @@ mod platform {
         }
         let mut bytes = Vec::new();
         std::io::Read::by_ref(&mut file)
-            .take(4 * 1024 * 1024 + 1)
+            .take(super::MAX_STORE_BYTES as u64 + 1)
             .read_to_end(&mut bytes)
             .map_err(|source| Error::AuthStoreRead {
                 path: path.display().to_string(),
                 source,
             })?;
-        if bytes.len() > 4 * 1024 * 1024 {
+        if bytes.len() > super::MAX_STORE_BYTES {
             return Err(Error::AuthStoreParse {
                 path: path.display().to_string(),
                 reason: "credential file is too large".into(),
@@ -772,10 +786,10 @@ pub fn resolve(
     }
 }
 
-/// The header that presents `secret` to an endpoint speaking `protocol`.
+/// The default header that presents `secret` to an endpoint speaking `protocol`.
 ///
-/// The protocol decides this, not the credential source: a key from the
-/// environment and one from a browser sign-in are presented identically.
+/// The credential source does not change this default. Native authentication
+/// modes can override it; Copilot requests use bearer authentication even for Messages.
 #[must_use]
 pub fn header_for(protocol: Protocol, secret: &Secret) -> (&'static str, Secret) {
     match protocol {

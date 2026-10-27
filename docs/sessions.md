@@ -225,5 +225,8 @@ never advance successful context.
 
 Unknown, removed, unreadable, corrupt or unsupported-version history is not treated as an empty session.
 Check the state root, file permissions, free space and Bee version. Sessions from an older memory-only Bee
-process cannot be recovered after that process exits. A saved provider that is no longer configured does
-not prevent transcript replay; configure/select an available provider before continuing inference.
+process cannot be recovered after that process exits. An explicitly selected saved connection must remain configured
+and a member of the owning profile: restore its declaration and membership before resume or transcript replay can
+succeed. Unselected defaults resolve from current configuration. Automatically remembered selections retain their
+account-continuity guards and can require explicit confirmation before inference; see
+[profile selection and recovery](profiles.md#configured-default-and-last-used-model).

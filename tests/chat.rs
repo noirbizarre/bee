@@ -7,6 +7,72 @@ use serde_json::json;
 use support::{Echo, Response, Server, chat_text, event, profile, tool};
 
 #[tokio::test]
+async fn refusals_override_finish_reasons_and_never_execute_accompanying_calls() {
+    for streaming in [false, true] {
+        for reason in ["stop", "length", "tool_calls"] {
+            for with_calls in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                let mut message = json!({});
+                if with_calls {
+                    message["tool_calls"] = json!([{"index":0,"id":"write","type":"function","function":{"name":"write","arguments":json!({"path":"forbidden","content":"unexpected"}).to_string()}}]);
+                }
+                let response = if streaming {
+                    // A separate refusal fragment must remain authoritative at finalization.
+                    Response::sse(format!(
+                        "{}{}data: [DONE]\n\n",
+                        event(
+                            "",
+                            json!({"choices":[{"index":0,"delta":{"refusal":"declined"},"finish_reason":null}]})
+                        ),
+                        event(
+                            "",
+                            json!({"choices":[{"index":0,"delta":message,"finish_reason":reason}]})
+                        ),
+                    ))
+                } else {
+                    message["refusal"] = json!("declined");
+                    Response::json(
+                        json!({"choices":[{"index":0,"message":message,"finish_reason":reason}]}),
+                    )
+                };
+                let server = Server::start(vec![response]);
+                let model = Model::new(
+                    profile("openai-chat", &server.url, ""),
+                    "opaque".into(),
+                    None,
+                )
+                .unwrap();
+                let mut registry = bee::tool::Registry::default();
+                registry.register(bee::tool::write::Write).unwrap();
+                let context = bee::tool::Context::new(
+                    root.path(),
+                    tokio_util::sync::CancellationToken::new(),
+                    4096,
+                )
+                .unwrap();
+                let executor = bee::agent::NativeExecutor::new(&registry, context);
+                let result = bee::agent::run(
+                    &model,
+                    vec![],
+                    &executor.definitions(),
+                    Some(&executor),
+                    &mut |_| {},
+                )
+                .await;
+                if with_calls {
+                    assert_eq!(result.unwrap_err(), Error::Malformed);
+                } else {
+                    assert_eq!(result.unwrap().stop, Stop::Refusal);
+                }
+                assert!(!root.path().join("forbidden").exists());
+                server.request();
+                server.assert_no_more_requests();
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn a_model_creates_reads_edits_and_verifies_a_file_through_native_tools() {
     let root = tempfile::tempdir().unwrap();
     let call = |id: &str, name: &str, arguments: serde_json::Value| {
@@ -379,21 +445,28 @@ async fn streaming_text_and_usage_are_assembled_without_a_json_fallback() {
 async fn failures_are_classified_without_echoing_the_server_body() {
     for (status, expected) in [
         (401, Error::Authentication),
+        (403, Error::Authentication),
         (429, Error::RateLimit),
         (500, Error::Http(500)),
     ] {
-        let mut response = Response::json(json!({"secret":"sentinel"}));
-        response.status = status;
-        let server = Server::start(vec![response]);
-        let model = Model::new(
-            profile("openai-chat", &server.url, ""),
-            "opaque".into(),
-            None,
-        )
-        .unwrap();
-        let error = model.step(&[], &[], &mut |_| {}).await.unwrap_err();
-        assert_eq!(error, expected);
-        assert!(!format!("{error:?} {error}").contains("sentinel"));
+        for (repeats, chunked) in [(1, false), (10000, false), (10000, true)] {
+            let mut response = Response::json(json!({"secret":"sentinel".repeat(repeats)}));
+            response.status = status;
+            if chunked {
+                // Force inspection to accumulate a prefix before crossing the bound on later bytes.
+                response.pause = Some((32 * 1024, std::time::Duration::from_millis(20)));
+            }
+            let server = Server::start(vec![response]);
+            let model = Model::new(
+                profile("openai-chat", &server.url, ""),
+                "opaque".into(),
+                None,
+            )
+            .unwrap();
+            let error = model.step(&[], &[], &mut |_| {}).await.unwrap_err();
+            assert_eq!(error, expected);
+            assert!(!format!("{error:?} {error}").contains("sentinel"));
+        }
     }
 }
 

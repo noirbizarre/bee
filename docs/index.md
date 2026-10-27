@@ -154,10 +154,14 @@ the file and never the value. A `credential` only *names* where the secret lives
 When a provider is configured, Bee offers each ACPv2 session a `provider` and a `model` configuration option and
 handles `session/set_config_option`. These are session settings and differ from the configuration above: the client
 chooses among connections in the active profile and can name any model id, but cannot change a connection's endpoint,
-headers or credential. The provider is the client's choice, else the active profile's default connection; the model is
-the client's choice, else the effective `model`, else the first effective `models` entry. Profile model fields override
-connection defaults independently. Choosing another provider resets the model, and
-settings cannot change while a turn is running. See [ADR-007](adr/007-provider-profiles-and-model-selection.md).
+headers or credential. Explicit client selection takes precedence. New sessions otherwise prefer the active profile's
+usable account-bound last-used connection/model, even over project-configured defaults. Without a remembered choice,
+Bee uses the profile's default connection and its effective `model`, else its first effective `models` entry;
+eligible native discovery can initialize an otherwise unselected model. Profile model fields override connection
+defaults independently. An unavailable remembered choice can require explicit selection rather than switching accounts;
+see the [profile resolution rules](profiles.md#configured-default-and-last-used-model).
+Choosing another provider resets the model, and settings cannot change while a turn is running.
+See [ADR-007](adr/007-provider-profiles-and-model-selection.md).
 
 Protocol resolution uses that effective model ID for every prompt, whether selected by the client or supplied by a
 default. Changing models resolves the endpoint again, retains portable history and drops native continuation.
@@ -186,9 +190,11 @@ not the provider's automatic caching.
 
 ## Authentication
 
-A connection's `credential` says where its secret comes from. It is separate from the `protocol` (which only decides how
-the secret is presented: `Authorization: Bearer` for `openai-chat` and `openai-responses`, `x-api-key` for
-`anthropic-messages`) and from the model. Exactly one source, or none:
+A connection's `credential` says where its secret comes from, independently of the protocol and model. Ordinary protocol
+defaults present it as `Authorization: Bearer` for `openai-chat` and `openai-responses`, or `x-api-key` for
+`anthropic-messages`. Native authentication can override that presentation: Copilot's `auth = "github"` uses
+`Authorization: Bearer` for all three protocols, including Messages, without an `x-api-key` header.
+Exactly one source, or none:
 
 ```toml
 credential = { env = "OPENROUTER_API_KEY" }            # a variable in the environment that launches Bee
@@ -392,8 +398,10 @@ During a prompt, a missing or expired stored credential starts browser sign-in w
 the connection names a login flow and the client advertises `capabilities.elicitation.url`.
 Bee sends session-scoped `elicitation/create` with a unique ID. Accepting the URL
 means the browser interaction may proceed, not that authentication succeeded.
-Bee waits for the loopback callback, validates state, exchanges the code over HTTPS,
-and persists the credential before sending `elicitation/complete` with that same ID.
+For PKCE-key and ChatGPT callback flows, Bee waits for the loopback callback, validates state,
+and exchanges the code over HTTPS. For GitHub device login, the browser interaction presents the code to enter
+on GitHub while Bee polls for authorization; no loopback callback is needed.
+Bee persists the credential before sending `elicitation/complete` with that same ID.
 Credentials and callback/exchange secrets never enter model context.
 
 ACP browser sign-in requires Bee's private credential store, currently supported on
@@ -407,9 +415,10 @@ exchange before terminal idle; late responses cannot store a credential. A crede
 already committed before cancellation remains stored. Final store commits are
 serialized across processes using a stable sibling lock and preserve other providers.
 
-The browser must be able to reach the Bee host's loopback callback. URL capability
-does not imply that a remote client shares that host; use `bee auth login` on the
-agent host when it does not. Missing environment variables, invalid/insecure stores,
+For callback flows, the browser must be able to reach the Bee host's loopback listener. URL capability
+does not imply that a remote client shares that host; arrange secure loopback forwarding or use `bee auth login`
+on the agent host when necessary. GitHub device login can use a browser on another host without callback forwarding.
+Missing environment variables, invalid/insecure stores,
 missing login flows and unsupported URL mode remain configuration errors with CLI
 guidance. A provider's inference 401/403 does not automatically retry login or inference.
 
@@ -425,7 +434,8 @@ bee auth status [CONNECTION]                # where each credential comes from, 
 
 `CONNECTION` defaults to the active profile's default connection for login/logout; status lists its member connections.
 Explicit targets must be members, except explicit login can add a connection to the active profile. Missing built-in
-`openrouter` and `chatgpt` connections are created on login. `--no-browser` prints the sign-in URL without opening it.
+`openrouter`, `chatgpt` and `github` connections are created on login.
+`--no-browser` prints the sign-in URL without opening it.
 Prompts and URLs go to stderr; only `status` writes to stdout. Bare `bee` still serves ACPv2.
 
 ### OAuth sign-in, API tokens, inference credentials and MCP authorization
