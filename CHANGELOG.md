@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1](https://github.com/noirbizarre/bee/compare/0.1.0..0.1.1) - 2026-10-27
+
+### 🐛 Bug Fixes
+
+- **release** Publish Arch package as bee-agent - ([3f0ad33](https://github.com/noirbizarre/bee/commit/3f0ad33295e98ce5070b592997c4f983eae5b03c))
+- **tools** Support exclusive rename across Linux release targets - ([950f054](https://github.com/noirbizarre/bee/commit/950f054c1e781e60230ace8532ef9c1e6411fe80))
+
+### 🧹 Chores
+
+- **template** Sync upstream AUR naming support - ([4dd355f](https://github.com/noirbizarre/bee/commit/4dd355f08f5a0ec09f06c20dc06b3514e3784fd8))
+
+### Tpl
+
+- Render rust at main - ([321be10](https://github.com/noirbizarre/bee/commit/321be10feaacb9c01848fcccaead29d905cd933a))
+
 ## 0.1.0 - 2026-10-27
 
 ### 💫 Features
