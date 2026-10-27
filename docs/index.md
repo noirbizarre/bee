@@ -249,6 +249,7 @@ Shipped presets, with the variable each reads its key from:
 | `anthropic` | Anthropic | `anthropic-messages` | `ANTHROPIC_API_KEY` |
 | `openrouter` | OpenRouter | `openai-chat`, `openai-responses` | stored, with browser sign-in |
 | `opencode` | OpenCode Zen | `openai-chat`, `openai-responses`, `anthropic-messages` | `OPENCODE_API_KEY` |
+| `opencode-go` | OpenCode Go | `openai-chat`, `openai-responses`, `anthropic-messages` | `OPENCODE_GO_API_KEY` |
 | `deepseek` | DeepSeek | `openai-chat`, `openai-responses`, `anthropic-messages` | `DEEPSEEK_API_KEY` |
 | `google-aistudio` | Google AI Studio | `openai-chat` (official Gemini compatibility endpoint) | `GEMINI_API_KEY` |
 | `google-cloud` | Google Cloud | `openai-chat` (official Vertex AI compatibility endpoint) | renewable ADC |
@@ -265,13 +266,70 @@ CLI arguments, credential storage and durable sessions always use the connection
 
 Scalars and arrays in the connection replace the preset's. `model_protocols`, `model_context_windows`, `headers` and each
 protocol's table under `protocols` merge key by key, `prefer` replaces, and `credential` is replaced whole.
-URLs follow vendor documentation or the referenced native integration contract,
-and a vendor is listed by the protocols Bee speaks: OpenCode Zen serves its GPT, Grok and Muse models over
-`openai-responses`, its Claude models over `anthropic-messages` and the rest over `openai-chat`, and only its Gemini
-models (Google's native protocol) cannot be reached. Set exact `model_protocols` entries for models needing a protocol
-other than the preset's preference. OpenCode Go uses other endpoints
-(`/inference/go`) and needs a connection of its own. The catalogue deliberately has no model lists: name your own
-`model`.
+URLs follow vendor documentation or the referenced native integration contract. OpenCode translates text models across
+Chat, Responses and Messages, including Gemini text models. Exact `model_protocols` entries can override the preference.
+OpenCode Go uses separate endpoints (`/inference/go`) and needs a connection of its own. Presets deliberately contain no
+model lists: configure `model` or select an ID through ACP.
+
+### Use OpenCode Zen or Go
+
+[Zen](https://opencode.ai/docs/zen/) is Console pay-as-you-go access; sign in to the
+[console](https://opencode.ai/console), add billing details and credits, and create an API key.
+[Go or Go Plus](https://opencode.ai/docs/go/) requires a subscription in a single-member workspace, such as Personal.
+Both document API keys for external coding agents. As verified on October 27, 2026, neither documents an external-client
+OAuth/device flow, client registration, refresh mechanism or revocation API. OpenCode CLI authentication and website
+sign-in are separate from Bee's platform API-key authentication; Bee does not import their private credentials.
+
+For first-use stored-key setup on Unix, run the command for the offering you use and paste its key on stdin:
+
+```bash
+bee auth login opencode --with-token
+bee auth login opencode-go --with-token
+bee auth status
+bee models list opencode-go --endpoint
+```
+
+Each login creates a separate store-backed connection in the active profile and enables model discovery. Select an
+appropriate text model through ACP or set `model` in that connection. Public offering lists are unranked and do not
+prove access, so Bee does not choose their first entry automatically. Zen's free-tier chat models require OpenCode;
+use paid Zen text models or Go from Bee. Non-text services such as Jev are outside Bee's inference protocols.
+
+Environment configuration remains supported, including existing `preset = "opencode"` configurations:
+
+```toml
+provider = "zen"
+
+[providers.zen]
+preset = "opencode"                # OPENCODE_API_KEY
+model = "gpt-6.1-sol"              # choose a currently available paid text model
+
+[providers.go]
+preset = "opencode-go"             # OPENCODE_GO_API_KEY
+model = "kimi-k3"                  # choose a model available to your subscription
+```
+
+Pass the appropriate variable to the Bee subprocess. No key or model ID is borrowed from the other offering. Existing
+environment-backed connections are not converted by login. To use stored credentials for an existing or custom-named
+connection, explicitly add `credential = { store = true }` beneath its `preset`, then run
+`bee auth login CONNECTION --with-token`. Connection IDs are credential identities; use a new connection when changing
+offerings/accounts rather than repurposing an existing stored credential.
+
+Rotate or revoke keys in the console, then repeat token login to replace Bee's stored copy. `bee auth logout CONNECTION`
+removes only that connection's local key; it does not revoke it remotely. Status is a local availability check, not a
+subscription or entitlement check. No browser authorization is started for these API-key connections.
+
+Bee sends its own versioned user agent and a stable `x-opencode-session` header across tool steps, prompts and durable
+resume. Embedded callers constructing a model per turn should pass their stable conversation identity with
+`Model::with_conversation_id`. These headers are reserved for the integration. Native discovery uses the official
+offering target; a custom inference proxy remains usable but cannot silently redirect its credentials to official
+discovery. Disable automatic discovery on such connections and configure model IDs explicitly.
+
+Access denial can mean an invalid/revoked key, missing billing/subscription, workspace policy or unavailable model.
+Check the selected offering in the console. Go allowances have 5-hour, weekly and monthly windows; limits and prices
+can change. Console-side **Extra Usage**, if you enable it, can charge pay-as-you-go credits after the Go allowance.
+Bee never enables it, switches offerings or retries inference against another credential. Consult the official
+[Go usage limits and client requirements](https://opencode.ai/docs/go/) and
+[Zen pricing and privacy terms](https://opencode.ai/docs/zen/) for current conditions.
 
 Define your own preset, or override a shipped one by name, in a `presets` table of any configuration file:
 

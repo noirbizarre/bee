@@ -1107,6 +1107,8 @@ impl Reader<'_> {
             discovery: table.get("discovery").map(|value| {
                 match self.string(&format!("{key}.discovery"), value)? {
                     "openrouter" => Ok(crate::models::Integration::OpenRouter),
+                    "opencode" if !copilot && login.is_none() => Ok(crate::models::Integration::OpenCode),
+                    "opencode-go" if !copilot && login.is_none() => Ok(crate::models::Integration::OpenCodeGo),
                     "github" if copilot => Ok(crate::models::Integration::Copilot),
                     "chatgpt" if login.as_ref().is_some_and(|flow| flow.is_chatgpt()) => Ok(crate::models::Integration::ChatGpt),
                     _ => Err(self.invalid(&key, "discovery requires a supported integration and matching authentication")),

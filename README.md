@@ -95,12 +95,15 @@ profile.
 A connection's `credential` names an environment variable (`{ env = "KEY" }`) or Bee's credential store
 (`{ store = true }`, optionally with `login = "openrouter"` for a browser sign-in). `bee auth login`, `logout` and
 `status` manage the store, which is a `0600` file under `$XDG_DATA_HOME/bee`. Providers are data:
-`preset = "openrouter"` (also `openai`, `anthropic`, `opencode`, `deepseek`, `google-aistudio`, `google-cloud`, `groq`,
-`mistral`, `xai`,
+`preset = "openrouter"` (also `openai`, `anthropic`, `opencode`, `opencode-go`, `deepseek`, `google-aistudio`,
+`google-cloud`, `groq`, `mistral`, `xai`,
 `ollama`, `chatgpt`, `github`) fills in a connection, and your own `presets` and `login_flows` tables extend or
 override the shipped ones. `bee auth login github` provides GitHub.com device login and account model discovery;
 an explicit `credential = { env = "COPILOT_GITHUB_TOKEN" }` override uses an environment GitHub user token instead.
 See [Copilot setup](docs/index.md#use-github-copilot) for consent identity and supported routing.
+OpenCode Zen and Go use separate console API-key connections: `bee auth login opencode --with-token` or
+`bee auth login opencode-go --with-token`. See [OpenCode setup](docs/index.md#use-opencode-zen-or-go) for environment
+credentials, subscription requirements and model selection.
 Google AI Studio uses `GEMINI_API_KEY` for the Gemini Developer API, including its eligible API free tier;
 Google AI Plus subscription quotas are not API credits. See [setup](docs/index.md#use-google-ai-studio).
 Google Cloud uses renewable ADC and explicit project/location settings for official Vertex AI Gemini inference,

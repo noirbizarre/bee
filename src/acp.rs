@@ -578,6 +578,7 @@ async fn inference(
     let mut model = crate::llm::Model::new(profile, model, credential)
         .map_err(|error| TurnFailure::new(error.to_string()))?
         .with_selection(selection)
+        .with_conversation_id(reply.id.clone())
         .with_cache_scope(lock(&reply.sessions).profile_name().to_owned());
     if let Some(session) = session {
         model = model.with_chatgpt_session(session);

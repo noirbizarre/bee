@@ -109,6 +109,82 @@ fn defaults() -> (Arc<MemoryCache>, Arc<Time>) {
     )
 }
 
+#[tokio::test]
+async fn opencode_offerings_use_separate_catalogues_without_claiming_access_or_choosing_models() {
+    let profiles = support::configured_providers(
+        "provider='zen'\n[providers.zen]\npreset='opencode'\n[providers.go]\npreset='opencode-go'",
+    );
+    let env = Environment::default()
+        .with_variable("OPENCODE_API_KEY", "zen-key")
+        .with_variable("OPENCODE_GO_API_KEY", "go-key");
+    let (cache, clock) = defaults();
+    let http = Arc::new(FakeHttp::new(vec![
+        Ok(br#"{"data":[{"id":"jev-1.13"},{"id":"paid-text"},{"id":"paid-text"}]}"#.to_vec()),
+        Ok(br#"{"data":[{"id":"go-text"}]}"#.to_vec()),
+        Err(Error::Unauthorized),
+    ]));
+    let service = service(Settings::default(), http.clone(), cache.clone(), clock);
+    for (name, root, key) in [
+        ("zen", "https://opencode.ai/inference", "zen-key"),
+        ("go", "https://opencode.ai/inference/go", "go-key"),
+    ] {
+        let profile = profiles.get(name).unwrap();
+        let listing = service.list_endpoint(profile, &env).await.unwrap();
+        assert_eq!(listing.provenance, "native_api");
+        assert_eq!(listing.scope, "connection_visible");
+        assert!(service.snapshot().native_default(profile).is_none());
+        assert!(
+            !service
+                .snapshot()
+                .info(profile, &listing.models[0])
+                .facts
+                .contains_key("tool_call")
+        );
+        let requests = http.requests.lock().unwrap();
+        let request = requests.last().unwrap();
+        assert_eq!(request.0, format!("{root}/v1/models"));
+        assert_eq!(request.1["authorization"], format!("Bearer {key}"));
+        assert!(
+            request.1["user-agent"]
+                .to_str()
+                .unwrap()
+                .starts_with("bee/")
+        );
+        assert!(!request.1.contains_key("x-opencode-session"));
+    }
+    assert_eq!(http.requests.lock().unwrap().len(), 2);
+    assert!(cache.bytes.lock().unwrap().is_none());
+    assert_eq!(
+        service
+            .list_endpoint(profiles.get("go").unwrap(), &env)
+            .await
+            .err(),
+        Some(Error::Unauthorized)
+    );
+    let snapshot = service.snapshot();
+    assert!(snapshot.endpoints["go"].models.is_empty());
+    assert_eq!(snapshot.endpoints["zen"].models.len(), 2);
+}
+
+#[tokio::test]
+async fn opencode_custom_targets_do_not_send_proxy_credentials_to_official_discovery() {
+    let profiles = support::configured_providers(
+        "[providers.test]\npreset='opencode-go'\nprotocols.openai-chat.base_url='https://proxy.example/v1'",
+    );
+    let (cache, clock) = defaults();
+    let http = Arc::new(FakeHttp::new(vec![]));
+    let service = service(Settings::default(), http.clone(), cache, clock);
+    let env = Environment::default().with_variable("OPENCODE_GO_API_KEY", "private-proxy-key");
+    assert_eq!(
+        service
+            .list_endpoint(profiles.get("test").unwrap(), &env)
+            .await
+            .err(),
+        Some(Error::Unsupported)
+    );
+    assert!(http.requests.lock().unwrap().is_empty());
+}
+
 struct CopilotAccount(AtomicUsize);
 impl bee::http::LoginHttp for CopilotAccount {
     fn post_json<'a>(

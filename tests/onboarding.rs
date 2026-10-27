@@ -13,6 +13,52 @@ fn fixture(text: &str) -> (tempfile::TempDir, Environment) {
 }
 
 #[test]
+#[cfg(unix)]
+fn opencode_onboarding_uses_independent_stored_keys_and_preserves_existing_env_authority() {
+    use bee::auth::{Audience, Credential, CredentialStore, FileStore, Secret};
+    let (root, env) = fixture("");
+    for name in ["opencode", "opencode-go"] {
+        persist::prepare(&env, root.path(), name)
+            .unwrap()
+            .commit(&env, root.path())
+            .unwrap();
+    }
+    let providers = Providers::from_config(&Config::load(&env, root.path()).unwrap()).unwrap();
+    let store = FileStore::new(root.path().join("credentials.json"));
+    for name in ["opencode", "opencode-go"] {
+        store
+            .put(
+                Audience::Provider(name),
+                &Credential::new(Secret::new(name)),
+            )
+            .unwrap();
+        let profile = providers.get(name).unwrap();
+        bee::auth::require_store(profile).unwrap();
+        assert!(profile.discover_models());
+        assert_eq!(
+            bee::auth::resolve(profile, &env, &store, 0)
+                .unwrap()
+                .unwrap()
+                .secret()
+                .expose(),
+            name
+        );
+    }
+    store.remove(Audience::Provider("opencode-go")).unwrap();
+    assert!(bee::auth::resolve(providers.get("opencode").unwrap(), &env, &store, 0).is_ok());
+    assert!(bee::auth::resolve(providers.get("opencode-go").unwrap(), &env, &store, 0).is_err());
+    let original = "[providers.opencode]\npreset='opencode'\n";
+    let (root, env) = fixture(original);
+    let plan = persist::prepare(&env, root.path(), "opencode").unwrap();
+    assert!(bee::auth::require_store(plan.providers().get("opencode").unwrap()).is_err());
+    plan.commit(&env, root.path()).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(env.global_config_path().unwrap()).unwrap(),
+        original
+    );
+}
+
+#[test]
 fn built_in_login_preflight_is_read_only_and_commit_preserves_comments_and_existing_default() {
     let original =
         "# user's header\n[providers.old] # keep this comment\npreset='openai'\nmodel='custom'\n";
