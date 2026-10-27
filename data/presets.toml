@@ -122,16 +122,12 @@ base_url = "http://localhost:11434/v1"
 # Every URL below comes from the vendor's own documentation. A vendor is listed
 # by the protocols Bee speaks: Google's native API is not one of them.
 
-# OpenCode Zen, the pay-as-you-go gateway. It serves the open and the free models
-# over Chat Completions, the GPT, Grok and Muse models over Responses and the
-# Claude models over Messages, so no single protocol reaches them all. Chat is
-# preferred because it reaches the most models; configure exact model_protocols
-# mappings for models needing another protocol. Its Gemini models use Google's native protocol,
-# which Bee does not speak. Another key than Zen's (OpenCode Go has its own
-# endpoints under `/inference/go`) needs a profile of its own.
+# Console translates text models across all three APIs. Preserve legacy routing
+# preferences and discovery opt-in; Go remains an independent credential context.
 [presets.opencode]
 display_name = "OpenCode Zen"
 catalog_provider = "opencode"
+discovery = "opencode"
 prefer = ["openai-chat", "openai-responses", "anthropic-messages"]
 credential = { env = "OPENCODE_API_KEY" }
 
@@ -143,6 +139,23 @@ base_url = "https://opencode.ai/inference/openai/v1"
 
 [presets.opencode.protocols.anthropic-messages]
 base_url = "https://opencode.ai/inference/anthropic"
+
+[presets.opencode-go]
+display_name = "OpenCode Go"
+catalog_provider = "opencode-go"
+discovery = "opencode-go"
+discover_models = true
+prefer = ["openai-chat", "openai-responses", "anthropic-messages"]
+credential = { env = "OPENCODE_GO_API_KEY" }
+
+[presets.opencode-go.protocols.openai-chat]
+base_url = "https://opencode.ai/inference/go/openai/v1"
+
+[presets.opencode-go.protocols.openai-responses]
+base_url = "https://opencode.ai/inference/go/openai/v1"
+
+[presets.opencode-go.protocols.anthropic-messages]
+base_url = "https://opencode.ai/inference/go/anthropic"
 
 # DeepSeek serves all three from its own API.
 [presets.deepseek]

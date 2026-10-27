@@ -298,6 +298,7 @@ fn the_openrouter_preset_is_a_stored_credential_with_the_shipped_sign_in() {
 #[case::openai("openai", "OPENAI_API_KEY")]
 #[case::anthropic("anthropic", "ANTHROPIC_API_KEY")]
 #[case::opencode("opencode", "OPENCODE_API_KEY")]
+#[case::opencode_go("opencode-go", "OPENCODE_GO_API_KEY")]
 #[case::deepseek("deepseek", "DEEPSEEK_API_KEY")]
 #[case::google("google", "GEMINI_API_KEY")]
 #[case::google_aistudio("google-aistudio", "GEMINI_API_KEY")]
@@ -322,6 +323,13 @@ fn a_shipped_vendor_preset_reads_its_key_from_the_vendors_own_variable(
     "https://opencode.ai/inference/openai/v1",
     "https://opencode.ai/inference/openai/v1",
     Some("https://opencode.ai/inference/anthropic"),
+    Protocol::OpenAiChat
+)]
+#[case::opencode_go(
+    "opencode-go",
+    "https://opencode.ai/inference/go/openai/v1",
+    "https://opencode.ai/inference/go/openai/v1",
+    Some("https://opencode.ai/inference/go/anthropic"),
     Protocol::OpenAiChat
 )]
 #[case::deepseek(

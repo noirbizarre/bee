@@ -28,7 +28,8 @@ if a project or `BEE_CONFIG` file overrides profile membership, update that memb
 in the private credential store. Successful authentication immediately discovers models; discovery failure does not undo
 login. Manual token login uses the same hook. ChatGPT still requires its existing browser OAuth flow.
 
-The OpenRouter, ChatGPT and GitHub Copilot presets enable native discovery automatically.
+The OpenRouter, ChatGPT, GitHub Copilot and OpenCode Go presets enable native discovery automatically.
+Legacy OpenCode Zen configuration retains opt-in discovery; first-use CLI onboarding enables it explicitly.
 Google AI Studio (`google-aistudio`) enables generic OpenAI-compatible model listing automatically.
 Set `discover_models = false` to disable
 automatic listing on a connection. `[catalog]` below controls public Models.dev metadata independently of native discovery.
@@ -182,10 +183,12 @@ without duplicates. Display names are labels; the exact ID is sent to inference.
 sessions without replacing explicit or legacy pinned selections. New sessions first consider their profile's
 [account-bound last-used model](profiles.md#configured-default-and-last-used-model); fresh account discovery can invalidate
 automatic reuse and warn about a safe fallback or required explicit selection. When there is no selected/configured
-model, a native result initializes
+model, a ranked native result initializes
 the choice from provider ordering. That choice is pinned to the connection and durably saved before publication; later
 refreshes and restarts retain it, even if the model disappears from the listing. Active turns defer background selection
-initialization until idle. Public Models.dev entries never supply defaults. Without native results, clients can still set
+initialization until idle. OpenCode's public offering lists are unranked and never initialize a default; select a text
+model explicitly, since listing does not establish Bee compatibility or account access. Public Models.dev entries never
+supply defaults. Without native results, clients can still set
 any well-formed ID; a connection with no selection has no model selector yet.
 
 ```sh
@@ -222,8 +225,8 @@ Adapters are incremental; entries marked planned currently use manual connection
 | ChatGPT / Codex OAuth | Implemented: existing official OAuth and account catalogue integration | Separate from OpenAI API keys; visible catalogue metadata is not entitlement |
 | GitHub Copilot | Implemented: direct user-token `/models`, exact protocol declarations and native limits | GitHub.com accounts; private account visibility, no quota or inference guarantee |
 | Anthropic Claude | Planned: native Models API with pagination | API-key/workspace scope; Claude subscription/OAuth is not API access |
-| OpenCode Zen | Planned: documented Zen model catalogue integration | Explicit Zen authentication and catalogue provenance |
-| OpenCode Go | Planned: documented Go model catalogue integration | Distinct catalogue and credentials from Zen |
+| OpenCode Zen | Implemented: `/inference/v1/models` | Public offering IDs, not entitlement; API keys, explicit text-model selection |
+| OpenCode Go | Implemented: `/inference/go/v1/models` | Separate credentials/catalogue; subscription access, explicit text-model selection |
 | Cloudflare AI Gateway | Planned: gateway routing/provider configuration discovery or configuration | Preserve upstream provider/model identity; not Workers AI enumeration |
 | Google AI Studio | Implemented: authenticated OpenAI-compatible `/models`; native Gemini Models adapter planned | Exact model suggestions; no implicit default, quota or capability guarantee |
 | Google Cloud | Configured models; endpoint discovery unavailable | Exact `google/...` IDs; access and availability depend on project, region and API |

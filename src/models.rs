@@ -446,6 +446,14 @@ pub struct ModelInfo {
 impl Snapshot {
     /// Native ordering may initialize a selection, but never replaces an existing one.
     pub fn native_default(&self, profile: &Profile) -> Option<&str> {
+        // OpenCode's unranked public list includes restricted and non-text models.
+        if profile
+            .discovery()
+            .and_then(Integration::opencode_root)
+            .is_some()
+        {
+            return None;
+        }
         self.endpoints
             .get(profile.name())
             .filter(|listing| listing.native)?

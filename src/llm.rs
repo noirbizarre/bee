@@ -7,6 +7,7 @@ pub mod responses;
 mod usage;
 pub use usage::{CacheCounter, CacheUsage};
 
+use base64::Engine;
 use std::fmt;
 
 use serde_json::Value;
@@ -17,6 +18,10 @@ use crate::provider::{Profile, Protocol};
 /// A normalized, safe-to-display inference failure. Never stores wire values.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, miette::Diagnostic)]
 pub enum Error {
+    /// Conversation identity must come from operating-system entropy.
+    #[error("cannot generate a conversation identity; check operating-system randomness and retry")]
+    #[diagnostic(code(bee::llm::randomness))]
+    Randomness,
     /// Fixed Cloud recovery advice, never upstream error text.
     #[error("Google Cloud inference: {0}")]
     #[diagnostic(code(bee::llm::google_cloud))]
@@ -39,6 +44,10 @@ pub enum Error {
     #[error("GitHub Copilot request failed: {0}")]
     #[diagnostic(code(bee::llm::copilot))]
     Copilot(&'static str),
+    /// Fixed recovery advice for Console API keys and offering limits.
+    #[error("OpenCode request failed: {0}")]
+    #[diagnostic(code(bee::llm::opencode))]
+    OpenCode(&'static str),
     /// The endpoint is throttling requests.
     #[error("the model endpoint rate limited the request; wait before trying again")]
     #[diagnostic(code(bee::llm::rate_limit))]
@@ -209,6 +218,7 @@ pub struct Step {
 /// A selected endpoint and its reusable async transport.
 #[derive(Clone)]
 pub struct Model {
+    conversation_id: String,
     google_cloud_session: Option<crate::auth::google_cloud::Session>,
     copilot_session: Option<crate::auth::copilot::Session>,
     copilot_agent: bool,
@@ -231,7 +241,10 @@ impl Model {
     /// Construct a model without a vendor registry or catalog lookup.
     pub fn new(profile: Profile, model: String, credential: Option<Secret>) -> Result<Self, Error> {
         let selection = crate::models::Snapshot::default().resolve(&profile, &model);
+        let mut identity = [0_u8; 16];
+        getrandom::fill(&mut identity).map_err(|_| Error::Randomness)?;
         Ok(Self {
+            conversation_id: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(identity),
             google_cloud_session: None,
             copilot_session: None,
             copilot_agent: false,
@@ -318,11 +331,25 @@ impl Model {
         } else {
             model
         };
-        match model.endpoint().protocol() {
+        let result = match model.endpoint().protocol() {
             Protocol::OpenAiChat => chat::run(model, messages, tools, text).await,
             Protocol::OpenAiResponses => responses::run(model, messages, tools, text).await,
             Protocol::AnthropicMessages => anthropic::run(model, messages, tools, text).await,
+        };
+        if model
+            .profile
+            .discovery()
+            .and_then(crate::models::Integration::opencode_root)
+            .is_some()
+        {
+            // Access denial also covers subscription and model policy, not just invalid keys.
+            return result.map_err(|error| match error {
+                Error::Authentication => Error::OpenCode("access denied; check this connection's API key, workspace billing/subscription and model access in https://opencode.ai/console"),
+                Error::RateLimit => Error::OpenCode("usage or rate limit reached; check this offering's allowance in https://opencode.ai/console and retry later"),
+                error => error,
+            });
         }
+        result
     }
 }
 
@@ -376,6 +403,12 @@ impl Model {
         self
     }
 
+    /// Preserve conversation routing when a caller constructs a model for each turn.
+    pub fn with_conversation_id(mut self, id: String) -> Self {
+        self.conversation_id = id;
+        self
+    }
+
     /// Estimate the exact selected protocol representation without exposing content.
     pub fn context(
         &self,
@@ -413,6 +446,21 @@ impl Model {
             version,
             true,
         )?;
+        if self
+            .profile
+            .discovery()
+            .and_then(crate::models::Integration::opencode_root)
+            .is_some()
+        {
+            // A conversation is stable across steps, unlike an individual HTTP request.
+            if self.conversation_id.is_empty() || self.conversation_id.len() > 256 {
+                return Err(Error::Headers);
+            }
+            let mut value = reqwest::header::HeaderValue::from_str(&self.conversation_id)
+                .map_err(|_| Error::Headers)?;
+            value.set_sensitive(true);
+            headers.insert("x-opencode-session", value);
+        }
         if let Some(project) = self
             .google_cloud_session
             .as_ref()
@@ -487,11 +535,17 @@ pub(crate) fn request_headers(
             value,
         );
     }
-    if profile.is_copilot() {
+    let opencode = profile
+        .discovery()
+        .and_then(crate::models::Integration::opencode_root)
+        .is_some();
+    if profile.is_copilot() || opencode {
         headers.insert(
             "user-agent",
             HeaderValue::from_static(concat!("bee/", env!("CARGO_PKG_VERSION"))),
         );
+    }
+    if profile.is_copilot() {
         headers.insert(
             "x-github-api-version",
             HeaderValue::from_static("2026-08-01"),
@@ -500,6 +554,7 @@ pub(crate) fn request_headers(
     for (name, value) in profile.headers() {
         let name = HeaderName::from_bytes(name.as_bytes()).map_err(|_| Error::Headers)?;
         if headers.contains_key(&name)
+            || (opencode && name.as_str() == "x-opencode-session")
             || (profile.is_copilot() && crate::auth::copilot::reserved_header(name.as_str()))
             || matches!(
                 name.as_str(),

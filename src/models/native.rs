@@ -21,6 +21,21 @@ pub enum Integration {
     ChatGpt,
     /// GitHub user-token authenticated Copilot model catalogue.
     Copilot,
+    /// Console pay-as-you-go API keys, separate from subscription access.
+    OpenCode,
+    /// Go subscription API keys and offering-specific endpoints.
+    OpenCodeGo,
+}
+
+impl Integration {
+    /// Offering root is explicit, never inferred from an account or model name.
+    pub(crate) fn opencode_root(self) -> Option<&'static str> {
+        match self {
+            Self::OpenCode => Some("https://opencode.ai/inference"),
+            Self::OpenCodeGo => Some("https://opencode.ai/inference/go"),
+            _ => None,
+        }
+    }
 }
 
 pub(super) fn same_account(a: Option<&Credential>, b: Option<&Credential>) -> bool {
@@ -98,7 +113,12 @@ pub(super) fn empty_listing(profile: &Profile) -> EndpointListing {
         native: profile.discovery().is_some() || chatgpt,
         provenance: if chatgpt {
             "official_integration"
-        } else if openrouter {
+        } else if openrouter
+            || profile
+                .discovery()
+                .and_then(Integration::opencode_root)
+                .is_some()
+        {
             "native_api"
         } else {
             "endpoint"
@@ -149,6 +169,19 @@ pub(super) async fn discover(
         .login_spec()
         .is_some_and(crate::preset::LoginSpec::is_chatgpt);
     let openrouter = profile.discovery() == Some(Integration::OpenRouter);
+    let opencode = profile.discovery().and_then(Integration::opencode_root);
+    if let Some(root) = opencode {
+        // A proxy override must not redirect its private headers to the official service.
+        if profile.endpoints().iter().any(|endpoint| {
+            endpoint.base_url()
+                != match endpoint.protocol() {
+                    Protocol::AnthropicMessages => format!("{root}/anthropic"),
+                    _ => format!("{root}/openai/v1"),
+                }
+        }) {
+            return Err(Error::Unsupported);
+        }
+    }
     let mut listing = empty_listing(profile);
     let mut urls = BTreeSet::new();
     for endpoint in profile.endpoints().iter().filter(|endpoint| {
@@ -157,11 +190,15 @@ pub(super) async fn discover(
             Protocol::OpenAiChat | Protocol::OpenAiResponses
         )
     }) {
-        let url = format!(
-            "{}/models{}",
-            endpoint.base_url(),
-            if openrouter { "/user" } else { "" }
-        );
+        let url = if let Some(root) = opencode {
+            format!("{root}/v1/models")
+        } else {
+            format!(
+                "{}/models{}",
+                endpoint.base_url(),
+                if openrouter { "/user" } else { "" }
+            )
+        };
         if !urls.insert(url.clone()) {
             continue;
         }

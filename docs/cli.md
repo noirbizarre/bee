@@ -40,6 +40,13 @@ Environment-backed credentials do not require login. See [authentication](index.
 Status reports local availability, not a live entitlement check; missing credentials can be reported with a successful
 exit status. Status output goes to stdout; login prompts and URLs go to stderr.
 
+OpenCode Zen and Go use console API keys, with no documented external OAuth/device flow:
+`bee auth login opencode --with-token` and `bee auth login opencode-go --with-token` create independent store-backed
+connections on first use. Existing environment-backed connections require an explicit store override before token
+login. Select a text model after login; offering lists are not entitlement checks or ranked defaults.
+See [OpenCode setup](index.md#use-opencode-zen-or-go) for billing/subscription requirements, environment configuration,
+key rotation and logout semantics.
+
 Google Cloud uses externally managed ADC. `bee auth status google-cloud` reports that mode without reading or refreshing
 tokens. Use `gcloud auth application-default login` for local user ADC; `bee auth login/logout google-cloud` return setup
 guidance and never modify shared ADC. Service-account files and attached accounts also work; see

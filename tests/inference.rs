@@ -23,6 +23,242 @@ fn answer(protocol: &str, text: &str) -> Value {
 }
 
 #[rstest::rstest]
+#[case(401)]
+#[case(403)]
+#[case(429)]
+#[tokio::test]
+async fn opencode_failures_give_console_advice_without_replaying_requests_or_echoing_secrets(
+    #[case] status: u16,
+) {
+    let mut response = Response::json(json!({"error":{"message":"private-upstream-secret"}}));
+    response.status = status;
+    let server = Server::start(vec![response]);
+    let profile = support::profile("openai-chat", &server.url, "discovery='opencode-go'");
+    let model = bee::llm::Model::new(
+        profile,
+        "text-model".into(),
+        Some(bee::auth::Secret::new("private-key")),
+    )
+    .unwrap();
+    let error = model
+        .step(&[bee::llm::Message::User("hello".into())], &[], &mut |_| {})
+        .await
+        .unwrap_err();
+    let diagnostic = format!("{error:?} {error}");
+    assert!(diagnostic.contains("opencode.ai/console"));
+    assert!(diagnostic.contains(if status == 429 {
+        "allowance"
+    } else {
+        "subscription"
+    }));
+    assert!(!diagnostic.contains("private-"));
+    server.request();
+    server.assert_no_more_requests();
+}
+
+#[tokio::test]
+async fn opencode_rejects_invalid_conversation_headers_and_configured_collisions_before_io() {
+    for extra in [
+        "headers={X-OpenCode-Session='private-value'}",
+        "headers={User-Agent='private-value'}",
+        "",
+    ] {
+        let profile = support::profile(
+            "openai-chat",
+            "http://127.0.0.1:1",
+            &format!("discovery='opencode'\n{extra}"),
+        );
+        let model = bee::llm::Model::new(profile, "text-model".into(), None)
+            .unwrap()
+            .with_conversation_id(if extra.is_empty() {
+                "private-id\r\ninvalid".into()
+            } else {
+                "valid-id".into()
+            });
+        let error = model
+            .step(&[bee::llm::Message::User("hello".into())], &[], &mut |_| {})
+            .await
+            .unwrap_err();
+        assert_eq!(error, bee::llm::Error::Headers);
+        assert!(!format!("{error:?} {error}").contains("private-"));
+    }
+}
+
+#[tokio::test]
+async fn opencode_durable_resume_preserves_the_wire_conversation_identity() {
+    use std::sync::{Arc, Mutex};
+    let root = tempfile::tempdir().unwrap();
+    let server = Server::start(vec![
+        Response::json(chat_text("first")),
+        Response::json(chat_text("resumed")),
+    ]);
+    let profiles = support::configured_providers(&format!(
+        "[providers.test]\npreset='opencode-go'\nmodel='text-model'\ndiscover_models=false\nprotocols.openai-chat.base_url='{}'",
+        server.url
+    ));
+    let saved = Arc::new(Mutex::new(None));
+    for restart in [false, true] {
+        let runtime = bee::acp::Runtime::new(Default::default(), Default::default())
+            .with_auth(
+                bee::config::Environment::default().with_variable("OPENCODE_GO_API_KEY", "key"),
+                Arc::new(bee::http::AsyncLoginHttp),
+            )
+            .with_history(bee::history::Store::open(root.path().join("state")).unwrap());
+        let (tx, mut updates) = tokio::sync::mpsc::unbounded_channel();
+        let client = Client.v2().on_receive_notification(
+            async move |update: v2::UpdateSessionNotification, _| {
+                tx.send(update).map_err(Error::into_internal_error)
+            },
+            agent_client_protocol::on_receive_notification!(),
+        );
+        let saved = saved.clone();
+        let cwd = root.path().to_owned();
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            client.connect_with(
+                bee::acp::agent_with_runtime(profiles.clone(), runtime),
+                async move |connection| {
+                    connection
+                        .send_request(v2::InitializeRequest::new(
+                            ProtocolVersion::V2,
+                            v2::Implementation::new("test", "0"),
+                        ))
+                        .block_task()
+                        .await?;
+                    let id = if restart {
+                        let id: v2::SessionId = saved.lock().unwrap().clone().unwrap();
+                        connection
+                            .send_request(v2::ResumeSessionRequest::new(id.clone(), cwd))
+                            .block_task()
+                            .await?;
+                        id
+                    } else {
+                        let id = connection
+                            .send_request(v2::NewSessionRequest::new(cwd))
+                            .block_task()
+                            .await?
+                            .session_id;
+                        *saved.lock().unwrap() = Some(id.clone());
+                        id
+                    };
+                    connection
+                        .send_request(v2::PromptRequest::new(id.clone(), vec!["hello".into()]))
+                        .block_task()
+                        .await?;
+                    loop {
+                        if let v2::SessionUpdate::StateUpdate(v2::StateUpdate::Idle(idle)) =
+                            updates.recv().await.unwrap().update
+                        {
+                            // Resume replays the prior idle snapshot before this prompt completes.
+                            if idle.stop_reason.is_some() {
+                                assert_eq!(idle.stop_reason, Some(v2::StopReason::EndTurn));
+                                break;
+                            }
+                        }
+                    }
+                    connection
+                        .send_request(v2::CloseSessionRequest::new(id))
+                        .block_task()
+                        .await?;
+                    Ok(())
+                },
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    }
+    let identity = |head: String| {
+        head.lines()
+            .find_map(|line| line.strip_prefix("x-opencode-session: "))
+            .unwrap()
+            .to_owned()
+    };
+    let first = identity(server.request().head.to_lowercase());
+    let resumed = identity(server.request().head.to_lowercase());
+    assert_eq!(first, resumed);
+    assert_eq!(
+        first,
+        saved
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .to_string()
+            .to_lowercase()
+    );
+}
+
+#[rstest::rstest]
+#[case("openai-chat", "opencode", "OPENCODE_API_KEY")]
+#[case("openai-responses", "opencode-go", "OPENCODE_GO_API_KEY")]
+#[case("anthropic-messages", "opencode-go", "OPENCODE_GO_API_KEY")]
+#[tokio::test]
+async fn opencode_conversation_headers_survive_tool_steps_and_later_prompts(
+    #[case] protocol: &str,
+    #[case] preset: &str,
+    #[case] variable: &str,
+) {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("file.txt"), "fixture").unwrap();
+    let server = Server::start(vec![
+        Response::json(native_call(
+            protocol,
+            "read-file",
+            "read",
+            json!({"path":"file.txt"}),
+        )),
+        Response::json(answer(protocol, "first")),
+        Response::json(answer(protocol, "second")),
+        Response::json(answer(protocol, "other")),
+    ]);
+    let profiles = support::configured_providers(&format!(
+        "[providers.test]\npreset='{preset}'\nmodel='text-model'\ndiscover_models=false\nprefer=['{protocol}']\nprotocols.{protocol}.base_url='{}'",
+        server.url
+    ));
+    let mut registry = bee::tool::Registry::default();
+    registry.register(bee::tool::read::Read).unwrap();
+    let runtime = bee::acp::Runtime::new(Default::default(), registry).with_auth(
+        bee::config::Environment::default().with_variable(variable, "offering-key"),
+        std::sync::Arc::new(bee::http::AsyncLoginHttp),
+    );
+    assert_eq!(
+        native_turns(
+            profiles,
+            runtime,
+            vec![
+                (root.path().into(), vec![true, true]),
+                (root.path().into(), vec![true]),
+            ]
+        )
+        .await,
+        ["first", "second", "other"]
+    );
+    let mut identities = Vec::new();
+    for _ in 0..4 {
+        let request = server.request();
+        let head = request.head.to_lowercase();
+        assert_eq!(head.matches("user-agent: bee/").count(), 1);
+        let auth = if protocol == "anthropic-messages" {
+            "x-api-key: offering-key"
+        } else {
+            "authorization: bearer offering-key"
+        };
+        assert!(head.contains(auth));
+        assert_eq!(request.body["model"], "text-model");
+        identities.push(
+            head.lines()
+                .find_map(|line| line.strip_prefix("x-opencode-session: "))
+                .unwrap()
+                .to_owned(),
+        );
+    }
+    assert_eq!(identities[0], identities[1]);
+    assert_eq!(identities[0], identities[2]);
+    assert_ne!(identities[0], identities[3]);
+}
+
+#[rstest::rstest]
 #[case::failed(0)]
 #[case::refused(1)]
 #[case::cancelled(2)]

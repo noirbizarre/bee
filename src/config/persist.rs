@@ -109,7 +109,12 @@ fn proposed(env: &Environment, cwd: &Path, name: &str) -> Result<(Option<Documen
         .get("providers")
         .and_then(toml::Value::as_table)
         .is_some_and(|table| table.contains_key(name));
-    if !configured && !matches!(name, "openrouter" | "chatgpt" | "github") {
+    if !configured
+        && !matches!(
+            name,
+            "openrouter" | "chatgpt" | "github" | "opencode" | "opencode-go"
+        )
+    {
         crate::auth::profile(&providers, name)?;
     }
     let path = env.global_config_path().ok_or_else(|| {
@@ -134,6 +139,12 @@ fn proposed(env: &Environment, cwd: &Path, name: &str) -> Result<(Option<Documen
     })?;
     if !configured {
         table(table(document.as_table_mut(), "providers"), name).insert("preset", value(name));
+        if matches!(name, "opencode" | "opencode-go") {
+            // Only new declarations switch to storage; existing env authority stays explicit.
+            let connection = table(table(document.as_table_mut(), "providers"), name);
+            table(connection, "credential").insert("store", value(true));
+            connection.insert("discover_models", value(true));
+        }
     }
     let explicit = config
         .get("profiles")

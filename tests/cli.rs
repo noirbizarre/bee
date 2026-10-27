@@ -653,6 +653,29 @@ fn an_empty_token_is_refused_and_nothing_is_stored() {
     assert!(!dir.path().join("data/bee/credentials.json").exists());
 }
 
+#[cfg(unix)]
+#[test]
+fn opencode_failed_token_onboarding_never_persists_a_connection_or_opens_a_browser_flow() {
+    for offering in ["opencode", "opencode-go"] {
+        let dir = tempfile::tempdir().unwrap();
+        isolated(dir.path())
+            .args(["auth", "login", offering, "--with-token"])
+            .write_stdin("\n")
+            .assert()
+            .failure()
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::contains("bee::auth::empty_token"));
+        isolated(dir.path())
+            .args(["auth", "login", offering])
+            .assert()
+            .failure()
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::contains("bee::auth::no_login_flow"));
+        assert!(!dir.path().join("data/bee/credentials.json").exists());
+        assert!(!dir.path().join("config/bee/config.toml").exists());
+    }
+}
+
 #[test]
 fn a_profile_that_does_not_use_the_store_cannot_be_logged_in() {
     let dir = configured();
