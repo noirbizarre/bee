@@ -172,6 +172,64 @@ async fn unsuccessful_truncation_preserves_prior_context_across_close_and_resume
     .unwrap();
 }
 
+#[tokio::test]
+async fn google_ai_studio_signed_calls_reach_native_tools_and_remain_private_across_turns() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("file.txt"), "from disk").unwrap();
+    let mut call = native_call(
+        "openai-chat",
+        "read-file",
+        "read",
+        json!({"path":"file.txt"}),
+    );
+    call["choices"][0]["message"]["tool_calls"][0]["extra_content"] =
+        json!({"google":{"thought_signature":"production-signature"}});
+    let server = Server::start(vec![
+        Response::json(call),
+        Response::json(answer("openai-chat", "first")),
+        Response::json(answer("openai-chat", "second")),
+    ]);
+    let profiles = support::configured_providers(&format!(
+        "[providers.studio]\npreset='google-aistudio'\nmodel='gemini-test'\ndiscover_models=false\nprotocols.openai-chat.base_url='{}'",
+        server.url
+    ));
+    let mut registry = bee::tool::Registry::default();
+    registry.register(bee::tool::read::Read).unwrap();
+    let runtime = bee::acp::Runtime::new(Default::default(), registry).with_auth(
+        bee::config::Environment::default().with_variable("GEMINI_API_KEY", "studio-key"),
+        std::sync::Arc::new(bee::http::AsyncLoginHttp),
+    );
+    let answers = native_turns(
+        profiles,
+        runtime,
+        vec![(root.path().to_owned(), vec![true, true])],
+    )
+    .await;
+    assert_eq!(answers, ["first", "second"]);
+    let first = server.request();
+    assert!(
+        first
+            .head
+            .to_lowercase()
+            .contains("authorization: bearer studio-key")
+    );
+    assert_eq!(first.body["model"], "gemini-test");
+    let second = server.request();
+    assert_eq!(second.body["messages"][2]["tool_call_id"], "read-file");
+    assert!(
+        second.body["messages"][2]["content"]
+            .as_str()
+            .unwrap()
+            .contains("from disk")
+    );
+    assert_eq!(
+        second.body["messages"][1]["tool_calls"][0]["extra_content"]["google"]["thought_signature"],
+        "production-signature"
+    );
+    let third = server.request();
+    assert_eq!(third.body["messages"][1], second.body["messages"][1]);
+}
+
 fn native_call(protocol: &str, id: &str, name: &str, arguments: Value) -> Value {
     match protocol {
         "openai-chat" => {

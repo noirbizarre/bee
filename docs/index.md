@@ -112,7 +112,8 @@ A provider connection is separate from the grouping profile, the protocols it sp
 ```toml
 provider = "work"                  # legacy default connection, within the implicit default profile
 
-[providers.work]                   # any name; it is a label, never looked up
+[providers.work]                   # any configured connection ID, independent of vendor
+display_name = "Company gateway"  # optional presentation name; IDs remain stable
 model = "corp/ft-2026"             # optional default model: any id, listed anywhere or not
 models = ["corp/base"]             # optional suggestions for model selectors, not a limit
 credential = { env = "GATEWAY_KEY" }           # optional: names where the secret lives, see Authentication
@@ -240,20 +241,26 @@ model = "anthropic/claude-sonnet-4"
 
 Shipped presets, with the variable each reads its key from:
 
-| Preset       | Protocols, preferred first                              | Credential                        |
-| ------------ | ------------------------------------------------------- | --------------------------------- |
-| `openai`     | `openai-responses`, `openai-chat`                       | `OPENAI_API_KEY`                  |
-| `chatgpt`    | `openai-responses`                                      | stored ChatGPT OAuth tokens       |
-| `github` | `openai-responses`, `anthropic-messages`, `openai-chat` | stored GitHub device OAuth; explicit env override supported |
-| `anthropic`  | `anthropic-messages`                                    | `ANTHROPIC_API_KEY`               |
-| `openrouter` | `openai-chat`, `openai-responses`                       | stored, with browser sign-in      |
-| `opencode`   | `openai-chat`, `openai-responses`, `anthropic-messages` | `OPENCODE_API_KEY` (OpenCode Zen) |
-| `deepseek`   | `openai-chat`, `openai-responses`, `anthropic-messages` | `DEEPSEEK_API_KEY`                |
-| `google`     | `openai-chat` (Gemini's compatible endpoint)            | `GEMINI_API_KEY`                  |
-| `groq`       | `openai-chat`, `openai-responses`                       | `GROQ_API_KEY`                    |
-| `mistral`    | `openai-chat`                                           | `MISTRAL_API_KEY`                 |
-| `xai`        | `openai-responses`, `openai-chat`                       | `XAI_API_KEY`                     |
-| `ollama`     | `openai-chat`, local server                             | none                              |
+| Preset | Display name | Protocols, preferred first | Credential |
+| --- | --- | --- | --- |
+| `openai` | OpenAI | `openai-responses`, `openai-chat` | `OPENAI_API_KEY` |
+| `chatgpt` | ChatGPT | `openai-responses` | stored ChatGPT OAuth tokens |
+| `github` | GitHub Copilot | `openai-responses`, `anthropic-messages`, `openai-chat` | stored GitHub device OAuth; explicit env override supported |
+| `anthropic` | Anthropic | `anthropic-messages` | `ANTHROPIC_API_KEY` |
+| `openrouter` | OpenRouter | `openai-chat`, `openai-responses` | stored, with browser sign-in |
+| `opencode` | OpenCode Zen | `openai-chat`, `openai-responses`, `anthropic-messages` | `OPENCODE_API_KEY` |
+| `deepseek` | DeepSeek | `openai-chat`, `openai-responses`, `anthropic-messages` | `DEEPSEEK_API_KEY` |
+| `google-aistudio` | Google AI Studio | `openai-chat` (official Gemini compatibility endpoint) | `GEMINI_API_KEY` |
+| `google` | Google AI Studio (legacy preset) | `openai-chat` | `GEMINI_API_KEY` |
+| `groq` | Groq | `openai-chat`, `openai-responses` | `GROQ_API_KEY` |
+| `mistral` | Mistral | `openai-chat` | `MISTRAL_API_KEY` |
+| `xai` | xAI | `openai-responses`, `openai-chat` | `XAI_API_KEY` |
+| `ollama` | Ollama | `openai-chat`, local server | none |
+
+`display_name` is optional on connections and presets. A connection override wins over its preset's name; without
+either, the selector uses the connection ID. Names must be nonblank, contain no control characters and fit in 256 UTF-8
+bytes. ACP shows `Display name (connection-id)` when the two differ, preserving distinct account choices. Selection,
+CLI arguments, credential storage and durable sessions always use the connection ID.
 
 Scalars and arrays in the connection replace the preset's. `model_protocols`, `model_context_windows`, `headers` and each
 protocol's table under `protocols` merge key by key, `prefer` replaces, and `credential` is replaced whole.
@@ -307,6 +314,49 @@ repository you only cloned. ChatGPT uses a separate `kind = "chatgpt"` mechanism
 its OAuth registration, identity verification and token renewal are not configurable PKCE-key exchanges.
 GitHub Copilot uses a separate fixed `kind = "github"` device mechanism.
 See [ADR-009](adr/009-provider-presets-and-login-flows.md).
+
+### Use Google AI Studio
+
+Create a Gemini API key in [Google AI Studio](https://aistudio.google.com/), following Google's
+[API-key setup](https://ai.google.dev/gemini-api/docs/api-key). Set the variable in the environment that launches Bee:
+
+```sh
+export GEMINI_API_KEY="YOUR_AI_STUDIO_API_KEY"
+```
+
+Add this connection to your Bee configuration, replacing the model placeholder with an available Gemini model ID:
+
+```toml
+[providers.google-aistudio]
+preset = "google-aistudio"
+model = "YOUR_GEMINI_MODEL_ID"
+```
+
+If you have several connections, set the active profile's default connection explicitly. With explicit named profiles,
+add `google-aistudio` to the chosen profile's `connections` array; see [profile membership](profiles.md).
+Inspect authenticated model visibility with:
+
+```sh
+bee auth status google-aistudio
+bee models list google-aistudio --endpoint --json
+```
+
+The preset uses the official Gemini Developer API OpenAI-compatible endpoint and enables authenticated `/models`
+discovery. Select an exact text/function-capable model explicitly: these generic suggestions do not supply an initial
+default or guarantee invocation access. A custom `credential = { env = "GOOGLE_API_KEY" }` can replace the default
+variable. Bee does not automatically fall back between keys. The legacy `google` preset remains supported with its
+existing opt-in discovery default.
+
+Eligible free-tier access and paid-tier behavior depend on the model, project, region and Google's current
+[pricing](https://ai.google.dev/gemini-api/docs/pricing) and
+[rate limits](https://ai.google.dev/gemini-api/docs/rate-limits). API keys belong to projects; adding another key to the
+same project does not create a fresh quota. A model listing does not report remaining quota. **Google AI Plus subscription
+quotas are not Gemini API credits**; direct API usage has separate eligibility and billing. Bee reports rate-limit
+failures without automatically retrying inference, changing accounts or upgrading billing.
+
+This integration uses an AI Studio API key, with no Antigravity OAuth or subscription credential flow. A separate Google
+Cloud provider would cover managed-platform endpoints and Cloud credentials. See
+[inference behavior](inference.md#google-ai-studio-requests) for signed tool continuation and context budgeting.
 
 ### Use GitHub Copilot
 

@@ -626,6 +626,50 @@ fn malformed_optional_limits_are_unknown_without_losing_other_model_facts() {
 }
 
 #[tokio::test]
+async fn google_ai_studio_discovers_exact_models_without_public_cache_or_implicit_selection() {
+    let profiles = support::configured_providers(
+        "provider='studio'\n[providers.studio]\npreset='google-aistudio'\n[providers.other]\npreset='google-aistudio'",
+    );
+    let profile = profiles.get("studio").unwrap();
+    let (cache, clock) = defaults();
+    let http = Arc::new(FakeHttp::new(vec![
+        Ok(br#"{"data":[{"id":"gemini-z"},{"id":"gemini-a"},{"id":"gemini-z"}]}"#.to_vec()),
+        Err(Error::Transport),
+    ]));
+    let service = service(Settings::default(), http.clone(), cache.clone(), clock);
+    let env = Environment::default().with_variable("GEMINI_API_KEY", "studio-secret");
+    let listing = service.list_endpoint(profile, &env).await.unwrap();
+    assert_eq!(listing.models, ["gemini-a", "gemini-z"]);
+    assert!(!listing.native);
+    assert!(profile.default_model().is_none());
+    let snapshot = service.snapshot();
+    assert!(
+        snapshot
+            .suggestions(profiles.get("other").unwrap(), None)
+            .is_empty()
+    );
+    assert!(cache.bytes.lock().unwrap().is_none());
+    {
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(
+            requests[0].0,
+            "https://generativelanguage.googleapis.com/v1beta/openai/models"
+        );
+        assert_eq!(requests[0].1["authorization"], "Bearer studio-secret");
+        assert!(requests[0].1["authorization"].is_sensitive());
+    }
+    assert!(service.list_endpoint(profile, &env).await.is_err());
+    // Optional discovery failure cannot alter an explicitly selected route.
+    assert_eq!(
+        service
+            .snapshot()
+            .resolve(profile, "gemini-explicit")
+            .protocol,
+        Protocol::OpenAiChat
+    );
+}
+
+#[tokio::test]
 async fn endpoint_lists_preserve_base_paths_authentication_and_account_isolation() {
     let (cache, clock) = defaults();
     let http = Arc::new(FakeHttp::new(vec![

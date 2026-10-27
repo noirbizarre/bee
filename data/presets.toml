@@ -40,6 +40,7 @@ response_key = "key"
 # Each preset lists the protocols its provider speaks, each under `protocols`
 # with its own `base_url` and `options`. One protocol needs no `prefer`.
 [presets.openrouter]
+display_name = "OpenRouter"
 discovery = "openrouter"
 discover_models = true
 catalog_provider = "openrouter"
@@ -55,6 +56,7 @@ base_url = "https://openrouter.ai/api/v1"
 
 # OpenAI recommends the Responses API for new work, so it is preferred.
 [presets.openai]
+display_name = "OpenAI"
 catalog_provider = "openai"
 prefer = ["openai-responses", "openai-chat"]
 credential = { env = "OPENAI_API_KEY" }
@@ -69,6 +71,7 @@ credential = { env = "OPENAI_API_KEY" }
 kind = "chatgpt"
 
 [presets.chatgpt]
+display_name = "ChatGPT"
 discovery = "chatgpt"
 credential = { store = true, login = "chatgpt" }
 discover_models = true
@@ -77,6 +80,7 @@ discover_models = true
 base_url = "https://api.openai.com/v1"
 
 [presets.anthropic]
+display_name = "Anthropic"
 catalog_provider = "anthropic"
 credential = { env = "ANTHROPIC_API_KEY" }
 
@@ -86,6 +90,7 @@ credential = { env = "ANTHROPIC_API_KEY" }
 kind = "github"
 
 [presets.github]
+display_name = "GitHub Copilot"
 auth = "github"
 discovery = "github"
 discover_models = true
@@ -106,6 +111,9 @@ base_url = "https://api.githubcopilot.com"
 [presets.anthropic.protocols.anthropic-messages]
 
 # A local server needs no credential, which is what no `credential` means.
+[presets.ollama]
+display_name = "Ollama"
+
 [presets.ollama.protocols.openai-chat]
 base_url = "http://localhost:11434/v1"
 
@@ -122,6 +130,7 @@ base_url = "http://localhost:11434/v1"
 # which Bee does not speak. Another key than Zen's (OpenCode Go has its own
 # endpoints under `/inference/go`) needs a profile of its own.
 [presets.opencode]
+display_name = "OpenCode Zen"
 catalog_provider = "opencode"
 prefer = ["openai-chat", "openai-responses", "anthropic-messages"]
 credential = { env = "OPENCODE_API_KEY" }
@@ -137,6 +146,7 @@ base_url = "https://opencode.ai/inference/anthropic"
 
 # DeepSeek serves all three from its own API.
 [presets.deepseek]
+display_name = "DeepSeek"
 catalog_provider = "deepseek"
 prefer = ["openai-chat", "openai-responses", "anthropic-messages"]
 credential = { env = "DEEPSEEK_API_KEY" }
@@ -150,8 +160,19 @@ base_url = "https://api.deepseek.com"
 [presets.deepseek.protocols.anthropic-messages]
 base_url = "https://api.deepseek.com/anthropic"
 
-# Gemini, through its OpenAI-compatible endpoint.
+# Google AI Studio uses the official Gemini Developer API compatibility endpoint.
+[presets.google-aistudio]
+display_name = "Google AI Studio"
+catalog_provider = "google"
+discover_models = true
+credential = { env = "GEMINI_API_KEY" }
+
+[presets.google-aistudio.protocols.openai-chat]
+base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+
+# Preserve existing configurations and their opt-in discovery behavior.
 [presets.google]
+display_name = "Google AI Studio"
 catalog_provider = "google"
 credential = { env = "GEMINI_API_KEY" }
 
@@ -159,6 +180,7 @@ credential = { env = "GEMINI_API_KEY" }
 base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
 
 [presets.groq]
+display_name = "Groq"
 catalog_provider = "groq"
 prefer = ["openai-chat", "openai-responses"]
 credential = { env = "GROQ_API_KEY" }
@@ -170,6 +192,7 @@ base_url = "https://api.groq.com/openai/v1"
 base_url = "https://api.groq.com/openai/v1"
 
 [presets.mistral]
+display_name = "Mistral"
 catalog_provider = "mistral"
 credential = { env = "MISTRAL_API_KEY" }
 
@@ -178,6 +201,7 @@ base_url = "https://api.mistral.ai/v1"
 
 # xAI's own documentation is written against the Responses API.
 [presets.xai]
+display_name = "xAI"
 catalog_provider = "xai"
 prefer = ["openai-responses", "openai-chat"]
 credential = { env = "XAI_API_KEY" }

@@ -103,12 +103,14 @@ pub enum SessionError {
 /// These are *session settings*, chosen over ACP, and distinct from provider
 /// *configuration* (endpoint, headers, credential), which only the
 /// configuration files set (ADR-007).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Settings {
     /// The effective provider profile.
     pub provider: String,
     /// Every configured profile name, sorted.
     pub providers: Vec<String>,
+    /// Optional presentation names, keyed by stable configured connection ID.
+    pub provider_display_names: std::collections::BTreeMap<String, String>,
     /// The effective model, if the profile or the client gave one.
     pub model: Option<String>,
     /// Configured/discovered IDs, retaining any current custom choice.
@@ -118,6 +120,17 @@ pub struct Settings {
     pub model_info: Vec<crate::models::ModelInfo>,
     /// Public catalog freshness, including unavailable and cache-only states.
     pub catalog_status: serde_json::Value,
+}
+
+// Labels are configuration strings too; Debug must not disclose pasted credentials.
+impl std::fmt::Debug for Settings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Settings")
+            .field("provider_count", &self.providers.len())
+            .field("has_model", &self.model.is_some())
+            .field("model_count", &self.models.len())
+            .finish_non_exhaustive()
+    }
 }
 
 /// The identifiers of one prompt turn.
@@ -556,6 +569,15 @@ impl Sessions {
         Some(Settings {
             provider: name.to_owned(),
             providers: providers.names().map(str::to_owned).collect(),
+            provider_display_names: providers
+                .names()
+                .filter_map(|id| {
+                    providers
+                        .get(id)?
+                        .display_name()
+                        .map(|label| (id.to_owned(), label.to_owned()))
+                })
+                .collect(),
             model,
             models,
             model_info,

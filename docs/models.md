@@ -29,6 +29,7 @@ in the private credential store. Successful authentication immediately discovers
 login. Manual token login uses the same hook. ChatGPT still requires its existing browser OAuth flow.
 
 The OpenRouter, ChatGPT and GitHub Copilot presets enable native discovery automatically.
+Google AI Studio (`google-aistudio`) enables generic OpenAI-compatible model listing automatically.
 Set `discover_models = false` to disable
 automatic listing on a connection. `[catalog]` below controls public Models.dev metadata independently of native discovery.
 
@@ -146,6 +147,10 @@ account-specific `models[]` contract, keeps `visibility = "list"` entries, and p
 `slug` IDs in server order. Its automatic endpoint discovery is enabled by the preset. Account names and IDs remain
 separate from the public Models.dev cache.
 Generic responses advertising more pages are unsupported rather than presented as complete.
+Google AI Studio uses this generic path at `https://generativelanguage.googleapis.com/v1beta/openai/models`, authenticated
+with its API key as a bearer token. IDs remain exact suggestions; configure or select a model explicitly. The external
+Models.dev association remains `google`, independent of Bee's `google-aistudio` preset ID. Native Gemini Models API
+pagination and capability/limit metadata are not implemented by this compatibility listing.
 Copilot uses account-authenticated `/models`, preserving native order and capability/limit declarations. Explicitly disabled,
 non-picker, non-tool or non-streaming models are excluded from automatic choices. Exact `/chat/completions`, `/responses`
 and `/v1/messages` declarations select supported protocols in configured preference order. Unknown-only declarations never
@@ -216,7 +221,7 @@ Adapters are incremental; entries marked planned currently use manual connection
 | OpenCode Zen | Planned: documented Zen model catalogue integration | Explicit Zen authentication and catalogue provenance |
 | OpenCode Go | Planned: documented Go model catalogue integration | Distinct catalogue and credentials from Zen |
 | Cloudflare AI Gateway | Planned: gateway routing/provider configuration discovery or configuration | Preserve upstream provider/model identity; not Workers AI enumeration |
-| Google Gemini | Planned: native authenticated Models endpoint | Follow pagination and documented capability metadata |
+| Google AI Studio | Implemented: authenticated OpenAI-compatible `/models`; native Gemini Models adapter planned | Exact model suggestions; no implicit default, quota or capability guarantee |
 | Amazon Bedrock | Planned: foundation-model and inference-profile APIs | Account, region, IAM and model access; distinguish published models from invocation targets |
 | Mistral | Planned: native authenticated Models API | Connection-scoped results and documented metadata |
 

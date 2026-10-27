@@ -117,6 +117,76 @@ fn invalid_params(error: &Error) -> bool {
     error.code == ErrorCode::InvalidParams
 }
 
+#[test]
+fn session_settings_debug_never_discloses_configured_display_names() {
+    let mut sessions = bee::session::Sessions::with_providers(providers(
+        "[providers.test]\npreset='openai'\ndisplay_name='label-secret-sentinel'",
+    ));
+    let id = sessions.create(cwd());
+    let settings = sessions.settings(&id).unwrap().unwrap();
+    assert_eq!(
+        settings.provider_display_names["test"],
+        "label-secret-sentinel"
+    );
+    assert!(!format!("{settings:?}").contains("label-secret-sentinel"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn provider_labels_disambiguate_connections_while_selection_and_resume_keep_ids() {
+    let config = "provider='personal'\n[providers.personal]\npreset='google-aistudio'\nmodel='gemini-test'\n[providers.work]\npreset='google-aistudio'\nmodel='gemini-test'\n[providers.local]\nprotocols={openai-chat={}}";
+    run(providers(config), async |connection| {
+        let session = new_session(&connection).await?;
+        let labels = |options: &[v2::SessionConfigOption]| {
+            let option = options
+                .iter()
+                .find(|o| o.config_id.to_string() == "provider")
+                .unwrap();
+            let v2::SessionConfigKind::Select(select) = &option.kind else {
+                panic!("selector")
+            };
+            let v2::SessionConfigSelectOptions::Ungrouped(offered) = &select.options else {
+                panic!("ungrouped")
+            };
+            offered
+                .iter()
+                .map(|o| (o.value.to_string(), o.name.clone()))
+                .collect::<Vec<_>>()
+        };
+        let expected = vec![
+            ("local".into(), "local".into()),
+            ("personal".into(), "Google AI Studio (personal)".into()),
+            ("work".into(), "Google AI Studio (work)".into()),
+        ];
+        assert_eq!(labels(&session.config_options), expected);
+        assert_eq!(selector(&session.config_options, "provider").0, "personal");
+        assert!(invalid_params(
+            &set(
+                &connection,
+                &session.session_id,
+                "provider",
+                "Google AI Studio (work)"
+            )
+            .await
+            .unwrap_err()
+        ));
+        let options = set(&connection, &session.session_id, "provider", "work").await?;
+        assert_eq!(selector(&options, "provider").0, "work");
+        assert_eq!(labels(&options), expected);
+        connection
+            .send_request(v2::CloseSessionRequest::new(session.session_id.clone()))
+            .block_task()
+            .await?;
+        let resumed = connection
+            .send_request(v2::ResumeSessionRequest::new(session.session_id, cwd()))
+            .block_task()
+            .await?;
+        assert_eq!(labels(&resumed.config_options), expected);
+        assert_eq!(selector(&resumed.config_options, "provider").0, "work");
+        Ok(())
+    })
+    .await;
+}
+
 #[rstest::rstest]
 #[case("error")]
 #[case("refusal")]
