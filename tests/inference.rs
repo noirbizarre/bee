@@ -22,6 +22,21 @@ fn answer(protocol: &str, text: &str) -> Value {
     }
 }
 
+#[test]
+fn model_steps_keep_protocol_transport_futures_off_the_callers_stack() {
+    let profile = support::profile("openai-chat", "http://127.0.0.1:1", "");
+    let model = bee::llm::Model::new(profile, "text-model".into(), None).unwrap();
+    let mut text = |_: &str| {};
+    let step = model.step(&[], &[], &mut text);
+    // Nested ACP/tool polling must fit the Windows executable's 1 MiB main stack,
+    // including unoptimized coverage builds and intermediate future moves.
+    assert!(
+        std::mem::size_of_val(&step) < 128,
+        "step future occupies {} bytes",
+        std::mem::size_of_val(&step)
+    );
+}
+
 #[rstest::rstest]
 #[case(401)]
 #[case(403)]

@@ -260,7 +260,18 @@ impl Model {
     }
 
     /// Produce one model step, streaming text to `text` as it arrives.
-    pub async fn step(
+    pub fn step<'a>(
+        &'a self,
+        messages: &'a [Message],
+        tools: &'a [Tool],
+        text: &'a mut (dyn FnMut(&str) + Send),
+    ) -> futures::future::BoxFuture<'a, Result<Step, Error>> {
+        // Keep transport and renewable-session state out of every enclosing
+        // ACP/tool future and its unoptimized moves on Windows' 1 MiB main stack.
+        Box::pin(self.step_inner(messages, tools, text))
+    }
+
+    async fn step_inner(
         &self,
         messages: &[Message],
         tools: &[Tool],
