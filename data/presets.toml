@@ -211,3 +211,8 @@ base_url = "https://api.x.ai/v1"
 
 [presets.xai.protocols.openai-chat]
 base_url = "https://api.x.ai/v1"
+[presets.google-cloud]
+display_name = "Google Cloud"
+auth = "google-cloud"
+credential = { adc = true }
+protocols.openai-chat = {}

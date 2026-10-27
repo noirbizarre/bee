@@ -251,6 +251,7 @@ Shipped presets, with the variable each reads its key from:
 | `opencode` | OpenCode Zen | `openai-chat`, `openai-responses`, `anthropic-messages` | `OPENCODE_API_KEY` |
 | `deepseek` | DeepSeek | `openai-chat`, `openai-responses`, `anthropic-messages` | `DEEPSEEK_API_KEY` |
 | `google-aistudio` | Google AI Studio | `openai-chat` (official Gemini compatibility endpoint) | `GEMINI_API_KEY` |
+| `google-cloud` | Google Cloud | `openai-chat` (official Vertex AI compatibility endpoint) | renewable ADC |
 | `google` | Google AI Studio (legacy preset) | `openai-chat` | `GEMINI_API_KEY` |
 | `groq` | Groq | `openai-chat`, `openai-responses` | `GROQ_API_KEY` |
 | `mistral` | Mistral | `openai-chat` | `MISTRAL_API_KEY` |
@@ -354,9 +355,71 @@ same project does not create a fresh quota. A model listing does not report rema
 quotas are not Gemini API credits**; direct API usage has separate eligibility and billing. Bee reports rate-limit
 failures without automatically retrying inference, changing accounts or upgrading billing.
 
-This integration uses an AI Studio API key, with no Antigravity OAuth or subscription credential flow. A separate Google
-Cloud provider would cover managed-platform endpoints and Cloud credentials. See
+This integration uses an AI Studio API key, with no Antigravity OAuth or subscription credential flow. The separate
+[Google Cloud provider](#use-google-cloud) uses managed-platform endpoints and Cloud credentials. See
 [inference behavior](inference.md#google-ai-studio-requests) for signed tool continuation and context budgeting.
+
+### Use Google Cloud
+
+The `google-cloud` preset displays **Google Cloud** and runs Gemini through the official
+[Vertex AI OpenAI-compatible API](https://cloud.google.com/vertex-ai/generative-ai/docs/start/openai).
+Choose a billing-enabled resource project, enable `aiplatform.googleapis.com`, and grant the invoking identity
+`aiplatform.endpoints.predict` (commonly through `roles/aiplatform.user`, Vertex AI User).
+See Google's [access-control guidance](https://cloud.google.com/vertex-ai/generative-ai/docs/access-control).
+The identity also needs `serviceusage.services.use` on an ADC quota project when that attribution is used, commonly via
+`roles/serviceusage.serviceUsageConsumer`. Resource access and quota-project permission are separate requirements.
+
+For local user credentials, install the Google Cloud CLI and run:
+
+```sh
+gcloud services enable aiplatform.googleapis.com --project=YOUR_PROJECT_ID
+gcloud auth application-default login
+gcloud auth application-default set-quota-project YOUR_QUOTA_PROJECT_ID
+```
+
+Ordinary `gcloud auth login` alone does not create ADC. Add a connection, replacing the project and model placeholders:
+
+```toml
+[providers.google-cloud]
+preset = "google-cloud"
+model = "google/YOUR_SUPPORTED_GEMINI_MODEL_ID"
+google_cloud = { project = "your-project-id", location = "global" }
+# google_cloud.quota_project can explicitly override the quota project in ADC.
+```
+
+The resource project is required; location defaults to `global`. Use a supported region such as `us-central1` to choose
+a regional endpoint. Bee keeps the exact `google/...` model ID. Check Google's current model lifecycle and
+[locations](https://cloud.google.com/vertex-ai/generative-ai/docs/learn/locations) for compatibility-route availability.
+Configure `models`, `context_window` or `model_context_windows` as needed. Cloud model discovery is not implemented:
+`discover_models = true` is rejected instead of querying an assumed `/models` endpoint. With explicit named profiles,
+add this connection to the chosen profile's `connections` array; see [profile membership](profiles.md).
+
+Bee supports these [ADC sources](https://cloud.google.com/docs/authentication/application-default-credentials), in order:
+
+1. `GOOGLE_APPLICATION_CREDENTIALS` pointing to an authorized-user or service-account JSON file. For a service-account
+   key, pass `GOOGLE_APPLICATION_CREDENTIALS=/absolute/path/to/key.json` to the Bee subprocess.
+2. Local user ADC from `gcloud auth application-default login`: `$CLOUDSDK_CONFIG/application_default_credentials.json`
+   when configured, otherwise `~/.config/gcloud/application_default_credentials.json` on Unix or
+   `%APPDATA%/gcloud/application_default_credentials.json` on Windows.
+3. An attached service account from the Google Cloud metadata service. Grant its identity the resource and quota-project
+   permissions above, and ensure its access scopes permit Cloud Platform requests.
+
+Malformed or unreadable selected files fail without falling through to another account. Federation and impersonation
+ADC files are currently unsupported and fail with setup guidance. Bee does not run credential-source executables.
+Tokens are renewed in memory before model steps and are not copied into Bee's credential store. Custom URLs, protocols
+and headers cannot redirect this integration's ADC authority. `bee auth status google-cloud` describes externally managed
+ADC without acquiring a token; use gcloud to manage local ADC, including `gcloud auth application-default revoke` when
+appropriate. Bee login/logout commands do not modify shared ADC.
+
+The resource project selects the inference resource; `google_cloud.quota_project` overrides ADC's `quota_project_id`
+for the `x-goog-user-project` header. A quota project is not a promise that all charges move away from the resource
+project: Google Cloud's service-specific billing and quota rules apply. See
+[Vertex AI pricing](https://cloud.google.com/vertex-ai/generative-ai/pricing).
+Eligible Google Cloud credits depend on their terms and model eligibility. **Google Cloud billing/credits are distinct
+from AI Studio's Gemini API free tier and Google AI Plus/Pro application or Antigravity quotas.** Model configuration
+and token usage do not report remaining credits or quota. Failed or cancelled local turns may still incur provider
+charges. Bee never retries inference or changes billing projects/regions automatically after quota or capacity errors.
+See [Cloud inference behavior](inference.md#google-cloud-requests).
 
 ### Use GitHub Copilot
 

@@ -63,6 +63,29 @@ This is the text/function-calling compatibility subset, not Google's native gene
 API. Default cache settings add no unverified Google cache-control fields. API availability and rate limits remain
 project/model dependent and separate from Google AI subscription quotas.
 
+## Google Cloud requests
+
+The `google-cloud` preset uses renewable OAuth bearer tokens from supported ADC. The official global target is
+`https://aiplatform.googleapis.com/v1/projects/{project}/locations/global/endpoints/openapi/chat/completions`.
+Regional targets use `{location}-aiplatform.googleapis.com` and a matching location path. The selected model remains an
+exact `google/...` ID. Requests use the same text/function-calling, signed-call continuation and streaming usage behavior
+described [above](#google-ai-studio-requests), with configured system instructions and output caps.
+
+Prepare embedded inference with `auth::google_cloud::Session::prepare(profile, environment).await`, then attach it to
+`llm::Model` using `with_google_cloud_session`. Production ACP does this automatically. Cloud models reject inference
+without a matching prepared session. Credentials refresh before each step when near expiry; account/source and target
+identity remain pinned across token rotation. Automatic remembered choices are checked against resolved ADC authority
+before inference, including asynchronously resolved metadata identities. Tokens are not persisted by Bee.
+
+Quota-project attribution uses the explicit configuration override or ADC metadata, independently of the resource
+project. Recognized Google error statuses and ErrorInfo reasons produce fixed IAM/API/billing/model/quota recovery advice;
+provider message text and metadata remain private. Unknown failures retain safe HTTP-status handling. Neither rejected
+requests nor interrupted streams trigger automatic replay, location/account changes or protocol fallback.
+
+Usage counters are optional provider snapshots, summed across completed steps, not a billing invoice or quota balance.
+No unverified caching fields are added. See [setup, supported ADC types and billing](index.md#use-google-cloud) and
+[ADR-025](adr/025-google-cloud-provider.md).
+
 ## ChatGPT plan requests
 
 The `chatgpt` preset uses the public `POST https://api.openai.com/v1/responses` endpoint with a renewable OAuth bearer

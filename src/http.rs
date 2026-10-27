@@ -12,6 +12,86 @@ use serde_json::Value;
 
 use crate::llm::Error;
 
+/// Fixed-destination Google ADC transport; credential JSON cannot supply URLs.
+pub struct GoogleAuthHttp;
+
+impl crate::auth::google_cloud::Http for GoogleAuthHttp {
+    fn request(
+        &self,
+        request: crate::auth::google_cloud::Request,
+    ) -> futures::future::BoxFuture<'_, crate::error::Result<Value>> {
+        Box::pin(async move {
+            use crate::auth::google_cloud::{MAX_DOCUMENT, METADATA, Request, TOKEN_URL, failure};
+            let metadata = !matches!(request, Request::Token(_));
+            let mut builder = reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .retry(reqwest::retry::never());
+            // Metadata credentials are link-local authority and must never pass through a proxy.
+            if metadata {
+                builder = builder.no_proxy();
+            }
+            let client = builder
+                .build()
+                .map_err(|_| failure("cannot create ADC transport"))?;
+            let identity = matches!(request, Request::MetadataIdentity);
+            let request = match request {
+                Request::Token(pairs) => {
+                    let mut encoded = reqwest::Url::parse(TOKEN_URL).expect("fixed token URL");
+                    encoded
+                        .query_pairs_mut()
+                        .extend_pairs(pairs.iter().map(|(k, v)| (k.as_str(), v.expose())));
+                    client
+                        .post(TOKEN_URL)
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .body(encoded.query().unwrap_or_default().to_owned())
+                }
+                Request::MetadataIdentity => client
+                    .get(format!("{METADATA}email"))
+                    .header("Metadata-Flavor", "Google"),
+                Request::MetadataToken => client
+                    .get(format!("{METADATA}token"))
+                    .header("Metadata-Flavor", "Google"),
+            };
+            let response = request.timeout(Duration::from_secs(15)).send().await
+                .map_err(|_| failure("ADC token service is unavailable; check connectivity or configure local ADC"))?;
+            if !response.status().is_success() {
+                return Err(failure(
+                    "ADC was rejected; renew local ADC or check attached service-account access",
+                ));
+            }
+            if metadata
+                && response
+                    .headers()
+                    .get("metadata-flavor")
+                    .and_then(|v| v.to_str().ok())
+                    != Some("Google")
+            {
+                return Err(failure(
+                    "untrusted metadata response; configure local ADC instead",
+                ));
+            }
+            let mut bytes = Vec::new();
+            let mut stream = response.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk
+                    .map_err(|_| failure("ADC response was interrupted; retry authentication"))?;
+                if bytes.len().saturating_add(chunk.len()) > MAX_DOCUMENT {
+                    return Err(failure("ADC response exceeds the size limit"));
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            if identity {
+                let email = String::from_utf8(bytes)
+                    .map_err(|_| failure("invalid metadata identity response"))?;
+                Ok(Value::String(email))
+            } else {
+                serde_json::from_slice(&bytes)
+                    .map_err(|_| failure("invalid ADC token response; retry authentication"))
+            }
+        })
+    }
+}
+
 /// Bounded, redirect-free GET transport for optional model discovery.
 pub struct DiscoveryHttp;
 
@@ -124,8 +204,10 @@ impl InferenceHttp {
                 _ => ["/responses", "/chat/completions", "/v1/messages"]
                     .into_iter()
                     .find(|suffix| {
-                        url.strip_suffix(suffix)
-                            .is_some_and(|base| crate::auth::copilot::validate_target(base).is_ok())
+                        url.strip_suffix(suffix).is_some_and(|base| {
+                            crate::auth::copilot::validate_target(base).is_ok()
+                                || test_cloud_target(base)
+                        })
                     })
                     .expect("test route requires a known official endpoint"),
             };
@@ -203,6 +285,19 @@ impl InferenceHttp {
             )
         }
     }
+}
+
+#[cfg(test)]
+fn test_cloud_target(base: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(base) else {
+        return false;
+    };
+    url.scheme() == "https"
+        && url.host_str().is_some_and(|host| {
+            host == "aiplatform.googleapis.com" || host.ends_with("-aiplatform.googleapis.com")
+        })
+        && url.path().starts_with("/v1/projects/")
+        && url.path().ends_with("/endpoints/openapi")
 }
 
 fn transport_error(error: reqwest::Error) -> Error {

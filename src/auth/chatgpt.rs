@@ -629,6 +629,7 @@ fn tokens_at(
         .filter(|n| *n > 0)
         .ok_or_else(|| failure("missing token expiry"))?;
     Ok(Credential {
+        cloud_identity: None,
         secret: access,
         expires_at: Some(received_at.saturating_add(seconds)),
         oauth: Some(registration),
@@ -806,6 +807,7 @@ mod tests {
                 .unwrap()
                 .clone();
         let mut credential = Credential {
+            cloud_identity: None,
             secret: Secret::new("first-access"),
             expires_at: Some(1),
             oauth: Some(Registration {

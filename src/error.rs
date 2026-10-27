@@ -17,6 +17,18 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, Error, Diagnostic)]
 #[non_exhaustive]
 pub enum Error {
+    /// Fixed ADC failures never retain credential JSON or upstream response text.
+    #[error("Google Cloud authentication: {reason}")]
+    #[diagnostic(
+        code(bee::auth::google_cloud),
+        help(
+            "configure google_cloud.project/location and supported ADC using gcloud auth application-default login, a service-account key, or an attached service account"
+        )
+    )]
+    GoogleCloud {
+        /// Safe classification and recovery advice.
+        reason: &'static str,
+    },
     /// Onboarding only writes user configuration, never a project-owned override.
     #[error("cannot update login configuration at `{path}`: {reason}")]
     #[diagnostic(

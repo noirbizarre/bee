@@ -358,6 +358,7 @@ fn status(name: Option<&str>, context: &mut Context<'_>) -> Result<()> {
     for entry in statuses {
         let description = match &entry.status {
             Status::Unauthenticated => "no credential (unauthenticated endpoint)".to_owned(),
+            Status::ApplicationDefault => "Google Application Default Credentials (managed externally; verified when prompting)".to_owned(),
             Status::Env {
                 variable,
                 set: true,

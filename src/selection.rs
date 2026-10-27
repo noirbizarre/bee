@@ -284,6 +284,14 @@ impl Reference {
             // The same token/URL configured as a generic endpoint must not inherit Copilot authority.
             digest.update(b"github-copilot\0");
         }
+        if let Some(target) = profile.google_cloud() {
+            // Resource routing and quota attribution are authority even before token acquisition.
+            digest.update(b"google-cloud\0");
+            digest.update(
+                serde_json::to_vec(&(&target.project, &target.location, &target.quota_project))
+                    .expect("serializable Cloud target"),
+            );
+        }
         digest.update(bytes);
         let binding = digest
             .finalize()
@@ -382,6 +390,11 @@ pub(crate) fn resolve(
         .get(&reference.connection)
         .ok_or(Reason::ConnectionRemoved)?;
     let credential = credential(profile, env)?;
+    if profile.google_cloud().is_some() && credential.is_none() {
+        // Metadata identity requires cancellable I/O. Prompt preparation must validate
+        // this tentative reference against the resolved principal before any inference.
+        return Ok(reference.clone());
+    }
     let snapshot = discovery
         .map(|service| service.account_snapshot(profile, credential.as_ref()))
         .unwrap_or_default();

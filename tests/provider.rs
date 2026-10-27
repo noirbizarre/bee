@@ -59,6 +59,47 @@ fn load(text: &str) -> bee::Result<Providers> {
 }
 
 #[test]
+fn google_cloud_constructs_global_and_regional_targets_independently_of_connection_names() {
+    for (location, host) in [
+        ("global", "aiplatform.googleapis.com"),
+        ("europe-west4", "europe-west4-aiplatform.googleapis.com"),
+    ] {
+        let providers = load(&format!("[providers.work]\npreset='google-cloud'\nmodel='google/gemini-2.5-flash'\ngoogle_cloud={{project='resource-project',location='{location}'}}")).unwrap();
+        let profile = providers.get("work").unwrap();
+        assert_eq!(profile.display_name(), Some("Google Cloud"));
+        assert_eq!(
+            profile.credential(),
+            Some(&CredentialSource::ApplicationDefault)
+        );
+        assert_eq!(
+            profile.endpoints()[0].base_url(),
+            format!(
+                "https://{host}/v1/projects/resource-project/locations/{location}/endpoints/openapi"
+            )
+        );
+        assert!(!profile.discover_models());
+        assert_eq!(profile.default_model(), Some("google/gemini-2.5-flash"));
+        assert!(!format!("{profile:?} {:?}", profile.google_cloud()).contains("resource-project"));
+    }
+}
+
+#[rstest]
+#[case("google_cloud={project='sk-super-secret-token/redirect'}")]
+#[case("google_cloud={location='sk-super-secret-token.example'}")]
+#[case("google_cloud={quota_project='sk-super-secret-token/path'}")]
+#[case("protocols.openai-chat.base_url='https://evil.example/sk-super-secret-token'")]
+#[case("protocols.openai-responses={}")]
+#[case("headers={Authorization='sk-super-secret-token'}")]
+#[case("credential={env='SECRET'}")]
+#[case("credential={adc=false}")]
+#[case("credential={adc=true,store=true}")]
+#[case("discover_models=true")]
+fn google_cloud_refuses_unsafe_overrides_without_echoing_configuration(#[case] extra: &str) {
+    let error = load(&format!("[providers.work]\npreset='google-cloud'\n{extra}")).unwrap_err();
+    assert!(!format!("{error:?} {error}").contains(SECRET));
+}
+
+#[test]
 fn copilot_authentication_survives_env_overrides_and_disabled_discovery() {
     let providers = load("[providers.work]\npreset='github'\ncredential={env='COPILOT_GITHUB_TOKEN'}\ndiscover_models=false").unwrap();
     let profile = providers.get("work").unwrap();

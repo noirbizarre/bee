@@ -8,6 +8,36 @@ fn bee() -> Command {
 }
 
 #[test]
+fn cloud_auth_status_is_offline_and_login_logout_leave_shared_adc_untouched() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("cloud.toml");
+    let adc = dir.path().join("adc.json");
+    // Invalid contents prove status and store commands never acquire or rewrite ADC.
+    std::fs::write(&adc, SECRET).unwrap();
+    std::fs::write(&config, "provider='cloud'\n[providers.cloud]\npreset='google-cloud'\ngoogle_cloud={project='fixture-project'}").unwrap();
+    isolated(dir.path())
+        .env("BEE_CONFIG", &config)
+        .env("GOOGLE_APPLICATION_CREDENTIALS", &adc)
+        .args(["auth", "status", "cloud"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Application Default Credentials"))
+        .stdout(predicate::str::contains(SECRET).not());
+    for operation in ["login", "logout"] {
+        isolated(dir.path())
+            .env("BEE_CONFIG", &config)
+            .env("GOOGLE_APPLICATION_CREDENTIALS", &adc)
+            .args(["auth", operation, "cloud"])
+            .assert()
+            .failure()
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::contains("ADC is managed externally"))
+            .stderr(predicate::str::contains(SECRET).not());
+    }
+    assert_eq!(std::fs::read_to_string(adc).unwrap(), SECRET);
+}
+
+#[test]
 fn version_aliases_report_the_package_version_without_loading_configuration() {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("selected.toml");

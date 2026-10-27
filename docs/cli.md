@@ -40,6 +40,11 @@ Environment-backed credentials do not require login. See [authentication](index.
 Status reports local availability, not a live entitlement check; missing credentials can be reported with a successful
 exit status. Status output goes to stdout; login prompts and URLs go to stderr.
 
+Google Cloud uses externally managed ADC. `bee auth status google-cloud` reports that mode without reading or refreshing
+tokens. Use `gcloud auth application-default login` for local user ADC; `bee auth login/logout google-cloud` return setup
+guidance and never modify shared ADC. Service-account files and attached accounts also work; see
+[Google Cloud setup](index.md#use-google-cloud) for source precedence and supported credential types.
+
 ## Model discovery
 
 ```bash
