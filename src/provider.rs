@@ -35,6 +35,7 @@ use cache::{AnthropicCache, OpenAiCache};
 
 /// The keys a profile table accepts.
 const PROFILE_KEYS: &[&str] = &[
+    "google_cloud",
     "display_name",
     "auth",
     "preset",
@@ -64,6 +65,7 @@ const ENDPOINT_KEYS: &[&str] = &["base_url", "options"];
 /// The keys a preset table accepts: a profile's, but a preset cannot be built
 /// on another, so chains and cycles cannot exist.
 const PRESET_KEYS: &[&str] = &[
+    "google_cloud",
     "display_name",
     "auth",
     "protocols",
@@ -156,6 +158,8 @@ impl Protocol {
 #[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CredentialSource {
+    /// Google Application Default Credentials, renewed outside Bee's store.
+    ApplicationDefault,
     /// The environment variable with this name.
     Env(String),
     /// Bee's credential store, written by `bee auth login`.
@@ -181,6 +185,7 @@ impl CredentialSource {
     #[must_use]
     pub fn kind(&self) -> &'static str {
         match self {
+            Self::ApplicationDefault => "adc",
             Self::Env(_) => "env",
             Self::Store { .. } => "store",
         }
@@ -338,9 +343,53 @@ impl Endpoint {
     }
 }
 
+/// Google Cloud resource and quota targets, independent of credential ownership.
+#[derive(Clone, PartialEq, Eq)]
+pub struct GoogleCloud {
+    /// Resource project; required when preparing inference.
+    pub project: Option<String>,
+    /// Explicit regional target, or `global`.
+    pub location: String,
+    /// Optional override of the ADC quota project.
+    pub quota_project: Option<String>,
+}
+
+impl fmt::Debug for GoogleCloud {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("GoogleCloud(<redacted>)")
+    }
+}
+
+pub(crate) fn cloud_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && value.as_bytes()[0].is_ascii_alphanumeric()
+        && value.as_bytes()[value.len() - 1].is_ascii_alphanumeric()
+}
+
+impl GoogleCloud {
+    /// Only fixed official hosts receive ADC; missing projects never authorize a request.
+    pub(crate) fn base_url(&self) -> String {
+        let host = if self.location == "global" {
+            "aiplatform.googleapis.com".to_owned()
+        } else {
+            format!("{}-aiplatform.googleapis.com", self.location)
+        };
+        format!(
+            "https://{host}/v1/projects/{}/locations/{}/endpoints/openapi",
+            self.project.as_deref().unwrap_or("unconfigured"),
+            self.location
+        )
+    }
+}
+
 /// One named connection profile.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Profile {
+    google_cloud: Option<GoogleCloud>,
     copilot: bool,
     name: String,
     display_name: Option<String>,
@@ -385,6 +434,10 @@ impl fmt::Debug for Profile {
 }
 
 impl Profile {
+    /// Deployment target for official Google Cloud inference.
+    pub fn google_cloud(&self) -> Option<&GoogleCloud> {
+        self.google_cloud.as_ref()
+    }
     /// Copilot authentication is independent of optional catalogue discovery.
     #[must_use]
     pub fn is_copilot(&self) -> bool {
@@ -878,7 +931,7 @@ impl Reader<'_> {
         preset: Option<&str>,
     ) -> Result<Profile> {
         let key = key.to_owned();
-        let endpoints = self.endpoints(name, &key, table)?;
+        let mut endpoints = self.endpoints(name, &key, table)?;
         let model_protocols = self.model_protocols(&key, table, &endpoints, preset)?;
 
         let model = table
@@ -923,8 +976,10 @@ impl Reader<'_> {
             Some(value) => self.headers(&format!("{key}.headers"), value)?,
         };
 
+        let cloud = table.get("auth").and_then(Value::as_str) == Some("google-cloud");
         let copilot = match table.get("auth") {
             None => false,
+            Some(_) if cloud => false,
             Some(value) if self.string(&format!("{key}.auth"), value)? == "github" => true,
             Some(_) => {
                 return Err(self.invalid(
@@ -932,6 +987,63 @@ impl Reader<'_> {
                     "requires a supported authentication integration",
                 ));
             }
+        };
+        let google_cloud = if cloud {
+            let settings_key = format!("{key}.google_cloud");
+            let settings = table
+                .get("google_cloud")
+                .map(|v| self.table(&settings_key, v))
+                .transpose()?;
+            if let Some(settings) = settings {
+                self.only_keys(
+                    &settings_key,
+                    settings,
+                    &["project", "location", "quota_project"],
+                )?;
+            }
+            let text = |field: &str| -> Result<Option<String>> {
+                settings.and_then(|s| s.get(field)).map(|v| {
+                    let value = self.string(&format!("{settings_key}.{field}"), v)?;
+                    if !cloud_identifier(value) {
+                        return Err(self.invalid(&settings_key, "use a Google Cloud identifier containing only lowercase letters, digits and hyphens"));
+                    }
+                    Ok(value.to_owned())
+                }).transpose()
+            };
+            let target = GoogleCloud {
+                project: text("project")?,
+                location: text("location")?.unwrap_or_else(|| "global".into()),
+                quota_project: text("quota_project")?,
+            };
+            // ADC grants broader authority than API keys: only constructed Google targets may receive it.
+            if credential != Some(CredentialSource::ApplicationDefault)
+                || endpoints.len() != 1
+                || endpoints[0].protocol != Protocol::OpenAiChat
+                || !headers.is_empty()
+                || table
+                    .get("protocols")
+                    .and_then(Value::as_table)
+                    .is_some_and(|p| {
+                        p.values()
+                            .any(|v| v.as_table().is_some_and(|e| e.contains_key("base_url")))
+                    })
+                || self.boolean(table, &key, "discover_models")?
+                || table.contains_key("discovery")
+            {
+                return Err(self.invalid(&key, "Google Cloud requires ADC, openai-chat, configured models and no custom URLs, headers or discovery"));
+            }
+            endpoints[0].base_url = target.base_url();
+            Some(target)
+        } else {
+            if table.contains_key("google_cloud")
+                || credential == Some(CredentialSource::ApplicationDefault)
+            {
+                return Err(self.invalid(
+                    &key,
+                    "Google Cloud settings and ADC require auth = google-cloud",
+                ));
+            }
+            None
         };
         if login.as_ref().is_some_and(|flow| flow.is_copilot()) && !copilot {
             return Err(self.invalid(&key, "GitHub device login requires auth = github"));
@@ -959,6 +1071,7 @@ impl Reader<'_> {
         }
 
         Ok(Profile {
+            google_cloud,
             copilot,
             name: name.to_owned(),
             display_name: table.get("display_name").map(|value| {
@@ -1308,7 +1421,13 @@ impl Reader<'_> {
         value: &Value,
     ) -> Result<(CredentialSource, Option<Arc<LoginSpec>>)> {
         let table = self.table(key, value)?;
-        self.only_keys(key, table, &["env", "store", "login"])?;
+        self.only_keys(key, table, &["env", "store", "login", "adc"])?;
+        if let Some(adc) = table.get("adc") {
+            if adc != &Value::Boolean(true) || table.len() != 1 {
+                return Err(self.invalid(key, "ADC requires only adc = true"));
+            }
+            return Ok((CredentialSource::ApplicationDefault, None));
+        }
         let login_key = format!("{key}.login");
         let login = table
             .get("login")

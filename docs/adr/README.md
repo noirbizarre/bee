@@ -47,3 +47,4 @@ by editing the old one. The history is the value.
 - [ADR-022](022-named-profiles.md) — Scope connections, model preferences and durable sessions with named profiles
 - [ADR-023](023-profile-model-recency.md) — Persist account-bound per-profile recent model choices separately from defaults
 - [ADR-024](024-github-copilot-authentication.md) — Integrate GitHub Copilot device OAuth, direct tokens and native models
+- [ADR-025](025-google-cloud-provider.md) — Integrate Google Cloud Gemini with trusted project routing and renewable ADC

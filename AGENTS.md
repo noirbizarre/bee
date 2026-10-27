@@ -36,6 +36,8 @@ GitHub.com Copilot supports device OAuth or explicit environment GitHub user tok
 validated account API targets and native per-model endpoint/context declarations independent of public catalog hints.
 Pending interactions are turn-owned; cleanup precedes terminal idle and direct-close responses.
 Each native backend preserves its own continuation and tool-result semantics.
+Google Cloud uses official Vertex AI Chat compatibility with configured Gemini models, project/location routing and
+renewable authorized-user, service-account-key or attached-account ADC, separate from AI Studio API keys and billing.
 Optional Models.dev discovery enriches selection without blocking inference; public cache and account-specific endpoint
 listings stay separate. Explicit configuration wins over opted-in catalog protocol hints/context budgets, frozen per turn.
 Named profiles scope connection references, model preferences and durable sessions; existing connections migrate into

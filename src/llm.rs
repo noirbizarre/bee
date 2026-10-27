@@ -17,6 +17,10 @@ use crate::provider::{Profile, Protocol};
 /// A normalized, safe-to-display inference failure. Never stores wire values.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, miette::Diagnostic)]
 pub enum Error {
+    /// Fixed Cloud recovery advice, never upstream error text.
+    #[error("Google Cloud inference: {0}")]
+    #[diagnostic(code(bee::llm::google_cloud))]
+    GoogleCloud(&'static str),
     /// Applicable guidance could not be loaded or retained.
     #[error(transparent)]
     #[diagnostic(transparent)]
@@ -205,6 +209,7 @@ pub struct Step {
 /// A selected endpoint and its reusable async transport.
 #[derive(Clone)]
 pub struct Model {
+    google_cloud_session: Option<crate::auth::google_cloud::Session>,
     copilot_session: Option<crate::auth::copilot::Session>,
     copilot_agent: bool,
     chatgpt_session: Option<crate::auth::chatgpt::Session>,
@@ -227,6 +232,7 @@ impl Model {
     pub fn new(profile: Profile, model: String, credential: Option<Secret>) -> Result<Self, Error> {
         let selection = crate::models::Snapshot::default().resolve(&profile, &model);
         Ok(Self {
+            google_cloud_session: None,
             copilot_session: None,
             copilot_agent: false,
             chatgpt_session: None,
@@ -248,6 +254,11 @@ impl Model {
         text: &mut (dyn FnMut(&str) + Send),
     ) -> Result<Step, Error> {
         self.context(messages, tools)?.check()?;
+        if self.profile.google_cloud().is_some() != self.google_cloud_session.is_some() {
+            return Err(Error::GoogleCloud(
+                "prepare a renewable Google Cloud session before inference",
+            ));
+        }
         if self.profile.is_copilot() != self.copilot_session.is_some() {
             return Err(Error::Copilot(
                 "prepare a validated Copilot session before inference",
@@ -287,6 +298,17 @@ impl Model {
         } else {
             self
         };
+        let mut cloud;
+        let model = if let Some(session) = &model.google_cloud_session {
+            session.check(&model.profile).map_err(|_| {
+                Error::GoogleCloud("prepared session does not match the Cloud target")
+            })?;
+            cloud = model.clone();
+            cloud.credential = Some(session.credential().await.map_err(|_| Error::GoogleCloud("ADC changed or cannot be renewed; check credentials and start a new turn"))?.secret().clone());
+            &cloud
+        } else {
+            model
+        };
         let mut copilot;
         let model = if model.copilot_session.is_some() {
             copilot = model.clone();
@@ -305,6 +327,14 @@ impl Model {
 }
 
 impl Model {
+    /// Use turn-pinned renewable ADC for official Google Cloud inference.
+    pub fn with_google_cloud_session(
+        mut self,
+        session: crate::auth::google_cloud::Session,
+    ) -> Self {
+        self.google_cloud_session = Some(session);
+        self
+    }
     /// Attach a trusted target and identity pinned for this turn.
     pub fn with_copilot_session(mut self, session: crate::auth::copilot::Session) -> Self {
         self.copilot_session = Some(session);
@@ -383,6 +413,16 @@ impl Model {
             version,
             true,
         )?;
+        if let Some(project) = self
+            .google_cloud_session
+            .as_ref()
+            .and_then(|s| s.quota_project())
+        {
+            let mut value =
+                reqwest::header::HeaderValue::from_str(project).map_err(|_| Error::Headers)?;
+            value.set_sensitive(true);
+            headers.insert("x-goog-user-project", value);
+        }
         if let Some(session) = &self.copilot_session {
             use reqwest::header::HeaderValue;
             headers.insert(
@@ -477,6 +517,52 @@ pub(crate) fn request_headers(
 
 /// Inspect only recognized classifications; upstream text never escapes this seam.
 pub(crate) fn provider_error(protocol: Protocol, error: &Value) -> Error {
+    // Google ErrorInfo reasons are machine identifiers; free-text messages and metadata stay private.
+    if let Some(details) = error["details"].as_array() {
+        for detail in details {
+            if detail["@type"] != "type.googleapis.com/google.rpc.ErrorInfo" {
+                continue;
+            }
+            match detail["reason"].as_str() {
+                Some("SERVICE_DISABLED") => {
+                    return Error::GoogleCloud(
+                        "Vertex AI API is disabled; enable aiplatform.googleapis.com in the configured project",
+                    );
+                }
+                Some("BILLING_DISABLED" | "BILLING_NOT_ACTIVE") => {
+                    return Error::GoogleCloud(
+                        "billing is unavailable; enable billing for the resource and quota projects",
+                    );
+                }
+                Some("IAM_PERMISSION_DENIED" | "ACCESS_DENIED") => {
+                    return Error::GoogleCloud(
+                        "permission denied; grant prediction access and serviceusage.services.use on the quota project where required",
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+    match error["status"].as_str() {
+        Some("UNAUTHENTICATED") => return Error::Authentication,
+        Some("PERMISSION_DENIED") => {
+            return Error::GoogleCloud(
+                "permission denied; check Vertex AI IAM, API enablement, billing and quota-project access",
+            );
+        }
+        Some("NOT_FOUND") => {
+            return Error::GoogleCloud(
+                "model or resource unavailable; check the configured project, location and google/ model ID",
+            );
+        }
+        Some("RESOURCE_EXHAUSTED") => return Error::RateLimit,
+        Some("UNAVAILABLE" | "INTERNAL") => {
+            return Error::GoogleCloud(
+                "service temporarily unavailable; retry later without changing the billing project",
+            );
+        }
+        _ => {}
+    }
     match error["code"].as_str() {
         Some("subscription_sharing_user_not_eligible") => {
             return Error::ChatGpt(

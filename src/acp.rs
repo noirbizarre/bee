@@ -29,6 +29,8 @@ mod plans;
 mod presentation;
 mod scenarios;
 
+#[cfg(test)]
+mod google_cloud_tests;
 #[cfg(all(test, unix))]
 mod oauth_tests;
 
@@ -125,6 +127,7 @@ pub struct Runtime {
     permissions: crate::permissions::Settings,
     auth_environment: Option<crate::config::Environment>,
     login_http: Arc<dyn crate::http::LoginHttp>,
+    google_cloud_http: Arc<dyn crate::auth::google_cloud::Http>,
     discovery: Option<Arc<crate::models::Service>>,
     history: Option<crate::history::Store>,
     history_settings: crate::history::Settings,
@@ -155,6 +158,7 @@ impl Runtime {
             instructions: None,
             auth_environment: None,
             login_http: Arc::new(crate::http::AsyncLoginHttp),
+            google_cloud_http: Arc::new(crate::http::GoogleAuthHttp),
             discovery: None,
             history: None,
             history_settings: Default::default(),
@@ -192,6 +196,16 @@ impl Runtime {
     ) -> Self {
         self.auth_environment = Some(environment);
         self.login_http = http;
+        self
+    }
+
+    /// Supply Google ADC transport independently of Bee-owned browser login.
+    #[must_use]
+    pub fn with_google_cloud_http(
+        mut self,
+        http: Arc<dyn crate::auth::google_cloud::Http>,
+    ) -> Self {
+        self.google_cloud_http = http;
         self
     }
 
@@ -349,7 +363,25 @@ async fn inference(
     let chatgpt = profile
         .login_spec()
         .is_some_and(crate::preset::LoginSpec::is_chatgpt);
-    let resolved = if chatgpt {
+    let cloud_session = if profile.google_cloud().is_some() {
+        Some(
+            crate::auth::google_cloud::Session::with_http(
+                &profile,
+                &env,
+                runtime.google_cloud_http.clone(),
+            )
+            .await
+            .map_err(|error| {
+                reply.selection_failed(crate::selection::Reason::CredentialsUnavailable);
+                TurnFailure::new(error.to_string())
+            })?,
+        )
+    } else {
+        None
+    };
+    let resolved = if let Some(session) = &cloud_session {
+        session.credential().await.map(Some)
+    } else if chatgpt {
         crate::auth::chatgpt::resolve(&store, profile.name(), runtime.login_http.as_ref())
             .await
             .map(Some)
@@ -397,7 +429,7 @@ async fn inference(
                 },
             )?
         }
-        Err(error) if chatgpt => {
+        Err(error) if chatgpt || cloud_session.is_some() => {
             if let Some(reference) = lock(&reply.sessions).automatic(&reply.id) {
                 *lock(&reply.selection_failure) =
                     crate::selection::authentication_failure(&reference, &profile, &store);
@@ -549,6 +581,9 @@ async fn inference(
         .with_cache_scope(lock(&reply.sessions).profile_name().to_owned());
     if let Some(session) = session {
         model = model.with_chatgpt_session(session);
+    }
+    if let Some(session) = cloud_session {
+        model = model.with_google_cloud_session(session);
     }
     if let Some(session) = copilot_session {
         model = model.with_copilot_session(session);

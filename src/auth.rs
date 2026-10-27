@@ -35,6 +35,7 @@ use crate::provider::{CredentialSource, Profile, Protocol, Providers};
 
 pub mod chatgpt;
 pub mod copilot;
+pub mod google_cloud;
 
 /// The version of the credential file's layout.
 const STORE_VERSION: u64 = 1;
@@ -72,6 +73,7 @@ impl fmt::Debug for Secret {
 /// A resolved secret and when it stops working.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Credential {
+    pub(crate) cloud_identity: Option<Secret>,
     secret: Secret,
     /// Seconds since the Unix epoch, for credentials that expire.
     expires_at: Option<u64>,
@@ -88,6 +90,9 @@ impl Credential {
             )
     }
     pub(crate) fn selection_identity(&self) -> serde_json::Value {
+        if let Some(identity) = &self.cloud_identity {
+            return serde_json::json!(["google-cloud", identity.expose()]);
+        }
         // This value is immediately hashed by selection; never expose it through Debug.
         match &self.oauth {
             Some(registration) => registration.selection_identity(),
@@ -98,6 +103,7 @@ impl Credential {
     #[must_use]
     pub fn new(secret: Secret) -> Self {
         Self {
+            cloud_identity: None,
             secret,
             expires_at: None,
             oauth: None,
@@ -129,6 +135,9 @@ impl Credential {
         self.oauth.as_ref().map(chatgpt::Registration::plan_enabled)
     }
     pub(crate) fn same_discovery_account(&self, other: &Self) -> bool {
+        if self.cloud_identity.is_some() || other.cloud_identity.is_some() {
+            return self.cloud_identity == other.cloud_identity;
+        }
         match (&self.oauth, &other.oauth) {
             (Some(a), Some(b)) => a.same_discovery_account(b),
             (None, None) => self.secret == other.secret,
@@ -401,6 +410,7 @@ impl FileStore {
             credentials.insert(
                 name.clone(),
                 Credential {
+                    cloud_identity: None,
                     secret,
                     expires_at,
                     oauth,
@@ -744,6 +754,7 @@ pub fn resolve(
     now: u64,
 ) -> Result<Option<Credential>> {
     match profile.credential() {
+        Some(CredentialSource::ApplicationDefault) => google_cloud::identity(profile, env),
         None => Ok(None),
         Some(CredentialSource::Env(variable)) => env
             .variable(variable)
@@ -805,6 +816,8 @@ pub fn header_for(protocol: Protocol, secret: &Secret) -> (&'static str, Secret)
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Status {
+    /// ADC is owned by Google tooling/deployment; status does not acquire tokens.
+    ApplicationDefault,
     /// No `credential`: an unauthenticated endpoint.
     Unauthenticated,
     /// Read from a variable.
@@ -867,6 +880,7 @@ pub fn status(
             continue;
         };
         let status = match profile.credential() {
+            Some(CredentialSource::ApplicationDefault) => Status::ApplicationDefault,
             None => Status::Unauthenticated,
             Some(CredentialSource::Env(variable)) => Status::Env {
                 variable: variable.clone(),
@@ -917,6 +931,11 @@ pub fn profile<'a>(providers: &'a Providers, name: &str) -> Result<&'a Profile> 
 ///
 /// [`Error::AuthNotStored`] if it does not.
 pub fn require_store(profile: &Profile) -> Result<()> {
+    if profile.google_cloud().is_some() {
+        return Err(google_cloud::failure(
+            "ADC is managed externally; use gcloud auth application-default login/revoke or configure an attached service account",
+        ));
+    }
     if matches!(profile.credential(), Some(CredentialSource::Store { .. })) {
         Ok(())
     } else {
