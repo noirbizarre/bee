@@ -140,7 +140,7 @@ brew install noirbizarre/homebrew-tap/bee
 ```
 
 ```bash
-paru -S bee-bin  # or your AUR helper of choice
+paru -S bee-agent  # or your AUR helper of choice
 ```
 
 Or download a binary for your platform from the

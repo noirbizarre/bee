@@ -878,14 +878,32 @@ fn rename_exclusive(
     destination_name: &std::ffi::OsStr,
 ) -> Result<(), Failure> {
     #[cfg(target_os = "linux")]
-    let result = nix::fcntl::renameat2(
-        &source_parent.file,
-        source_name,
-        &destination_parent.file,
-        destination_name,
-        nix::fcntl::RenameFlags::RENAME_NOREPLACE,
-    )
-    .map_err(|e| std::io::Error::from_raw_os_error(e as i32));
+    let result = {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::ffi::OsStrExt;
+        let source = std::ffi::CString::new(source_name.as_bytes()).map_err(|_| unsupported())?;
+        let destination =
+            std::ffi::CString::new(destination_name.as_bytes()).map_err(|_| unsupported())?;
+        // Bypass the glibc 2.28 wrapper: release sysroots predate it, and musl's
+        // nix API omits it. Never fall back to a rename that can replace a racer.
+        // SAFETY: descriptors and NUL-terminated strings remain live throughout
+        // the syscall; arguments match renameat2's kernel ABI on Linux targets.
+        let code = unsafe {
+            nix::libc::syscall(
+                nix::libc::SYS_renameat2,
+                source_parent.file.as_raw_fd(),
+                source.as_ptr(),
+                destination_parent.file.as_raw_fd(),
+                destination.as_ptr(),
+                nix::libc::RENAME_NOREPLACE,
+            )
+        };
+        if code == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    };
     #[cfg(target_os = "macos")]
     let result = {
         use std::os::fd::AsRawFd;
@@ -1170,29 +1188,58 @@ mod tests {
 
     #[tokio::test]
     async fn destination_races_never_replace_files_or_directories() {
-        let root = tempfile::tempdir().unwrap();
-        let context = context(&root);
-        for directory in [false, true] {
-            let source = root.path().join("source");
-            if directory {
-                std::fs::create_dir(&source).unwrap();
-            } else {
-                std::fs::write(&source, "source").unwrap();
-            }
-            let manifest =
-                Manifest::prepare(&context, "source", Some("destination"), true, "move").unwrap();
-            std::fs::write(root.path().join("destination"), "untouched").unwrap();
-            assert!(manifest.move_to(&context).await.is_err());
-            assert!(source.exists());
-            assert_eq!(
-                std::fs::read(root.path().join("destination")).unwrap(),
-                b"untouched"
-            );
-            std::fs::remove_file(root.path().join("destination")).unwrap();
-            if directory {
-                std::fs::remove_dir(source).unwrap();
-            } else {
-                std::fs::remove_file(source).unwrap();
+        // Empty directories matter: ordinary rename can silently replace them.
+        for destination_kind in ["file", "empty-directory", "populated-directory"] {
+            for operation in ["move", "copy"] {
+                let root = tempfile::tempdir().unwrap();
+                let context = context(&root);
+                for directory in [false, true] {
+                    let source = root.path().join("source");
+                    if directory {
+                        std::fs::create_dir(&source).unwrap();
+                    } else {
+                        std::fs::write(&source, "source").unwrap();
+                    }
+                    let manifest =
+                        Manifest::prepare(&context, "source", Some("destination"), true, operation)
+                            .unwrap();
+                    let destination = root.path().join("destination");
+                    if destination_kind == "file" {
+                        std::fs::write(&destination, "untouched").unwrap();
+                    } else {
+                        std::fs::create_dir(&destination).unwrap();
+                        if destination_kind == "populated-directory" {
+                            std::fs::write(destination.join("child"), "untouched").unwrap();
+                        }
+                    }
+                    let result = if operation == "move" {
+                        manifest.move_to(&context).await
+                    } else {
+                        manifest.copy(&context).await
+                    };
+                    assert!(result.is_err());
+                    assert!(source.exists());
+                    if destination_kind == "file" {
+                        assert_eq!(std::fs::read(&destination).unwrap(), b"untouched");
+                        std::fs::remove_file(&destination).unwrap();
+                    } else {
+                        if destination_kind == "populated-directory" {
+                            assert_eq!(
+                                std::fs::read(destination.join("child")).unwrap(),
+                                b"untouched"
+                            );
+                        } else {
+                            assert_eq!(std::fs::read_dir(&destination).unwrap().count(), 0);
+                        }
+                        std::fs::remove_dir_all(&destination).unwrap();
+                    }
+                    if directory {
+                        std::fs::remove_dir(source).unwrap();
+                    } else {
+                        std::fs::remove_file(source).unwrap();
+                    }
+                }
+                assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
             }
         }
     }

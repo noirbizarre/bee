@@ -30,6 +30,7 @@ The template answers in `.config/git.tpl.toml`, Cargo binstall metadata and Publ
 Each raw executable is named `bee_<tag>_<suffix>`; tags have no `v` prefix. `SHA256SUMS` covers all six executables.
 No signing or artifact-attestation step is configured. Windows host tests do not imply a Windows release asset.
 Homebrew uses the two macOS assets and Linux x86-64 musl; AUR uses GNU x86-64/ARM64 assets.
+The AUR package is `bee-agent`; its installed command is `bee`.
 
 ## Before merging a release PR
 
@@ -63,6 +64,8 @@ names alone do not prove working permissions. Do not print secret values.
 For each Linux target use `cross build --release --locked --target <target>`; for each macOS target use
 `cargo build --release --locked --target <target>`, with `RUSTFLAGS="-D warnings"` as in Publish Release.
 Use suitable runners/toolchains; a host build alone does not prove the entire matrix.
+The Linux Release Builds workflow checks all four Linux targets on pull requests using publication's cross setup.
+It builds without publishing; macOS release builds still require separate verification.
 
 On native-compatible runners, check the built executable's exact version, help and clean empty-stdin shutdown with
 isolated HOME/XDG directories. Inspect GNU runtime requirements and musl linking rather than promising unmeasured
@@ -79,8 +82,15 @@ These are rust.tpl follow-ups, not guarantees provided by this repository's curr
 
 - Gate PRs on generated documentation builds while keeping Pages deployment main-only.
 - Pin the documentation application: locked uv does not pin unversioned `uvx zensical`.
-- Add build-only six-target release validation and native-compatible binary smoke tests before publication.
+- Extend build-only release validation to macOS and add native-compatible binary smoke tests before publication.
 
 Carry generic workflow changes upstream and integrate through git-tpl. Record unavailable runners, external settings
 and unpublished asset/package checks as remaining gates; do not declare complete release readiness from static
 configuration inspection alone.
+
+## Recovering a failed release build
+
+Publish Release checks out the requested tag. Rerunning a failed old tag after merging a source fix builds the same
+old source. Use gh-ship's release procedure to release the corrected revision; do not move tags or bump versions by
+hand. Verify the existing draft/tag state before recovery, and confirm `bee-agent` AUR ownership/key access before
+package publication.

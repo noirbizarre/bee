@@ -89,7 +89,7 @@ no CI results. That means the repository needs:
 - a `homebrew` environment holding the secret `TAP_TOKEN`, scoped to push to
   `noirbizarre/homebrew-tap` only.
 - an `aur` environment holding the secret `AUR_SSH_PRIVATE_KEY`, for the AUR
-  account that owns the `bee-bin` package.
+  account that owns the `bee-agent` package.
 
 ## This repository is generated from a template
 
