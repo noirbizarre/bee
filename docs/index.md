@@ -9,9 +9,10 @@ and LLM provider integration, allowing it to work with any compatible ACPv2 clie
 
 ## Status
 
-Bee is at the **bootstrap stage**: the repository, tooling, CI and release automation exist, and the `bee` binary
-serves ACPv2 over stdio, so a client can start it, complete the `initialize` handshake, create sessions and submit
-prompts. Bee advertises the baseline session lifecycle (`session/new`, `list`, `resume`, `close`, `prompt`, `cancel`).
+Bee implements a standalone headless agent runtime for its initial **0.1.0 release**. The `bee` binary
+serves draft ACP wire-v2 over stdio, so a compatible client can start it, complete the `initialize` handshake,
+create sessions and submit prompts. Bee advertises the baseline session lifecycle
+(`session/new`, `list`, `resume`, `close`, `prompt`, `cancel`).
 
 **Chat Completions, Responses and Anthropic Messages inference are implemented.** Selected connections receive prompts and
 stream answers over ACP. Cancellation and close interrupt pending inference. Production sessions retain successful
@@ -41,6 +42,9 @@ normal configuration hierarchy. See [project instructions and skills](instructio
 
 ## Configuration
 
+New users should begin with [installation](installation.md) and [getting started](getting-started.md).
+The latter includes client launch settings and [known limitations](getting-started.md#known-limitations).
+
 For client integration tests, launch `bee --scenario success` as a minimal ACPv2 reference implementation and
 deterministic test agent. [Built-in scenarios](scenarios.md) cover completion, plans, permissions, form input,
 cancellation and controlled errors with memory-only sessions and no LLM credentials or external services.
@@ -48,8 +52,8 @@ Normal inference configuration follows below.
 
 Bee reads TOML configuration from up to three files, merged in this order, lowest precedence first:
 
-1. **Global:** `$XDG_CONFIG_HOME/bee/config.toml`, or `~/.config/bee/config.toml` when `XDG_CONFIG_HOME` is unset. The
-   same on every platform, macOS included.
+1. **Global:** `$XDG_CONFIG_HOME/bee/config.toml`, or `~/.config/bee/config.toml` when `XDG_CONFIG_HOME` is unset,
+   empty or relative. This is the same on every platform, macOS included.
 2. **`BEE_CONFIG`:** the file named by that environment variable, for settings chosen per client or workspace.
 3. **Project:** `.config/bee.toml` in the directory Bee is launched from. Parent directories are not searched.
 
@@ -60,6 +64,23 @@ errors, which line and column. Diagnostics never repeat the contents of a file, 
 Tables merge key by key, and for a scalar the higher layer wins. An array in a higher layer **replaces** the lower one
 instead of extending it. Giving one key different types in two layers (a string over an integer, say) is an error that
 names the key and both files. See [ADR-006](adr/006-layered-xdg-configuration.md).
+
+Effective [permission policy](tools.md#native-permission-rules) is an exception: global and `BEE_CONFIG` rule arrays
+concatenate in order, while project rules only tighten decisions. An empty project array cannot erase trusted rules.
+
+An empty `BEE_CONFIG` is unset; a relative path resolves from Bee's process working directory. Configuration is loaded
+at launch, not reloaded from each session's `cwd`. On Windows, an absent or empty `HOME` falls back to `USERPROFILE`.
+All XDG roots must be absolute; empty or relative roots use the home-directory fallback:
+
+| Purpose | XDG location | Home fallback |
+| --- | --- | --- |
+| Configuration | `$XDG_CONFIG_HOME/bee/config.toml` | `~/.config/bee/config.toml` |
+| Credentials | `$XDG_DATA_HOME/bee/credentials.json` | `~/.local/share/bee/credentials.json` |
+| Public model cache | `$XDG_CACHE_HOME/bee/models.dev.json` | `~/.cache/bee/models.dev.json` |
+| Sessions and model preferences | `$XDG_STATE_HOME/bee/` | `~/.local/state/bee/` |
+
+Without a usable configuration root, the global layer is skipped. Normal serving still needs a usable durable state
+root; set an absolute `XDG_STATE_HOME` when no home directory is available. Scenario mode uses memory-only state.
 
 ### Named profiles
 
@@ -404,9 +425,11 @@ on GitHub while Bee polls for authorization; no loopback callback is needed.
 Bee persists the credential before sending `elicitation/complete` with that same ID.
 Credentials and callback/exchange secrets never enter model context.
 
-ACP browser sign-in requires Bee's private credential store, currently supported on
-Unix. On Windows, configure an environment credential instead; URL capability alone
-does not enable the store.
+ACP browser sign-in requires Bee's private credential store. Store operations, including token imports with
+`--with-token`, are currently supported only on Unix. On native Windows, environment credentials are available for
+compatible API-key connections and explicit Copilot-token setups; URL capability alone does not enable the store.
+ChatGPT-plan login requires stored OAuth credentials and is currently unavailable on native Windows. An OpenAI API-key
+connection is a separate authentication and billing route, not ChatGPT-plan access.
 
 The whole attempt has a five-minute deadline; credential exchange also has a
 30-second transport deadline. Decline, cancel, unknown actions and errors end the
@@ -529,7 +552,7 @@ same connection from several profiles intentionally shares its credentials; sepa
 ## Scope
 
 Bee is the agent side of an ACPv2 connection. It runs the agentic loop and talks to LLM providers; presentation and
-orchestration belong to the client. The planned boundaries are:
+orchestration belong to the client. Its responsibilities are:
 
 - ACPv2 protocol integration
 - agent execution and the agentic loop
@@ -546,19 +569,21 @@ orchestration belong to the client. The planned boundaries are:
 - MCP configuration and orchestration are not Bee-specific responsibilities. Bee should use the capabilities provided
   through the ACPv2 client-agent contract, where the protocol supports them.
 - WebAssembly-based extensions are a possible future direction, not an initial requirement.
-- Bee does not assume ACPv2 provides a universal implementation of provider authentication. Each browser sign-in is a
+- Bee does not assume ACPv2 provides a universal implementation of provider authentication. Each browser sign-in is
   described in data and limited to one mechanism, not a generic OAuth client.
 
 ## Installation
 
 Bee is not published to crates.io (the `bee` crate name is taken by an unrelated project). Download a binary for your
 platform from the [latest release](https://github.com/noirbizarre/bee/releases/latest) once one is published.
+See [installation](installation.md) for supported assets, checksums, package managers and source builds.
 
 ## Usage
 
 An ACPv2 client launches `bee` as a subprocess and speaks the protocol on its stdin and stdout. Stdout carries protocol
 traffic only; diagnostics go to stderr. Closing stdin ends the connection and Bee exits with status 0.
 People can use `bee auth` for provider credentials and `bee models` for model discovery.
+Follow [getting started](getting-started.md) for a complete client launch, or consult the [CLI reference](cli.md).
 
 ```bash
 bee --help

@@ -11,8 +11,9 @@ is the project root; without a marker, the session's working directory is the ro
 through the session directory. It does not search above the project root. This traversal is independent of configuration
 loading, which still uses the launch directory only.
 
-`~/.agents/AGENTS.md` supplies additional user instructions alongside the built-in system prompt. An unset `HOME` simply
-disables user-level discovery. Files are ordinary UTF-8 Markdown. Missing optional files are normal; unreadable,
+`~/.agents/AGENTS.md` supplies additional user instructions alongside the built-in system prompt. Without a usable home
+directory, user-level discovery is disabled; Windows falls back from absent or empty `HOME` to `USERPROFILE`.
+Files are ordinary UTF-8 Markdown. Missing optional files are normal; unreadable,
 oversized or invalid applicable instruction files fail the turn with a diagnostic explaining how to repair them.
 
 Parent rules remain applicable. A closer `AGENTS.md` wins conflicts for its subtree; explicit user requests override
