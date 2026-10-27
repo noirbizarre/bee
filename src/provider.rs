@@ -35,6 +35,7 @@ use cache::{AnthropicCache, OpenAiCache};
 
 /// The keys a profile table accepts.
 const PROFILE_KEYS: &[&str] = &[
+    "display_name",
     "auth",
     "preset",
     "protocols",
@@ -63,6 +64,7 @@ const ENDPOINT_KEYS: &[&str] = &["base_url", "options"];
 /// The keys a preset table accepts: a profile's, but a preset cannot be built
 /// on another, so chains and cycles cannot exist.
 const PRESET_KEYS: &[&str] = &[
+    "display_name",
     "auth",
     "protocols",
     "prefer",
@@ -341,6 +343,7 @@ impl Endpoint {
 pub struct Profile {
     copilot: bool,
     name: String,
+    display_name: Option<String>,
     // In preference order, never empty. The order is data, not an accident of
     // how the file was written: see `prefer`.
     endpoints: Vec<Endpoint>,
@@ -467,6 +470,12 @@ impl Profile {
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Presentation only; credential and session identities always use `name`.
+    #[must_use]
+    pub fn display_name(&self) -> Option<&str> {
+        self.display_name.as_deref()
     }
 
     /// Every protocol the provider speaks, most preferred first.
@@ -952,6 +961,15 @@ impl Reader<'_> {
         Ok(Profile {
             copilot,
             name: name.to_owned(),
+            display_name: table.get("display_name").map(|value| {
+                let field = format!("{key}.display_name");
+                let label = self.string(&field, value)?;
+                // Bound presentation independently of IDs without echoing pasted secrets.
+                if label.trim().is_empty() || label.len() > 256 || label.chars().any(char::is_control) {
+                    return Err(self.invalid(&field, "requires nonblank text without control characters, at most 256 UTF-8 bytes"));
+                }
+                Ok(label.to_owned())
+            }).transpose()?,
             endpoints,
             model,
             models,

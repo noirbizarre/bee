@@ -39,6 +39,30 @@ Streams must have a valid terminal lifecycle. Truncated streams are errors, not 
 event/tool argument is limited to 1 MiB and each response to 16 MiB. Tools execute sequentially with no automatic retry
 after side effects.
 
+## Google AI Studio requests
+
+The `google-aistudio` preset uses Google's official
+[OpenAI compatibility endpoint](https://ai.google.dev/gemini-api/docs/openai) for the Gemini Developer API. Inference
+posts to `https://generativelanguage.googleapis.com/v1beta/openai/chat/completions` using the selected exact model ID,
+API-key bearer authentication, streamed text, function tools and the configured output cap. See
+[setup and API quotas](index.md#use-google-ai-studio).
+
+Chat retains `tool_calls[].extra_content.google.thought_signature` on the original call, including signatures received
+in metadata-only stream fragments. Parallel and sequential tool cycles replay signed calls with their original argument
+bytes and call IDs. Signatures are opaque complete values, not concatenated text. Repeated identical values are accepted;
+conflicting, malformed or oversized values fail before tools execute. Retained signatures are bounded to 1 MiB in total
+per response. Unknown extension fields are not replayed.
+
+Signed snapshots belong to private successful context, survive durable resume, and are never assistant-visible text or
+tool input. Context estimates count the replayed request once, including signatures; oldest-whole-turn eviction removes
+complete exchanges. Changing provider/model or protocol drops native state through the usual portable-history path.
+Configure model-specific context capacities or opt into catalog budgets rather than assume every Gemini model has the
+same window. Reasoning can consume the output budget, so a low cap may leave little visible answer text.
+
+This is the text/function-calling compatibility subset, not Google's native generation, Interactions or cache-resource
+API. Default cache settings add no unverified Google cache-control fields. API availability and rate limits remain
+project/model dependent and separate from Google AI subscription quotas.
+
 ## ChatGPT plan requests
 
 The `chatgpt` preset uses the public `POST https://api.openai.com/v1/responses` endpoint with a renewable OAuth bearer

@@ -3,6 +3,11 @@
 A **profile** groups references to provider **connections** and its own model preferences. A connection, defined under
 `[providers.<name>]`, owns endpoints, headers and a credential source. Profiles do not authenticate independently.
 
+Connections may inherit a human-readable `display_name` from their preset or override it directly. ACP displays
+`Display name (connection-id)` when the name differs from the ID, so two accounts using the same preset stay distinct.
+Names are presentation only: profile membership, CLI arguments, account continuity and durable sessions still reference
+the configured connection ID. Relabeling a connection does not select another account.
+
 ## Configure and select
 
 ```toml

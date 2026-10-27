@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
 
-use super::{Error, Message, Model, Step, Stop, Tool, Usage, call, string};
-use crate::provider::{MaxTokensField, ProtocolOptions};
+use super::{Call, Error, Message, Model, Native, Step, Stop, Tool, Usage, call, string};
+use crate::provider::{MaxTokensField, Protocol, ProtocolOptions};
 
 pub(super) async fn run(
     model: &Model,
@@ -30,17 +30,20 @@ pub(super) async fn run(
 }
 
 pub(super) fn request(model: &Model, messages: &[Message], tools: &[Tool]) -> Result<Value, Error> {
-    let mut messages: Vec<_> = messages.iter().map(|message| match message {
-        Message::User(text) => json!({"role":"user", "content":text}),
-        Message::Assistant { text, calls, .. } => {
-            let mut value = json!({"role":"assistant", "content":text});
-            if !calls.is_empty() {
-                value["tool_calls"] = calls.iter().map(|call| json!({"id":call.id,"type":"function","function":{"name":call.name,"arguments":call.arguments.to_string()}})).collect();
+    let mut messages = messages
+        .iter()
+        .map(|message| match message {
+            Message::User(text) => Ok(json!({"role":"user", "content":text})),
+            Message::Assistant {
+                text,
+                calls,
+                native,
+            } => assistant(text, calls, native.as_ref()),
+            Message::Tool { id, output, .. } => {
+                Ok(json!({"role":"tool", "tool_call_id":id,"content":output}))
             }
-            value
-        }
-        Message::Tool { id, output, .. } => json!({"role":"tool", "tool_call_id":id,"content":output}),
-    }).collect();
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
     if !model.instructions.is_empty() {
         messages.insert(0, json!({"role":"system","content":model.instructions}));
     }
@@ -92,11 +95,80 @@ pub(super) fn request(model: &Model, messages: &[Message], tools: &[Tool]) -> Re
     Ok(body)
 }
 
+fn assistant(text: &str, calls: &[Call], native: Option<&Native>) -> Result<Value, Error> {
+    let mut value = json!({"role":"assistant", "content":text});
+    if !calls.is_empty() {
+        value["tool_calls"] = calls.iter().map(|call| json!({"id":call.id,"type":"function","function":{"name":call.name,"arguments":call.arguments.to_string()}})).collect();
+    }
+    let Some(native) = native else {
+        return Ok(value);
+    };
+    if native.protocol != Protocol::OpenAiChat {
+        return Err(Error::Unsupported("continuation from another protocol"));
+    }
+    let [snapshot] = native.items.as_slice() else {
+        return Err(Error::Malformed);
+    };
+    let saved = snapshot["tool_calls"].as_array().ok_or(Error::Malformed)?;
+    if saved.len() != calls.len() || saved.is_empty() || saved.len() > 64 {
+        return Err(Error::Malformed);
+    }
+    let mut signature_bytes = 0;
+    for (index, (saved, call)) in saved.iter().zip(calls).enumerate() {
+        let arguments = string(&saved["function"]["arguments"])?;
+        if arguments.len() > crate::http::MAX_EVENT {
+            return Err(Error::Limit);
+        }
+        if serde_json::from_str::<Value>(arguments).map_err(|_| Error::Malformed)? != call.arguments
+        {
+            return Err(Error::Malformed);
+        }
+        // Replay exact argument bytes alongside the signature, not a reserialized object.
+        value["tool_calls"][index]["function"]["arguments"] = arguments.into();
+        if let Some(signature) = signature(saved)? {
+            signature_bytes += signature.len();
+            value["tool_calls"][index]["extra_content"] =
+                json!({"google":{"thought_signature":signature}});
+        }
+    }
+    if signature_bytes > crate::http::MAX_EVENT {
+        return Err(Error::Limit);
+    }
+    // Public Native values must not inject roles or arbitrary provider request fields.
+    if signature_bytes == 0 || &value != snapshot {
+        return Err(Error::Malformed);
+    }
+    Ok(value)
+}
+
+fn signature(value: &Value) -> Result<Option<&str>, Error> {
+    let Some(extra) = value.get("extra_content") else {
+        return Ok(None);
+    };
+    let extra = extra.as_object().ok_or(Error::Malformed)?;
+    let Some(google) = extra.get("google") else {
+        return Ok(None);
+    };
+    let google = google.as_object().ok_or(Error::Malformed)?;
+    let Some(value) = google.get("thought_signature") else {
+        return Ok(None);
+    };
+    let signature = string(value)?;
+    if signature.is_empty() {
+        return Err(Error::Malformed);
+    }
+    if signature.len() > crate::http::MAX_EVENT {
+        return Err(Error::Limit);
+    }
+    Ok(Some(signature))
+}
+
 #[derive(Default)]
 struct Fragments {
     id: String,
     name: String,
     arguments: String,
+    signature: Option<String>,
 }
 
 #[derive(Default)]
@@ -107,6 +179,7 @@ struct Parser {
     usage: Usage,
     done: bool,
     refused: bool,
+    signature_bytes: usize,
 }
 
 impl Parser {
@@ -184,6 +257,20 @@ impl Parser {
                         return Err(Error::Unsupported("non-function tool calls"));
                     }
                     let call = self.calls.entry(index).or_default();
+                    if let Some(signature) = signature(value)? {
+                        // Signatures are opaque snapshots, never argument-style text deltas.
+                        if let Some(previous) = &call.signature {
+                            if previous != signature {
+                                return Err(Error::Malformed);
+                            }
+                        } else {
+                            self.signature_bytes += signature.len();
+                            if self.signature_bytes > crate::http::MAX_EVENT {
+                                return Err(Error::Limit);
+                            }
+                            call.signature = Some(signature.to_owned());
+                        }
+                    }
                     for (target, part) in [
                         (&mut call.id, &value["id"]),
                         (&mut call.name, &value["function"]["name"]),
@@ -234,11 +321,11 @@ impl Parser {
         }
         let calls: Vec<_> = self
             .calls
-            .into_values()
+            .values()
             .map(|fragments| {
                 call(
-                    &fragments.id.into(),
-                    &fragments.name.into(),
+                    &fragments.id.clone().into(),
+                    &fragments.name.clone().into(),
                     &fragments.arguments,
                 )
             })
@@ -246,14 +333,53 @@ impl Parser {
         if (stop == Stop::Tools) == calls.is_empty() {
             return Err(Error::Malformed);
         }
+        let native = if self.signature_bytes == 0 {
+            None
+        } else {
+            let mut snapshot = assistant(&self.text, &calls, None)?;
+            for (index, fragments) in self.calls.into_values().enumerate() {
+                snapshot["tool_calls"][index]["function"]["arguments"] = fragments.arguments.into();
+                if let Some(signature) = fragments.signature {
+                    snapshot["tool_calls"][index]["extra_content"] =
+                        json!({"google":{"thought_signature":signature}});
+                }
+            }
+            Some(Native {
+                protocol: Protocol::OpenAiChat,
+                items: vec![snapshot],
+            })
+        };
         Ok(Step {
             message: Message::Assistant {
                 text: self.text,
                 calls,
-                native: None,
+                native,
             },
             stop,
             usage: self.usage,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opaque_metadata_is_bounded_across_individually_valid_events() {
+        let mut parser = Parser::default();
+        let signature = "s".repeat(crate::http::MAX_EVENT / 2 + 1);
+        let event = |index| {
+            json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":index,"extra_content":{"google":{"thought_signature":signature}}}]},"finish_reason":null}]}).to_string()
+        };
+        parser.event(Some(""), &event(0), &mut |_| {}).unwrap();
+        // Repeated snapshots retain no additional bytes.
+        parser.event(Some(""), &event(0), &mut |_| {}).unwrap();
+        assert_eq!(
+            parser.event(Some(""), &event(1), &mut |_| {}).unwrap_err(),
+            Error::Limit
+        );
+        let too_large = json!({"extra_content":{"google":{"thought_signature":"s".repeat(crate::http::MAX_EVENT + 1)}}});
+        assert_eq!(super::signature(&too_large).unwrap_err(), Error::Limit);
     }
 }

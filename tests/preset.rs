@@ -199,6 +199,60 @@ impl Http for FakeHttp {
 // ---- the shipped catalogue ---------------------------------------------------
 
 #[test]
+fn google_ai_studio_enables_compatible_discovery_without_changing_the_legacy_preset() {
+    let providers = project(
+        "provider='studio'\n[providers.studio]\npreset='google-aistudio'\n[providers.legacy]\npreset='google'",
+    )
+    .unwrap();
+    let studio = providers.get("studio").unwrap();
+    assert_eq!(studio.name(), "studio");
+    assert_eq!(studio.display_name(), Some("Google AI Studio"));
+    assert_eq!(studio.catalog_provider(), Some("google"));
+    assert_eq!(studio.protocol(), Protocol::OpenAiChat);
+    assert_eq!(
+        studio.base_url(),
+        "https://generativelanguage.googleapis.com/v1beta/openai"
+    );
+    assert!(studio.discover_models());
+    assert!(studio.login_spec().is_none());
+    assert!(studio.default_model().is_none());
+    assert!(!providers.get("legacy").unwrap().discover_models());
+}
+
+#[test]
+fn display_names_follow_preset_overrides_without_becoming_connection_identity() {
+    let providers = global("provider='custom'\n[presets.openai]\ndisplay_name='Overridden vendor'\n[providers.inherited]\npreset='openai'\n[providers.custom]\npreset='openai'\ndisplay_name='Private label'\n[providers.bare]\nprotocols={openai-chat={}}").unwrap();
+    assert_eq!(
+        providers.get("inherited").unwrap().display_name(),
+        Some("Overridden vendor")
+    );
+    let custom = providers.get("custom").unwrap();
+    assert_eq!(custom.display_name(), Some("Private label"));
+    assert_eq!(custom.name(), "custom");
+    assert_eq!(providers.get("bare").unwrap().display_name(), None);
+    assert!(!format!("{providers:?} {custom:?}").contains("Private label"));
+}
+
+#[test]
+fn invalid_display_names_never_echo_configuration_values() {
+    for value in [
+        "123".to_owned(),
+        "''".into(),
+        "'   '".into(),
+        format!("\"{SECRET}\\n\""),
+        format!("'{}'", SECRET.repeat(30)),
+    ] {
+        let error = project(&format!(
+            "[providers.p]\nprotocols={{openai-chat={{}}}}\ndisplay_name={value}"
+        ))
+        .unwrap_err();
+        let diagnostic = format!("{error:?} {error}");
+        assert!(diagnostic.contains("display_name"));
+        assert!(!diagnostic.contains(SECRET));
+    }
+}
+
+#[test]
 fn every_shipped_preset_makes_a_valid_profile_on_its_own() {
     let catalog = Catalog::builtin();
     assert!(!catalog.preset_names().is_empty());
@@ -207,6 +261,15 @@ fn every_shipped_preset_makes_a_valid_profile_on_its_own() {
         let providers = project(&format!("[providers.p]\npreset = \"{name}\"\n"));
 
         assert!(providers.is_ok(), "{name}: {providers:?}");
+        assert!(
+            providers
+                .unwrap()
+                .get("p")
+                .unwrap()
+                .display_name()
+                .is_some(),
+            "{name}"
+        );
     }
 }
 
@@ -237,6 +300,7 @@ fn the_openrouter_preset_is_a_stored_credential_with_the_shipped_sign_in() {
 #[case::opencode("opencode", "OPENCODE_API_KEY")]
 #[case::deepseek("deepseek", "DEEPSEEK_API_KEY")]
 #[case::google("google", "GEMINI_API_KEY")]
+#[case::google_aistudio("google-aistudio", "GEMINI_API_KEY")]
 #[case::groq("groq", "GROQ_API_KEY")]
 #[case::mistral("mistral", "MISTRAL_API_KEY")]
 #[case::xai("xai", "XAI_API_KEY")]

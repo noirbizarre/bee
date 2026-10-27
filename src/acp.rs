@@ -1643,19 +1643,26 @@ fn config_options(settings: Option<Settings>) -> Vec<v2::SessionConfigOption> {
     let Some(settings) = settings else {
         return Vec::new();
     };
-    let select = |names: &[String]| -> Vec<v2::SessionConfigSelectOption> {
-        names
-            .iter()
-            .map(|name| v2::SessionConfigSelectOption::new(name.as_str(), name.as_str()))
-            .collect()
-    };
+    let provider_options = settings
+        .providers
+        .iter()
+        .map(|id| {
+            // Keep account identity visible even when several connections share a preset.
+            let label = settings
+                .provider_display_names
+                .get(id)
+                .filter(|label| *label != id)
+                .map_or_else(|| id.clone(), |label| format!("{label} ({id})"));
+            v2::SessionConfigSelectOption::new(id.as_str(), label)
+        })
+        .collect::<Vec<_>>();
 
     let mut options = vec![
         v2::SessionConfigOption::select(
             PROVIDER_OPTION,
             "Provider",
             settings.provider.as_str(),
-            select(&settings.providers),
+            provider_options,
         )
         .description("The configured provider profile that answers this session's prompts.")
         // No spec category fits a connection profile; `_` marks it custom, as

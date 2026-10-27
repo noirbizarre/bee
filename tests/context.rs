@@ -26,6 +26,10 @@ fn tool_batch(protocol: &str, ids: &[&str]) -> Message {
         })
         .collect();
     let native = match protocol {
+        "openai-chat" => Some(Native {
+            protocol: Protocol::OpenAiChat,
+            items: vec![json!({"role":"assistant","content":"","tool_calls":calls.iter().map(|call| json!({"id":call.id,"type":"function","function":{"name":call.name,"arguments":call.arguments.to_string()},"extra_content":{"google":{"thought_signature":"retained-chat-signature"}}})).collect::<Vec<_>>()})],
+        }),
         "openai-responses" => {
             let mut items = vec![json!({"id":"reasoning","type":"reasoning","encrypted_content":"retained-opaque-reasoning"})];
             items.extend(calls.iter().map(|call| json!({"type":"function_call","id":format!("item-{}", call.id),"call_id":call.id,"name":call.name,"arguments":call.arguments.to_string()})));
@@ -39,6 +43,32 @@ fn tool_batch(protocol: &str, ids: &[&str]) -> Message {
         calls,
         native,
     }
+}
+
+#[test]
+fn signed_chat_context_counts_the_replayed_snapshot_once_including_opaque_bytes() {
+    let model = Model::new(
+        profile("openai-chat", "http://127.0.0.1:1", ""),
+        "gemini-test".into(),
+        None,
+    )
+    .unwrap();
+    let mut message = tool_batch("openai-chat", &["call"]);
+    let small = model.context(&[message.clone()], &[]).unwrap();
+    let Message::Assistant {
+        native: Some(native),
+        ..
+    } = &mut message
+    else {
+        panic!("native snapshot")
+    };
+    native.items[0]["tool_calls"][0]["extra_content"]["google"]["thought_signature"] =
+        json!("s".repeat(9000));
+    let snapshot = native.items[0].clone();
+    let large = model.context(&[message], &[]).unwrap();
+    let bytes = json!([snapshot]).to_string().len();
+    assert_eq!(large.estimated_input, (bytes as u64).div_ceil(3) + 256);
+    assert!(large.estimated_input > small.estimated_input + 2900);
 }
 
 fn answer(protocol: &str) -> Value {

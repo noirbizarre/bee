@@ -31,6 +31,18 @@ fn reference() -> Reference {
     )
 }
 
+#[test]
+fn relabeling_a_connection_preserves_its_remembered_account_binding() {
+    let original = providers("display_name='Original account label'");
+    let renamed = providers("display_name='Updated account label'");
+    let reference = Reference::new(
+        original.get("account").unwrap(),
+        "recent-model".into(),
+        None,
+    );
+    assert!(reference.matches(renamed.get("account").unwrap(), None));
+}
+
 fn visible(models: &[&str]) -> Snapshot {
     let mut snapshot = Snapshot::default();
     snapshot.endpoints.insert(

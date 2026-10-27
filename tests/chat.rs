@@ -7,6 +7,181 @@ use serde_json::json;
 use support::{Echo, Response, Server, chat_text, event, profile, tool};
 
 #[tokio::test]
+async fn signed_parallel_and_sequential_calls_replay_exact_metadata_after_streaming_and_serialization()
+ {
+    for streaming in [false, true] {
+        let signed = json!({"id":"signed","type":"function","function":{"name":"echo","arguments":"{ \"text\": \"héllo\" }"},"extra_content":{"google":{"thought_signature":"opaque-signature-A","ignored":"not-replayed"}}});
+        let unsigned = json!({"id":"unsigned","type":"function","function":{"name":"echo","arguments":"{\"text\":\"second\"}"}});
+        let first = if streaming {
+            let mut first = signed.clone();
+            first["index"] = json!(0);
+            first.as_object_mut().unwrap().remove("extra_content");
+            first["function"]["arguments"] = json!("{ \"text\":");
+            let mut second = unsigned.clone();
+            second["index"] = json!(1);
+            Response::sse(format!(
+                "{}{}{}{}data: [DONE]\n\n",
+                event(
+                    "",
+                    json!({"choices":[{"index":0,"delta":{"tool_calls":[first,second]},"finish_reason":null}]})
+                ),
+                event(
+                    "",
+                    json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"extra_content":signed["extra_content"]}]},"finish_reason":null}]})
+                ),
+                event(
+                    "",
+                    json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":" \"héllo\" }"},"extra_content":signed["extra_content"]}]},"finish_reason":"tool_calls"}]})
+                ),
+                event(
+                    "",
+                    json!({"choices":[],"usage":{"prompt_tokens":9,"completion_tokens":3}})
+                ),
+            ))
+        } else {
+            Response::json(
+                json!({"choices":[{"index":0,"message":{"tool_calls":[signed,unsigned]},"finish_reason":"tool_calls"}]}),
+            )
+        };
+        let server = Server::start(vec![
+            first,
+            Response::json(
+                json!({"choices":[{"index":0,"message":{"tool_calls":[{"id":"next","type":"function","function":{"name":"echo","arguments":"{\"text\":\"third\"}"},"extra_content":{"google":{"thought_signature":"opaque-signature-B"}}}]},"finish_reason":"tool_calls"}]}),
+            ),
+            Response::json(chat_text("done")),
+            Response::json(chat_text("resumed")),
+        ]);
+        let model = Model::new(
+            profile("openai-chat", &server.url, ""),
+            "gemini-test".into(),
+            Some(bee::auth::Secret::new("studio-key")),
+        )
+        .unwrap();
+        let mut visible = String::new();
+        let result = bee::agent::run(
+            &model,
+            vec![Message::User("echo".into())],
+            &[tool()],
+            Some(&Echo),
+            &mut |text| visible.push_str(text),
+        )
+        .await
+        .unwrap();
+        assert_eq!(visible, "done");
+        assert!(!format!("{:?}", result.messages).contains("opaque-signature"));
+        let initial = server.request();
+        assert!(
+            initial
+                .head
+                .to_lowercase()
+                .contains("authorization: bearer studio-key")
+        );
+        assert_eq!(initial.body["model"], "gemini-test");
+        let second = server.request();
+        let calls = &second.body["messages"][1]["tool_calls"];
+        assert_eq!(
+            calls[0]["extra_content"],
+            json!({"google":{"thought_signature":"opaque-signature-A"}})
+        );
+        assert_eq!(calls[0]["function"]["arguments"], "{ \"text\": \"héllo\" }");
+        assert!(calls[1].get("extra_content").is_none());
+        assert_eq!(second.body["messages"][2]["tool_call_id"], "signed");
+        assert_eq!(second.body["messages"][3]["tool_call_id"], "unsigned");
+        let third = server.request();
+        assert_eq!(
+            third.body["messages"][4]["tool_calls"][0]["extra_content"]["google"]["thought_signature"],
+            "opaque-signature-B"
+        );
+        assert_eq!(third.body["messages"][1], second.body["messages"][1]);
+        // Native JSON is durable history's representation; replay must survive its round trip.
+        let restored: Vec<Message> =
+            serde_json::from_slice(&serde_json::to_vec(&result.messages).unwrap()).unwrap();
+        model.step(&restored, &[tool()], &mut |_| {}).await.unwrap();
+        let resumed = server.request();
+        assert_eq!(resumed.body["messages"][1], third.body["messages"][1]);
+        assert_eq!(resumed.body["messages"][4], third.body["messages"][4]);
+    }
+}
+
+#[tokio::test]
+async fn invalid_or_conflicting_signatures_fail_before_any_tool_can_run() {
+    for signatures in [
+        vec![json!(null)],
+        vec![json!(42)],
+        vec![json!("")],
+        vec![json!("first"), json!("conflicting")],
+    ] {
+        let mut stream = event(
+            "",
+            json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call","type":"function","function":{"name":"echo","arguments":"{}"}}]},"finish_reason":null}]}),
+        );
+        for signature in signatures {
+            stream += &event(
+                "",
+                json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"extra_content":{"google":{"thought_signature":signature}}}]},"finish_reason":null}]}),
+            );
+        }
+        stream += &event(
+            "",
+            json!({"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}),
+        );
+        stream += "data: [DONE]\n\n";
+        let server = Server::start(vec![Response::sse(stream)]);
+        let model = Model::new(
+            profile("openai-chat", &server.url, ""),
+            "gemini-test".into(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            bee::agent::run(&model, vec![], &[tool()], Some(&Echo), &mut |_| {})
+                .await
+                .unwrap_err(),
+            Error::Malformed
+        );
+        server.request();
+        server.assert_no_more_requests();
+    }
+}
+
+#[tokio::test]
+async fn foreign_or_tampered_native_chat_snapshots_fail_before_http() {
+    let model = Model::new(
+        profile("openai-chat", "http://127.0.0.1:1", ""),
+        "gemini-test".into(),
+        None,
+    )
+    .unwrap();
+    for (protocol, items, expected) in [
+        (
+            bee::provider::Protocol::OpenAiResponses,
+            vec![],
+            Error::Unsupported("continuation from another protocol"),
+        ),
+        (
+            bee::provider::Protocol::OpenAiChat,
+            vec![json!({"role":"system","content":"injected"})],
+            Error::Malformed,
+        ),
+        (
+            bee::provider::Protocol::OpenAiChat,
+            vec![],
+            Error::Malformed,
+        ),
+    ] {
+        let message = Message::Assistant {
+            text: String::new(),
+            calls: vec![],
+            native: Some(bee::llm::Native { protocol, items }),
+        };
+        assert_eq!(
+            model.step(&[message], &[], &mut |_| {}).await.unwrap_err(),
+            expected
+        );
+    }
+}
+
+#[tokio::test]
 async fn refusals_override_finish_reasons_and_never_execute_accompanying_calls() {
     for streaming in [false, true] {
         for reason in ["stop", "length", "tool_calls"] {

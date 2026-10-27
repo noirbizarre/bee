@@ -150,7 +150,7 @@ pub struct Call {
 pub struct Native {
     /// The only protocol permitted to replay this value.
     pub protocol: Protocol,
-    /// Ordered native output items or content blocks.
+    /// Ordered output items, content blocks, or a signed Chat assistant snapshot.
     pub items: Vec<Value>,
 }
 

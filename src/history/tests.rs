@@ -448,7 +448,11 @@ async fn interrupted_partials_replay_but_never_replace_successful_native_context
             }],
             native: Some(crate::llm::Native {
                 protocol,
-                items: vec![json!({"opaque":"continuation"})],
+                items: vec![if protocol == crate::provider::Protocol::OpenAiChat {
+                    json!({"role":"assistant","content":"answer","tool_calls":[{"id":"call","type":"function","function":{"name":"read","arguments":"{\"path\":\"file\"}"},"extra_content":{"google":{"thought_signature":"private-chat-signature"}}}]})
+                } else {
+                    json!({"opaque":"continuation"})
+                }],
             }),
         },
         crate::llm::Message::Tool {
@@ -481,6 +485,11 @@ async fn interrupted_partials_replay_but_never_replace_successful_native_context
     let before = std::fs::read(&handle.0.path).unwrap();
     let first = replay(&handle).await;
     let second = replay(&handle).await;
+    assert!(
+        !serde_json::to_string(&first)
+            .unwrap()
+            .contains("private-chat-signature")
+    );
     assert_eq!(
         serde_json::to_value(&first).unwrap(),
         serde_json::to_value(&second).unwrap()
