@@ -30,6 +30,8 @@ mod presentation;
 mod scenarios;
 
 #[cfg(test)]
+mod cloudflare_tests;
+#[cfg(test)]
 mod google_cloud_tests;
 #[cfg(all(test, unix))]
 mod oauth_tests;

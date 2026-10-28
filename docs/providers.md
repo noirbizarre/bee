@@ -20,8 +20,8 @@ bee providers show google-cloud
 These commands inspect definitions independently of configuration, credentials and public Models.dev discovery.
 `bee models providers` instead browses Models.dev. The complete compiled-in inventory is `openai`, `anthropic`,
 `openrouter`, `chatgpt`, `github`, `ollama`, `opencode`, `opencode-go`, `deepseek`, `google-aistudio`, `google-cloud`,
-`groq`, `mistral`, `xai` and generic `custom`. Groq uses `groq` and `GROQ_API_KEY`; Grok models belong to `xai`, using
-`XAI_API_KEY`. DeepSeek uses `DEEPSEEK_API_KEY`, and Mistral uses `MISTRAL_API_KEY`.
+`groq`, `mistral`, `xai`, `cloudflare` and generic `custom`. Groq uses `groq` and `GROQ_API_KEY`;
+Grok models belong to `xai`, using `XAI_API_KEY`. DeepSeek uses `DEEPSEEK_API_KEY`, and Mistral uses `MISTRAL_API_KEY`.
 See [provider setup and credentials](index.md#authentication) for endpoints, protocols and vendor-specific facts.
 
 ## Configure multiple accounts
@@ -105,6 +105,7 @@ default model. Status and ordinary inference do not create declarations or impor
 For an environment-backed account, explicit login validates and stores the complete credential generation, then changes
 user configuration to `credential = { store = true }`. Subsequent requests use stored authority even if the environment
 changes or disappears. `--with-token` imports stdin instead; missing environment values fail without another source.
+Cloudflare interactive login can ask for a manual token when its environment variable is unset.
 Higher-priority credential-source overrides must be resolved before authority can switch. Browser/device options use
 native acquisition. Publication preserves comments, unrelated concurrent edits and no-op reauthentication behavior.
 
@@ -131,3 +132,54 @@ remain live during authorization.
 
 See [ADR-027](adr/027-provider-registry-and-instance-authentication.md) for registry and native-runtime rationale and
 [ADR-028](adr/028-account-model-availability-and-selection.md) for the current account contract.
+
+## Cloudflare AI Gateway
+
+`cloudflare` uses Cloudflare's current [REST inference API](https://developers.cloudflare.com/ai-gateway/usage/rest-api/)
+with Chat Completions, Responses and Anthropic Messages. Create a Cloudflare API token with
+**Account → Workers AI → Read**, restricted to the intended Cloudflare account. An AI Gateway-only token cannot call
+these `/ai/*` endpoints. Third-party models require the documented Unified Billing credits. Gateway permissions are
+account-scoped; separate local accounts do not create remote per-gateway token scopes.
+
+Find the Account ID in the Cloudflare dashboard's account details and the Gateway ID in **AI → AI Gateway**.
+Create the gateway first, then run:
+
+```sh
+bee auth login cloudflare
+```
+
+Login asks for missing Account ID and Gateway ID. It imports `CLOUDFLARE_API_TOKEN` if set; otherwise interactive login
+asks for the token with terminal echo disabled. The identifiers are persisted as private account settings;
+the token goes only into Bee's
+credential store. Login does not select a model. Add explicit raw `models` afterward or configure the account first.
+Bee accepts unpadded ASCII identifiers containing letters, digits, dots, hyphens and underscores, at most 64 bytes.
+Use the exact dashboard IDs; local structural validation does not verify that the resources exist.
+
+Two named accounts can use different gateways, Cloudflare accounts and token environment bindings:
+
+```toml
+[accounts.cf-work]
+provider = "cloudflare"
+settings = { account_id = "YOUR_WORK_ACCOUNT_ID", gateway_id = "work-gateway" }
+credential = { env = "WORK_CLOUDFLARE_TOKEN" }
+discovery = false
+models = ["anthropic/claude-sonnet-4", "@cf/openai/gpt-oss-120b"]
+model_protocols = { "anthropic/claude-sonnet-4" = "anthropic-messages", "@cf/openai/gpt-oss-120b" = "openai-responses" }
+
+[accounts.cf-personal]
+provider = "cloudflare"
+settings = { account_id = "YOUR_PERSONAL_ACCOUNT_ID", gateway_id = "personal-gateway" }
+credential = { store = true }
+models = ["@cf/meta/llama-3.1-8b-instruct"]
+```
+
+`bee auth login cf-work` imports its configured environment token. For noninteractive login, configure both identifiers
+first and pipe one token line into `bee auth login cf-personal --with-token`. Piped stdin is never used to collect IDs.
+Configured identifiers are preserved, including during reauthentication. Existing-account login does not enable an account
+or change profile membership. In ACP, explicitly select a qualified model such as `cf-work/anthropic/claude-sonnet-4`.
+
+Every request derives its official account endpoint from `account_id` and sends `cf-aig-gateway-id` from `gateway_id`.
+Authentication and gateway headers cannot be overridden. Discovery is disabled and cannot be enabled for this provider;
+declare available models explicitly. See [Cloudflare requests](inference.md#cloudflare-ai-gateway-requests) for protocol
+restrictions. Bee uses API tokens and does not import Wrangler browser credentials. Logout removes only the selected
+account's stored token, does not revoke it remotely, and never falls back to an environment token.

@@ -8,6 +8,91 @@ fn bee() -> Command {
 }
 
 #[test]
+#[cfg(unix)] // Production credential storage deliberately requires Unix private-file guarantees.
+fn cloudflare_environment_login_is_account_bound_and_logout_never_falls_back_to_environment() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("xdg/bee/config.toml");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "[accounts.work]\nprovider='cloudflare'\nsettings={account_id='work-account',gateway_id='work-gateway'}\ncredential={env='WORK_TOKEN'}\n[accounts.personal]\nprovider='cloudflare'\nsettings={account_id='personal-account',gateway_id='personal-gateway'}\ncredential={env='PERSONAL_TOKEN'}\n").unwrap();
+    for (account, variable, token) in [
+        ("work", "WORK_TOKEN", "private-work-token"),
+        ("personal", "PERSONAL_TOKEN", "private-personal-token"),
+    ] {
+        isolated(root.path())
+            .env(variable, token)
+            .args(["auth", "login", account])
+            .assert()
+            .success()
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::contains(token).not());
+    }
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(!text.contains("private-work-token"));
+    assert!(!text.contains("private-personal-token"));
+    isolated(root.path())
+        .args(["auth", "logout", "work"])
+        .assert()
+        .success();
+    isolated(root.path())
+        .env("WORK_TOKEN", "private-work-token")
+        .args(["auth", "status", "work"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("no stored credential"));
+    isolated(root.path())
+        .args(["auth", "status", "personal"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("stored credential present"));
+}
+
+#[test]
+#[cfg(not(unix))]
+fn cloudflare_environment_credentials_remain_available_when_private_storage_is_unsupported() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("xdg/bee/config.toml");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let original = "[accounts.work]\nprovider='cloudflare'\nsettings={account_id='work-account',gateway_id='work-gateway'}\ncredential={env='WORK_TOKEN'}\n";
+    std::fs::write(&path, original).unwrap();
+    isolated(root.path())
+        .env("WORK_TOKEN", "private-work-token")
+        .args(["auth", "status", "work"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "environment variable `WORK_TOKEN` is set",
+        ))
+        .stdout(predicate::str::contains("private-work-token").not());
+    isolated(root.path())
+        .env("WORK_TOKEN", "private-work-token")
+        .args(["auth", "login", "work"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains(
+            "storing credentials is not supported",
+        ))
+        .stderr(predicate::str::contains("private-work-token").not());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    assert!(!root.path().join("data/bee/credentials.json").exists());
+}
+
+#[test]
+fn noninteractive_cloudflare_login_requires_configured_ids_before_reading_a_token() {
+    let root = tempfile::tempdir().unwrap();
+    isolated(root.path())
+        .args(["auth", "login", "cloudflare", "--with-token"])
+        .write_stdin("private-token\n")
+        .assert()
+        .failure()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("account_id"))
+        .stderr(predicate::str::contains("gateway_id"))
+        .stderr(predicate::str::contains("private-token").not());
+    assert!(!root.path().join("xdg/bee/config.toml").exists());
+}
+
+#[test]
 fn cloud_auth_status_is_offline_and_login_logout_leave_shared_adc_untouched() {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("cloud.toml");

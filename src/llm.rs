@@ -282,6 +282,10 @@ impl Model {
         tools: &[Tool],
         text: &mut (dyn FnMut(&str) + Send),
     ) -> Result<Step, Error> {
+        if self.profile.provider() == "cloudflare" {
+            crate::provider::cloudflare::validate_route(&self.model, self.selection.protocol)
+                .map_err(Error::Unsupported)?;
+        }
         self.context(messages, tools)?.check()?;
         let mut prepared;
         let model = if let Some(runtime) = &self.runtime {
@@ -459,7 +463,7 @@ pub(crate) fn request_headers(
         );
     }
     if let Some(secret) = credential {
-        let (name, value) = if profile.is_copilot() {
+        let (name, value) = if profile.is_copilot() || profile.provider() == "cloudflare" {
             (
                 "authorization",
                 Secret::new(format!("Bearer {}", secret.expose())),
@@ -478,6 +482,12 @@ pub(crate) fn request_headers(
         .integration()
         .and_then(crate::models::Integration::opencode_root)
         .is_some();
+    if profile.provider() == "cloudflare" {
+        let gateway = profile.settings().get("gateway_id").ok_or(Error::Headers)?;
+        let mut value = HeaderValue::from_str(gateway).map_err(|_| Error::Headers)?;
+        value.set_sensitive(true);
+        headers.insert("cf-aig-gateway-id", value);
+    }
     if profile.is_copilot() || opencode {
         headers.insert(
             "user-agent",
@@ -493,6 +503,8 @@ pub(crate) fn request_headers(
     for (name, value) in profile.headers() {
         let name = HeaderName::from_bytes(name.as_bytes()).map_err(|_| Error::Headers)?;
         if headers.contains_key(&name)
+            || (profile.provider() == "cloudflare"
+                && crate::provider::cloudflare::reserved_header(name.as_str()))
             || (opencode && name.as_str() == "x-opencode-session")
             || (profile.is_copilot() && crate::auth::copilot::reserved_header(name.as_str()))
             || matches!(

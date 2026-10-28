@@ -162,7 +162,8 @@ serde_json = { version = "1", features = ["raw_value"] }
 
 [target.'cfg(unix)'.dependencies]
 # Safe process-group signaling keeps cancellation cleanup synchronous on drop.
-nix = { version = "0.30", default-features = false, features = ["signal", "process", "fs", "dir"] }
+# Terminal attributes suppress secret-entry echo without bypassing buffered stdin.
+nix = { version = "0.30", default-features = false, features = ["signal", "process", "fs", "dir", "term"] }
 
 [target.'cfg(windows)'.dependencies]
 # Atomic owner-only directory creation and ACL inspection preserve private

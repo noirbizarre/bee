@@ -59,6 +59,11 @@ tokens. Use `gcloud auth application-default login` for local user ADC; `bee aut
 guidance and never modify shared ADC. Service-account files and attached accounts also work; see
 [Google Cloud setup](index.md#use-google-cloud) for source precedence and supported credential types.
 
+Cloudflare login asks for Account ID and Gateway ID when absent from account `settings`. In a terminal,
+`bee auth login cloudflare` imports `CLOUDFLARE_API_TOKEN` or asks for the token if unset. Noninteractive login requires
+both IDs in configuration; `--with-token` reads exactly one token line, never routing identifiers. Login persists IDs
+as ordinary private settings and the token only in credential storage. See [Cloudflare setup](providers.md#cloudflare-ai-gateway).
+
 ## Model discovery
 
 `bee providers list` and `bee providers show NAME` inspect compiled-in integrations without loading configuration or

@@ -50,6 +50,27 @@ Streams must have a valid terminal lifecycle. Truncated streams are errors, not 
 event/tool argument is limited to 1 MiB and each response to 16 MiB. Tools execute sequentially with no automatic retry
 after side effects.
 
+## Cloudflare AI Gateway requests
+
+The `cloudflare` provider uses the current [REST API](https://developers.cloudflare.com/ai-gateway/usage/rest-api/).
+All protocols use a Cloudflare API-token bearer header and the configured `cf-aig-gateway-id`, including Messages:
+
+| Protocol | Final URL |
+| --- | --- |
+| `openai-chat` | `https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1/chat/completions` |
+| `openai-responses` | `https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1/responses` |
+| `anthropic-messages` | `https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1/messages` |
+
+The provider derives these targets from private settings and disallows endpoint/authentication/gateway overrides.
+Protocol preference defaults to Chat, then Responses, then Messages. Use `model_protocols` to route exact raw IDs;
+there is no protocol fallback after rejection. Third-party raw IDs use `author/model`; Workers AI IDs use `@cf/author/model`.
+Workers AI models cannot use Messages. Workers AI Responses currently supports only `@cf/openai/gpt-oss-120b` and
+`@cf/openai/gpt-oss-20b`, using `stream: false` and complete JSON responses per
+[Workers AI compatibility documentation](https://developers.cloudflare.com/workers-ai/configuration/open-ai-compatibility/).
+Other Responses routes retain streaming. Existing protocol-owned tool calls/results and continuation semantics apply.
+Bee adds no unverified Cloudflare prompt-cache controls. Errors retain sanitized status classifications without response
+bodies or automatic retries. See [setup and permissions](providers.md#cloudflare-ai-gateway).
+
 ## Google AI Studio requests
 
 The `google-aistudio` provider uses Google's official
