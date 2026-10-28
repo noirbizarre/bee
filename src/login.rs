@@ -3,8 +3,8 @@
 //! An authorization-code flow with PKCE (RFC 7636) whose exchange returns a
 //! credential directly: OpenRouter's returns an *API key*, used as a bearer
 //! token, not an access and refresh token pair. A provider's URLs and field
-//! names are data, a [`LoginSpec`] read from `data/presets.toml` or the user's
-//! `login_flows` (ADR-009). What is code is the mechanism, and it is
+//! names are data, a compiled-in [`LoginSpec`] owned by a provider's trusted
+//! acquisition contract (ADR-027). What is code is the mechanism, and it is
 //! deliberately only this one: a flow with refresh tokens or a device code is
 //! another kind, because a universal OAuth client would have to erase exactly
 //! what differs (ADR-008).
@@ -28,7 +28,7 @@ use sha2::{Digest, Sha256};
 use crate::auth::Secret;
 use crate::error::{Error, Result};
 use crate::http::Http;
-use crate::preset::LoginSpec;
+use crate::provider::signin::LoginSpec;
 
 /// How long to wait for the browser to call back by default.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);

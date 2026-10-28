@@ -19,7 +19,7 @@ use agent_client_protocol::{Agent, Client, ConnectTo, Responder, Stdio, V2Connec
 use futures::channel::oneshot;
 use futures::future::{AbortHandle, AbortRegistration, Abortable, BoxFuture, FutureExt, Shared};
 
-use crate::provider::Providers;
+use crate::account::Accounts as Providers;
 use crate::session::{SessionError, Sessions, Settings};
 use crate::{Error, Result};
 
@@ -57,11 +57,19 @@ type Gates = Arc<Mutex<BTreeMap<String, std::sync::Weak<RequestGate>>>>;
 struct RequestGate {
     mutation: Arc<tokio::sync::Mutex<()>>,
     closing: std::sync::atomic::AtomicUsize,
+    selection_abort: Mutex<Option<AbortHandle>>,
 }
 
 struct Mutation {
     _gate: Arc<RequestGate>,
     _guard: tokio::sync::OwnedMutexGuard<()>,
+}
+
+impl Drop for Mutation {
+    fn drop(&mut self) {
+        // An idle cancel must not retain an obsolete selection operation.
+        lock(&self._gate.selection_abort).take();
+    }
 }
 
 struct Closing {
@@ -84,6 +92,9 @@ impl RequestGate {
     }
 
     fn close(self: Arc<Self>) -> Closing {
+        if let Some(abort) = lock(&self.selection_abort).take() {
+            abort.abort();
+        }
         // Reserve in dispatch, even if the close future has not been polled.
         // A count keeps multiple idempotent closes from releasing each other's reservation.
         self.closing
@@ -258,9 +269,7 @@ pub struct Reply {
     message_id: String,
     token: u64,
     input: Option<crate::session::InferenceInput>,
-    prompt: String,
     protocol: Arc<Mutex<Option<crate::provider::Protocol>>>,
-    tasks: Tasks,
     completed: Arc<Mutex<Option<crate::agent::Outcome>>>,
     used: Arc<Mutex<Option<crate::selection::Reference>>>,
     selection_failure: Arc<Mutex<Option<crate::selection::Reason>>>,
@@ -340,11 +349,16 @@ impl Reply {
 }
 
 /// Credentials are resolved at request time, not while loading configuration.
-async fn inference(
-    mut reply: Reply,
-    runtime: Arc<Runtime>,
-) -> std::result::Result<(), TurnFailure> {
-    let profile = reply.input.as_ref().map(|input| input.profile.clone()).or_else(|| lock(&reply.sessions).selected_profile(&reply.id)).ok_or_else(|| TurnFailure::new("configure a connection or run `bee auth login openrouter` or `bee auth login chatgpt` before prompting"))?;
+async fn inference(reply: Reply, runtime: Arc<Runtime>) -> std::result::Result<(), TurnFailure> {
+    let profile = reply
+        .input
+        .as_ref()
+        .map(|input| input.profile.clone())
+        .ok_or_else(|| {
+            TurnFailure::new(
+                "choose an available account-qualified model over ACP before prompting",
+            )
+        })?;
     let env = runtime
         .auth_environment
         .clone()
@@ -362,7 +376,7 @@ async fn inference(
     };
     let chatgpt = profile
         .login_spec()
-        .is_some_and(crate::preset::LoginSpec::is_chatgpt);
+        .is_some_and(crate::provider::signin::LoginSpec::is_chatgpt);
     let cloud_session = if profile.google_cloud().is_some() {
         Some(
             crate::auth::google_cloud::Session::with_http(
@@ -398,27 +412,6 @@ async fn inference(
                 .await?;
             if let Some(discovery) = &runtime.discovery {
                 discovery.invalidate_endpoint(profile.name());
-                if profile.discover_models() {
-                    if reply.input.is_none() {
-                        let _ = discovery.list_endpoint(&profile, &env).await;
-                    } else {
-                        // A configured model can infer immediately; optional discovery belongs to the connection.
-                        let discovery = Arc::clone(discovery);
-                        let profile = profile.clone();
-                        let env = env.clone();
-                        reply
-                            .connection
-                            .spawn(async move {
-                                let _ = discovery.list_endpoint(&profile, &env).await;
-                                Ok(())
-                            })
-                            .map_err(|_| {
-                                TurnFailure::new(
-                                    "cannot start post-login model discovery; reconnect and retry",
-                                )
-                            })?;
-                    }
-                }
             }
             crate::auth::resolve(&profile, &env, &store, crate::auth::unix_now()).map_err(
                 |error| {
@@ -445,63 +438,32 @@ async fn inference(
     };
     if let Some(discovery) = &runtime.discovery {
         discovery.observe_account(&profile, credential.as_ref());
-        if profile.is_copilot()
-            && profile.discover_models()
-            && reply
-                .input
-                .as_ref()
-                .is_none_or(|input| !profile.has_model_protocol(&input.model))
+        if profile.discovery()
             && !discovery
                 .account_snapshot(&profile, credential.as_ref())
                 .endpoints
-                .contains_key(profile.name())
+                .get(profile.name())
+                .is_some_and(|listing| listing.fetched_at.is_some())
         {
-            // Only unresolved routes need native discovery on the critical path; explicit mappings can infer immediately.
+            // A configured/explicit model is a preference, never evidence of account availability.
             let _ = discovery.list_endpoint(&profile, &env).await;
         }
     }
-    if reply.input.is_none() {
-        if let Some(discovery) = &runtime.discovery
-            && profile.discover_models()
-            && discovery.snapshot().native_default(&profile).is_none()
-        {
-            discovery
-                .list_endpoint(&profile, &env)
-                .await
-                .map_err(|error| TurnFailure::new(error.to_string()))?;
-        }
-        initialize_native(&reply.sessions, &reply.tasks, &reply.id, Some(reply.token))
-            .await
-            .map_err(|error| TurnFailure::new(error.to_string()))?;
-        reply.input = lock(&reply.sessions).inference(&reply.id);
-        if let Some(input) = &mut reply.input {
-            input
-                .messages
-                .push(crate::llm::Message::User(reply.prompt.clone()));
-        }
-        let options = config_options(lock(&reply.sessions).settings(&reply.id).ok().flatten());
-        let _ = send_update(
-            &reply.connection,
-            &reply.session_id,
-            v2::SessionUpdate::ConfigOptionUpdate(v2::ConfigOptionUpdate::new(options)),
-        );
-    }
-    let crate::session::InferenceInput { profile, model, mut messages, cwd, instructions, mut selection } = reply.input.clone().ok_or_else(|| TurnFailure::new("no native model is available; refresh the connection catalogue or select a model over ACP"))?;
-    if profile.is_copilot() {
-        let snapshot = runtime
-            .discovery
-            .as_ref()
-            .map(|service| service.account_snapshot(&profile, credential.as_ref()))
-            .unwrap_or_default();
-        selection = snapshot.resolve(&profile, &model);
-        snapshot
-            .check_route(&profile, &model, selection.protocol)
-            .map_err(|error| TurnFailure::new(error.to_string()))?;
-        // Delay conversion until account-bound native routing is known, preserving encrypted continuation on unchanged routes.
-        if messages.iter().any(|message| matches!(message, crate::llm::Message::Assistant { native: Some(native), .. } if native.protocol != selection.protocol)) {
-            crate::session::portable(&mut messages);
-        }
-    }
+    let crate::session::InferenceInput {
+        profile,
+        model,
+        mut messages,
+        cwd,
+        instructions,
+        protocol,
+    } = reply.input.clone().ok_or_else(|| {
+        TurnFailure::new("choose an available account-qualified model over ACP before prompting")
+    })?;
+    let snapshot = runtime
+        .discovery
+        .as_ref()
+        .map(|service| service.account_snapshot(&profile, credential.as_ref()))
+        .unwrap_or_default();
     if let Some(reference) = lock(&reply.sessions).automatic(&reply.id) {
         // Login/renewal can replace an account after the initial preference check.
         if !reference.matches(&profile, credential.as_ref()) {
@@ -510,16 +472,26 @@ async fn inference(
                 crate::selection::Reason::AccountChanged.message(),
             ));
         }
-        if let Some(reason) = runtime.discovery.as_ref().and_then(|service| {
-            crate::selection::unavailable(
-                &service.account_snapshot(&profile, credential.as_ref()),
-                &profile,
-                &model,
-            )
-        }) {
+        if let Some(reason) = crate::selection::unavailable(&snapshot, &profile, &model) {
             *lock(&reply.selection_failure) = Some(reason);
             return Err(TurnFailure::new(reason.message()));
         }
+    }
+    snapshot
+        .check_available(&profile, &model)
+        .map_err(TurnFailure::new)?;
+    // Freeze routing and budgets only after authority and membership have both been checked.
+    let selection = snapshot.resolve(&profile, &model);
+    if profile.is_copilot() {
+        snapshot
+            .check_route(&profile, &model, selection.protocol)
+            .map_err(|error| TurnFailure::new(error.to_string()))?;
+    }
+    if protocol.is_some_and(|previous| previous != selection.protocol)
+        || messages.iter().any(|message| matches!(message, crate::llm::Message::Assistant { native: Some(native), .. } if native.protocol != selection.protocol))
+    {
+        // Only the authenticated, availability-checked route may decide whether continuation is portable.
+        crate::session::portable(&mut messages);
     }
     *lock(&reply.used) = Some(crate::selection::Reference::new(
         &profile,
@@ -665,9 +637,7 @@ async fn inference(
     .map_err(|error| {
         if error == crate::llm::Error::Authentication {
             reply.selection_failed(crate::selection::Reason::CredentialsUnavailable);
-            if observed_profile.is_copilot()
-                && let Some(discovery) = &runtime.discovery
-            {
+            if let Some(discovery) = &runtime.discovery {
                 discovery.invalidate_account(&observed_profile, observed_credential.as_ref());
             }
         }
@@ -787,7 +757,7 @@ pub fn agent_with_scenario(scenario: crate::scenario::Scenario) -> impl ConnectT
 /// drive it in-process without a subprocess. Each call builds its own session
 /// registry, so two connections never share a session.
 pub fn agent() -> impl ConnectTo<Client> {
-    agent_with_providers(Providers::default())
+    agent_with_accounts(Providers::default())
 }
 
 /// [`agent`], with sessions that choose among `providers`.
@@ -796,7 +766,7 @@ pub fn agent() -> impl ConnectTo<Client> {
 /// and `session/set_config_option` changes them for that session only. The
 /// choice is a session setting; the profile's endpoint, headers and credential
 /// are configuration, and no request can change them (ADR-007).
-pub fn agent_with_providers(providers: Providers) -> impl ConnectTo<Client> {
+pub fn agent_with_accounts(providers: Providers) -> impl ConnectTo<Client> {
     // Fixed shipped schemas failing registration is an internal programming error.
     agent_with_runtime(
         providers,
@@ -883,11 +853,11 @@ where
     let endpoint_profiles: Vec<_> = providers
         .names()
         .filter_map(|name| providers.get(name))
-        .filter(|profile| profile.discover_models())
+        .filter(|profile| profile.discovery())
         .cloned()
         .collect();
     let sessions = Arc::new(Mutex::new(
-        Sessions::with_providers(providers)
+        Sessions::with_accounts(providers)
             .with_discovery(discovery.clone())
             .with_preferences(preferences.clone(), environment.clone()),
     ));
@@ -909,6 +879,7 @@ where
                 let sessions = Arc::clone(&sessions);
                 let gates = Arc::clone(&gates);
                 let tasks = Arc::clone(&tasks);
+                let environment = environment.clone();
                 async move |request: v2::InitializeRequest,
                             responder: Responder<v2::InitializeResponse>,
                             connection: V2ConnectionTo<Client>| {
@@ -973,7 +944,7 @@ where
                                 for id in ids {
                                     let Ok(_gate) = session_gate(&gates, &id).try_enter() else { continue; };
                                     // Hold through publication so pending settings saves never leak a choice.
-                                    if initialize_native(&sessions, &tasks, &id, None).await.is_err() { continue; }
+                                    if refresh_recent(&sessions, &tasks, &id).await.is_err() { continue; }
                                     let sessions = lock(&sessions);
                                     let Some(settings) = sessions.open_settings_for(&id) else { continue; };
                                     let options = config_options(Some(settings));
@@ -1040,7 +1011,7 @@ where
                                 sessions.restore(id.clone(), snapshot, handle);
                                 lock(&mcp).sessions.insert(id.clone(), servers);
                             }
-                            if let Err(error) = initialize_native(&sessions, &tasks, &id, None).await {
+                            if let Err(error) = refresh_recent(&sessions, &tasks, &id).await {
                                 return responder.respond_with_error(history_error(error));
                             }
                             let options = config_options(lock(&sessions).settings(&id).ok().flatten());
@@ -1052,7 +1023,6 @@ where
                     // One guard, so the options describe the session just made.
                     let mut sessions = lock(&sessions);
                     let id = sessions.create(request.cwd.into_inner());
-                    sessions.initialize_native(&id, None);
                     lock(&mcp).sessions.insert(id.clone(), servers);
                     let options = config_options(sessions.settings(&id).ok().flatten());
                     if let Some(reason) = sessions.selection_notice(&id) { send_selection_notice(&connection, &id, reason); }
@@ -1180,7 +1150,7 @@ where
                                 }
                                 sessions.history(&id).expect("durable attachment")
                             };
-                            if let Err(error) = initialize_native(&sessions, &tasks, &id, None).await {
+                            if let Err(error) = refresh_recent(&sessions, &tasks, &id).await {
                                 return responder.respond_with_error(history_error(error));
                             }
                             if matches!(request.replay_from, Some(v2::ReplayFrom::Start(_))) {
@@ -1227,7 +1197,6 @@ where
                         }
                         if !lock(&tasks).contains_key(&id) {
                             sessions.refresh_recent(&id);
-                            sessions.initialize_native(&id, None);
                         }
                         // Always replace, including an empty list: old routes are not authorization.
                         lock(&mcp).sessions.insert(id.clone(), servers);
@@ -1284,6 +1253,8 @@ where
                 let sessions = Arc::clone(&sessions);
                 let tasks = Arc::clone(&tasks);
                 let gates = Arc::clone(&gates);
+                let selection_discovery = discovery.clone();
+                let selection_environment = environment.clone();
                 async move |request: v2::SetSessionConfigOptionRequest,
                             responder: Responder<v2::SetSessionConfigOptionResponse>,
                             connection: V2ConnectionTo<Client>| {
@@ -1301,54 +1272,55 @@ where
                         Err(_) => return responder.respond_with_error(session_error(SessionError::SettingsBusy(id))),
                     };
 
-                    // One guard from the change to the snapshot, so the reply
-                    // describes exactly the state this request produced.
-                    let registry = Arc::clone(&sessions);
-                    let mut sessions = lock(&sessions);
                     if lock(&tasks).contains_key(&id) {
                         return responder
                             .respond_with_error(session_error(SessionError::SettingsBusy(id)));
                     }
-                    let previous = sessions.snapshot(&id);
-                    let changed = match &*request.config_id.to_string() {
-                        PROVIDER_OPTION => sessions.set_provider(&id, &value),
-                        MODEL_OPTION => sessions.set_model(&id, &value),
-                        other => {
-                            return responder.respond_with_error(invalid_params(format!(
-                                "unknown configuration option `{other}`; \
-                                 Bee offers `{PROVIDER_OPTION}` and `{MODEL_OPTION}`"
-                            )));
-                        }
+                    if request.config_id.to_string() != MODEL_OPTION {
+                        return responder.respond_with_error(invalid_params("unknown configuration option; Bee offers `model`"));
+                    }
+                    let account = match lock(&sessions).selection_account(&id, &value) {
+                        Ok(account) => account,
+                        Err(error) => return responder.respond_with_error(session_error(error)),
                     };
-                    if let Err(error) = changed {
-                        return responder.respond_with_error(session_error(error));
-                    }
-                    if let Some(handle) = sessions.history(&id) {
-                        let snapshot = sessions.snapshot(&id).expect("existing session");
-                        let previous = previous.expect("existing session");
-                        let (finished, completion) = oneshot::channel();
-                        lock(&tasks).insert(id.clone(), async move { let _ = completion.await; }.boxed().shared());
-                        drop(sessions);
-                        let sessions = registry;
-                        let tasks = Arc::clone(&tasks);
-                        return connection.spawn(async move {
-                            let _gate = gate;
-                            let result = handle.save(snapshot).await;
-                            let mut sessions = lock(&sessions);
-                            if result.is_err() { sessions.rollback(&id, previous); }
-                            let options = config_options(sessions.settings(&id).ok().flatten());
-                            lock(&tasks).remove(&id);
-                            let _ = finished.send(());
-                            drop(_gate);
-                            match result {
-                                Ok(()) => responder.respond(v2::SetSessionConfigOptionResponse::new(options)),
-                                Err(error) => responder.respond_with_error(history_error(error)),
-                            }
-                        });
-                    }
-                    let options = config_options(sessions.settings(&id).ok().flatten());
-                    drop(gate);
-                    responder.respond(v2::SetSessionConfigOptionResponse::new(options))
+                    let (selection_abort, selection_registration) = AbortHandle::new_pair();
+                    *lock(&gate._gate.selection_abort) = Some(selection_abort.clone());
+                    let discovery = selection_discovery.clone();
+                    let environment = selection_environment.clone();
+                    let sessions = Arc::clone(&sessions);
+                    let tasks = Arc::clone(&tasks);
+                    // Dispatch remains free while native discovery performs cancellable I/O.
+                    connection.spawn(async move {
+                        let _gate = gate;
+                        if account.discovery()
+                            && let Some(discovery) = discovery {
+                                let credential = crate::selection::credential(&account, &environment).ok().flatten();
+                                let snapshot = discovery.account_snapshot(&account, credential.as_ref());
+                                if !snapshot.endpoints.get(account.name()).is_some_and(|listing| listing.fetched_at.is_some()) {
+                                    let attempt = discovery.list_endpoint(&account, &environment);
+                                    if futures::future::Abortable::new(attempt, selection_registration).await.is_err() {
+                                        return responder.respond_with_error(invalid_params("model selection was cancelled; choose a model again"));
+                                    }
+                                }
+                        }
+                        if selection_abort.is_aborted() || _gate._gate.closing.load(std::sync::atomic::Ordering::Acquire) != 0 {
+                            return responder.respond_with_error(invalid_params("session is closing"));
+                        }
+                        let pending = {
+                            let mut registry = lock(&sessions);
+                            if lock(&tasks).contains_key(&id) { return responder.respond_with_error(session_error(SessionError::SettingsBusy(id))); }
+                            let previous = registry.snapshot(&id);
+                            if let Err(error) = registry.set_model(&id, &value) { return responder.respond_with_error(session_error(error)); }
+                            registry.history(&id).map(|handle| (handle, registry.snapshot(&id).expect("existing session"), previous.expect("existing session")))
+                        };
+                        if let Some((handle, snapshot, previous)) = pending
+                            && let Err(error) = handle.save(snapshot).await {
+                                lock(&sessions).rollback(&id, previous);
+                                return responder.respond_with_error(history_error(error));
+                        }
+                        let options = config_options(lock(&sessions).settings(&id).ok().flatten());
+                        responder.respond(v2::SetSessionConfigOptionResponse::new(options))
+                    })
                 }
             },
             agent_client_protocol::on_receive_request!(),
@@ -1438,7 +1410,6 @@ where
                     let updates = connection.clone();
                     connection.spawn(async move {
                     let connection = updates;
-                    let pending_prompt = prompt_text(&request.prompt);
                     let content = match serde_json::to_value(&request.prompt) {
                         Ok(content) => content,
                         Err(_) => {
@@ -1512,9 +1483,7 @@ where
                         session_id,
                         message_id: turn.agent_message_id,
                         token: turn.token,
-                        protocol: Arc::new(Mutex::new(input.as_ref().map(|input| input.selection.protocol))),
-                        prompt: pending_prompt,
-                        tasks: Arc::clone(&tasks),
+                        protocol: Arc::new(Mutex::new(input.as_ref().and_then(|input| input.protocol))),
                         input,
                         completed: Arc::new(Mutex::new(None)),
                         used: Arc::new(Mutex::new(None)),
@@ -1544,6 +1513,7 @@ where
         .on_receive_notification(
             {
                 let sessions = Arc::clone(&sessions);
+                let gates = Arc::clone(&gates);
                 async move |notification: v2::CancelSessionNotification,
                             _connection: V2ConnectionTo<Client>| {
                     // Cancelling an idle or unknown session is not an error: a
@@ -1551,7 +1521,9 @@ where
                     // asks for no update when there was no work to cancel.
                     // The turn task owns terminal idle, after abort has dropped
                     // its future and all pending outgoing requests.
-                    lock(&sessions).cancel(&notification.session_id.to_string());
+                    let id = notification.session_id.to_string();
+                    if let Some(abort) = lock(&session_gate(&gates, &id).selection_abort).take() { abort.abort(); }
+                    lock(&sessions).cancel(&id);
                     Ok(())
                 }
             },
@@ -1560,22 +1532,21 @@ where
 }
 
 /// Caller owns either the settings gate or the current turn's busy barrier.
-async fn initialize_native(
+async fn refresh_recent(
     sessions: &Arc<Mutex<Sessions>>,
     tasks: &Tasks,
     id: &str,
-    active_token: Option<u64>,
 ) -> std::result::Result<(), crate::history::Error> {
     let pending = {
         let mut registry = lock(sessions);
         // Cancellation revokes model output before the terminal journal write.
         // The task remains busy until idle, even when Session::active is already empty.
-        if active_token.is_none() && lock(tasks).contains_key(id) {
+        if lock(tasks).contains_key(id) {
             return Ok(());
         }
         let previous = registry.snapshot(id);
-        let refreshed = active_token.is_none() && registry.refresh_recent(id);
-        if !registry.initialize_native(id, active_token) && !refreshed {
+        let refreshed = registry.refresh_recent(id);
+        if !refreshed {
             return Ok(());
         }
         registry.history(id).map(|handle| {
@@ -1587,10 +1558,7 @@ async fn initialize_native(
         })
     };
     if let Some((handle, snapshot, previous)) = pending {
-        let result = match active_token {
-            Some(turn) => handle.initialize_model(turn, snapshot).await,
-            None => handle.save(snapshot).await,
-        };
+        let result = handle.save(snapshot).await;
         if let Err(error) = result {
             lock(sessions).rollback(id, previous);
             return Err(error);
@@ -1663,84 +1631,50 @@ async fn close_session(
     responder.respond(v2::CloseSessionResponse::new())
 }
 
-/// The id of the option that selects the provider profile.
-const PROVIDER_OPTION: &str = "provider";
-
 /// The id of the option that selects the model.
 const MODEL_OPTION: &str = "model";
 
-/// The configuration options a session offers, from its effective settings.
-///
-/// Empty without a provider: an option nothing can act on is a promise Bee
-/// cannot keep. The model selector lists the profile's suggestions, but
-/// `session/set_config_option` accepts any well-formed id, so a model absent
-/// from every list is still usable.
+/// A single qualified selector also works before any account/model is selected.
 fn config_options(settings: Option<Settings>) -> Vec<v2::SessionConfigOption> {
     let Some(settings) = settings else {
         return Vec::new();
     };
-    let provider_options = settings
-        .providers
-        .iter()
-        .map(|id| {
-            // Keep account identity visible even when several connections share a preset.
-            let label = settings
-                .provider_display_names
-                .get(id)
-                .filter(|label| *label != id)
-                .map_or_else(|| id.clone(), |label| format!("{label} ({id})"));
-            v2::SessionConfigSelectOption::new(id.as_str(), label)
-        })
-        .collect::<Vec<_>>();
-
-    let mut options = vec![
-        v2::SessionConfigOption::select(
-            PROVIDER_OPTION,
-            "Provider",
-            settings.provider.as_str(),
-            provider_options,
+    let selected = settings
+        .account
+        .as_ref()
+        .zip(settings.model.as_ref())
+        .map(|(account, model)| format!("{account}/{model}"));
+    let current = selected
+        .as_deref()
+        .filter(|id| settings.models.iter().any(|model| model == id))
+        .unwrap_or("");
+    let mut choices = Vec::new();
+    if current.is_empty() {
+        // The SDK requires a string current value. Empty is presentation only and fails ModelRef parsing.
+        choices.push(v2::SessionConfigSelectOption::new("", "Choose a model"));
+    }
+    choices.extend(settings.model_info.iter().map(|info| {
+        let (account, raw) = info.id.split_once('/').expect("qualified projection");
+        let account_label = settings
+            .account_display_names
+            .get(account)
+            .map_or(account, String::as_str);
+        let model_label = info
+            .facts
+            .get("display_name")
+            .and_then(|fact| fact.value.as_str())
+            .unwrap_or(raw);
+        let label = format!("{account_label} / {model_label} ({})", info.id);
+        v2::SessionConfigSelectOption::new(info.id.as_str(), label).meta(
+            serde_json::json!({"bee.dev/models": info})
+                .as_object()
+                .cloned()
+                .unwrap_or_default(),
         )
-        .description("The configured provider profile that answers this session's prompts.")
-        // No spec category fits a connection profile; `_` marks it custom, as
-        // the protocol requires for non-spec categories.
-        .category(v2::SessionConfigOptionCategory::Other(
-            "_provider".to_owned(),
-        )),
-    ];
-    // A selector needs a current value; a profile with no model has none to show.
-    if let Some(model) = &settings.model {
-        options.push(
-            v2::SessionConfigOption::select(
-                MODEL_OPTION,
-                "Model",
-                model.as_str(),
-                settings
-                    .model_info
-                    .iter()
-                    .map(|info| {
-                        let label = info
-                            .facts
-                            .get("display_name")
-                            .and_then(|fact| fact.value.as_str())
-                            .unwrap_or(&info.id);
-                        let stale = info.facts.values().any(|fact| fact.stale);
-                        let description = format!(
-                            "{}{}; capabilities are declarations, not endpoint verification",
-                            info.sources.join(", "),
-                            if stale { " (stale catalog)" } else { "" }
-                        );
-                        v2::SessionConfigSelectOption::new(info.id.as_str(), label)
-                            .description(description)
-                            .meta(
-                                serde_json::json!({"bee.dev/models": info})
-                                    .as_object()
-                                    .cloned()
-                                    .unwrap_or_default(),
-                            )
-                    })
-                    .collect::<Vec<_>>(),
-            )
-            .description("The model id sent to the provider. Any id may be set, listed or not.")
+    }));
+    vec![
+        v2::SessionConfigOption::select(MODEL_OPTION, "Model", current, choices)
+            .description("Choose an available model and its account together.")
             .meta(
                 serde_json::json!({"bee.dev/models": settings.catalog_status})
                     .as_object()
@@ -1748,9 +1682,7 @@ fn config_options(settings: Option<Settings>) -> Vec<v2::SessionConfigOption> {
                     .unwrap_or_default(),
             )
             .category(v2::SessionConfigOptionCategory::Model),
-        );
-    }
-    options
+    ]
 }
 
 /// Run one turn to its terminal state.
@@ -1874,7 +1806,10 @@ where
         {
             lock(&sessions).rollback(&id, pending.0);
         }
-        send_selection_notice(&connection, &id, reason.message());
+        let notice = lock(&sessions)
+            .selection_notice(&id)
+            .unwrap_or_else(|| reason.message());
+        send_selection_notice(&connection, &id, notice);
     }
     if outcome
         .as_ref()
@@ -2142,7 +2077,7 @@ mod gate_tests {
     use super::*;
 
     #[tokio::test]
-    async fn cancelled_turns_defer_native_initialization_until_the_terminal_journal_write() {
+    async fn cancelled_turns_never_acquire_an_implicit_model_after_terminal_journal_write() {
         struct Catalogue;
         impl crate::models::Http for Catalogue {
             fn get<'a>(
@@ -2156,7 +2091,11 @@ mod gate_tests {
         }
         let root = tempfile::tempdir().unwrap();
         let config_path = root.path().join("config.toml");
-        std::fs::write(&config_path, "[providers.account]\npreset='openrouter'\ncredential={env='KEY'}\ndiscover_models=false").unwrap();
+        std::fs::write(
+            &config_path,
+            "[accounts.account]\nprovider='openrouter'\ncredential={env='KEY'}\ndiscovery=false",
+        )
+        .unwrap();
         let env = crate::config::Environment::new(None, None, Some(config_path))
             .with_variable("KEY", "fixture");
         let providers =
@@ -2176,7 +2115,7 @@ mod gate_tests {
             .await
             .unwrap();
         let sessions = Arc::new(Mutex::new(
-            Sessions::with_providers(providers).with_discovery(Some(discovery)),
+            Sessions::with_accounts(providers).with_discovery(Some(discovery)),
         ));
         let snapshot = crate::history::Snapshot {
             selection_state: Default::default(),
@@ -2203,9 +2142,7 @@ mod gate_tests {
             futures::future::pending::<()>().boxed().shared(),
         );
         assert!(lock(&sessions).cancel(&id));
-        initialize_native(&sessions, &tasks, &id, None)
-            .await
-            .unwrap();
+        refresh_recent(&sessions, &tasks, &id).await.unwrap();
         assert!(
             lock(&sessions)
                 .settings(&id)
@@ -2218,9 +2155,7 @@ mod gate_tests {
         history.finish(turn.token, "cancelled", None).await.unwrap();
         lock(&sessions).finish_turn(&id, turn.token);
         lock(&tasks).remove(&id);
-        initialize_native(&sessions, &tasks, &id, None)
-            .await
-            .unwrap();
+        refresh_recent(&sessions, &tasks, &id).await.unwrap();
         assert_eq!(
             lock(&sessions)
                 .settings(&id)
@@ -2228,7 +2163,7 @@ mod gate_tests {
                 .unwrap()
                 .model
                 .as_deref(),
-            Some("native-model")
+            None
         );
         assert!(history.healthy().is_ok());
     }

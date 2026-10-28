@@ -19,7 +19,7 @@ fn resolve(
 
 fn providers(extra: &str) -> Providers {
     crate::test_support::configured_providers(&format!(
-        "provider='account'\n[providers.account]\nprotocols={{openai-chat={{base_url='https://example.test/v1'}}}}\nmodel='default-model'\n{extra}"
+        "model='account/default-model'\n[accounts.account]\nprovider='custom'\ndiscovery=true\nprotocols={{openai-chat={{base_url='https://example.test/v1'}}}}\n{extra}"
     ))
 }
 
@@ -57,7 +57,7 @@ fn visible(models: &[&str]) -> Snapshot {
 }
 
 #[test]
-fn complete_current_visibility_constrains_recency_but_unknown_and_stale_visibility_do_not() {
+fn complete_visibility_including_stale_results_constrains_recency_but_pending_does_not() {
     let profiles = providers("");
     let env = Environment::default();
     assert_eq!(
@@ -75,11 +75,17 @@ fn complete_current_visibility_constrains_recency_but_unknown_and_stale_visibili
     assert!(fallback.fallback_notice().is_some());
     let mut stale = visible(&[]);
     stale.endpoints.get_mut("account").unwrap().stale = true;
-    assert!(resolve(&reference(), &profiles, &env, &stale).is_ok());
+    assert_eq!(
+        resolve(&reference(), &profiles, &env, &stale),
+        Err(Reason::ModelUnavailable)
+    );
     let listing = stale.endpoints.get_mut("account").unwrap();
     listing.stale = false;
     listing.fetched_at = Some(crate::auth::unix_now().saturating_sub(301));
-    assert!(resolve(&reference(), &profiles, &env, &stale).is_ok());
+    assert_eq!(
+        resolve(&reference(), &profiles, &env, &stale),
+        Err(Reason::ModelUnavailable)
+    );
     stale.endpoints.get_mut("account").unwrap().error = Some(crate::models::Error::Unauthorized);
     assert_eq!(
         resolve(&reference(), &profiles, &env, &stale),
@@ -90,7 +96,7 @@ fn complete_current_visibility_constrains_recency_but_unknown_and_stale_visibili
 #[test]
 fn unavailable_recency_never_falls_back_to_another_connection_or_account() {
     let profiles = crate::test_support::configured_providers(
-        "provider='other'\n[providers.account]\nprotocols={openai-chat={}}\nmodel='default-model'\n[providers.other]\nprotocols={openai-chat={}}\nmodel='other-model'",
+        "model='other/other-model'\n[accounts.account]\nprovider='custom'\ndiscovery=true\nprotocols={openai-chat={base_url='https://changed.test/v1'}}\n[accounts.other]\nprovider='custom'\ndiscovery=true\nprotocols={openai-chat={base_url='https://other.test/v1'}}",
     );
     let recent = Reference::new(profiles.get("account").unwrap(), "gone".into(), None);
     assert_eq!(
@@ -154,9 +160,9 @@ fn credentials_and_target_continuity_are_checked_without_leaking_values() {
         assert!(!format!("{recent:?}").contains(secret));
     }
     let defaults_changed = providers(
-        "credential={env='KEY'}\nheaders={Authorization='header-secret'}\nmodels=['new-suggestion']",
+        "credential={env='KEY'}\nheaders={Authorization='header-secret'}\nmodels=['default-model','new-suggestion']",
     );
-    assert!(resolve(&recent, &defaults_changed, &env, &Snapshot::default()).is_ok());
+    assert!(recent.matches(defaults_changed.get("account").unwrap(), key.as_ref()));
 }
 
 #[test]
@@ -279,7 +285,7 @@ async fn remembered_accounts_ignore_visibility_evidence_from_another_accounts_ca
 fn new_sessions_pin_recent_choices_without_changing_existing_sessions_or_other_profiles() {
     let preferences = Store::default();
     preferences.remember("default", reference()).unwrap();
-    let mut sessions = crate::session::Sessions::with_providers(providers(""))
+    let mut sessions = crate::session::Sessions::with_accounts(providers(""))
         .with_preferences(preferences.clone(), Environment::default());
     let first = sessions.create(".");
     let profile = providers("");
@@ -304,9 +310,9 @@ fn new_sessions_pin_recent_choices_without_changing_existing_sessions_or_other_p
         Some("next-model")
     );
     let other = crate::test_support::configured_providers(
-        "profile='other'\n[providers.account]\nprotocols={openai-chat={}}\nmodel='other-default'\n[profiles.other]\nconnections=['account']",
+        "profile='other'\nmodel='account/other-default'\n[accounts.account]\nprovider='custom'\nmodels=['other-default']\nprotocols={openai-chat={base_url='https://example.test/v1'}}\n[profiles.other]\naccounts=['account']",
     );
-    let mut other = crate::session::Sessions::with_providers(other)
+    let mut other = crate::session::Sessions::with_accounts(other)
         .with_preferences(preferences, Environment::default());
     let id = other.create(".");
     assert_eq!(
@@ -321,29 +327,38 @@ async fn blocked_selection_survives_restart_and_explicit_settings_clear_it_durab
     let history = crate::history::Store::open(root.path().join("state")).unwrap();
     let preferences = Store::default();
     preferences.remember("default", reference()).unwrap();
-    let profiles = providers("headers={Authorization='different-account'}");
-    let mut sessions = crate::session::Sessions::with_providers(profiles.clone())
+    let profiles = crate::test_support::configured_providers(
+        "[accounts.account]\nprovider='custom'\nmodels=['custom-confirmed']\nprotocols={openai-chat={base_url='https://example.test/v1'}}\nheaders={Authorization='different-account'}",
+    );
+    let mut sessions = crate::session::Sessions::with_accounts(profiles.clone())
         .with_preferences(preferences, Environment::default());
     let memory_id = sessions.create(root.path());
+    assert_eq!(
+        sessions.settings(&memory_id).unwrap().unwrap().account,
+        None
+    );
     assert!(matches!(
         sessions.begin_turn(&memory_id, || {}),
         Err(crate::session::SessionError::SelectionRequired)
     ));
-    assert!(!sessions.initialize_native(&memory_id, None));
     let snapshot = sessions.snapshot(&memory_id).unwrap();
     let (id, handle) = history.create(snapshot).await.unwrap();
     handle.release().await.unwrap();
     let (snapshot, handle, _) = history.attach(&id).await.unwrap();
-    let mut restarted = crate::session::Sessions::with_providers(profiles);
+    let mut restarted = crate::session::Sessions::with_accounts(profiles);
     restarted.restore(id.clone(), snapshot.clone(), handle.clone());
     assert!(matches!(
         restarted.begin_turn(&id, || {}),
         Err(crate::session::SessionError::SelectionRequired)
     ));
-    restarted.set_provider(&id, "account").unwrap();
+    restarted
+        .set_model(&id, "account/custom-confirmed")
+        .unwrap();
     restarted.rollback(&id, snapshot);
     assert!(restarted.selection_notice(&id).is_some());
-    restarted.set_model(&id, "custom-confirmed").unwrap();
+    restarted
+        .set_model(&id, "account/custom-confirmed")
+        .unwrap();
     handle.save(restarted.snapshot(&id).unwrap()).await.unwrap();
     handle.release().await.unwrap();
     let (snapshot, _, _) = history.attach(&id).await.unwrap();
@@ -359,7 +374,9 @@ async fn acp_reports_account_changes_and_rejects_prompts_until_explicit_confirma
     let root = tempfile::tempdir().unwrap();
     let preferences = Store::default();
     preferences.remember("default", reference()).unwrap();
-    let profiles = providers("headers={Authorization='changed-account'}");
+    let profiles = crate::test_support::configured_providers(
+        "[accounts.account]\nprovider='custom'\nmodels=['confirmed']\nprotocols={openai-chat={base_url='https://example.test/v1'}}\nheaders={Authorization='changed-account'}",
+    );
     let mut saved: Option<v2::SessionId> = None;
     for restart in [false, true] {
         let history = crate::history::Store::open(root.path().join("state")).unwrap();
@@ -420,8 +437,8 @@ async fn acp_reports_account_changes_and_rejects_prompts_until_explicit_confirma
                             let response = connection
                                 .send_request(v2::SetSessionConfigOptionRequest::new(
                                     id.clone(),
-                                    "provider",
-                                    "account",
+                                    "model",
+                                    "account/confirmed",
                                 ))
                                 .block_task()
                                 .await?;

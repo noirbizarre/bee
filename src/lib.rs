@@ -11,6 +11,7 @@
 #![allow(clippy::result_large_err)]
 #![warn(missing_docs)]
 
+pub mod account;
 pub mod acp;
 pub mod agent;
 pub mod auth;
@@ -26,7 +27,6 @@ pub mod models;
 pub mod permissions;
 mod plan;
 pub mod presentation;
-pub mod preset;
 mod profile;
 pub mod provider;
 pub mod scenario;
@@ -74,7 +74,7 @@ pub fn run() -> Result<()> {
     let config = config::Config::load(&environment, &project_dir)?;
     // Validated here for the same reason: a typo in a base URL must stop the
     // launch, not surface as a connection error on the first prompt (ADR-007).
-    let providers = provider::Providers::from_config(&config)?;
+    let providers = account::Accounts::from_config(&config)?;
     let tools = tool::builtins_with_bash(tool::bash::Settings::from_config(&config)?)?;
     let discovery = std::sync::Arc::new(models::Service::production(
         models::Settings::from_config(&config)?,

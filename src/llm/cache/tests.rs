@@ -7,12 +7,12 @@ fn model(protocol: Protocol, url: &str, name: &str, options: &str) -> Model {
     let path = crate::config::project_config_path(root.path());
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, format!(
-        "[providers.work]\nmodel = '{name}'\n[providers.work.protocols.{}]\nbase_url = '{url}'\n[providers.work.protocols.{}.options]\n{options}",
+        "model='work/{name}'\n[accounts.work]\nprovider='custom'\nmodels=['{name}']\n[accounts.work.protocols.{}]\nbase_url = '{url}'\n[accounts.work.protocols.{}.options]\n{options}",
         protocol.name(), protocol.name(),
     )).unwrap();
     let config =
         crate::config::Config::load(&crate::config::Environment::default(), root.path()).unwrap();
-    let providers = crate::provider::Providers::from_config(&config).unwrap();
+    let providers = crate::account::Accounts::from_config(&config).unwrap();
     Model::new(providers.get("work").unwrap().clone(), name.into(), None)
         .unwrap()
         .with_instructions("Stable instructions".into())

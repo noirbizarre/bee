@@ -629,6 +629,10 @@ fn tokens_at(
         .filter(|n| *n > 0)
         .ok_or_else(|| failure("missing token expiry"))?;
     Ok(Credential {
+        material: super::Material::OAuth {
+            refresh_token: None,
+        },
+        provider_type: Some("chatgpt".into()),
         cloud_identity: None,
         secret: access,
         expires_at: Some(received_at.saturating_add(seconds)),
@@ -802,11 +806,15 @@ mod tests {
     #[test]
     fn remembered_account_binding_survives_oauth_token_renewal_but_not_registration_replacement() {
         let profile =
-            crate::test_support::configured_providers("[providers.account]\npreset='chatgpt'")
+            crate::test_support::configured_providers("[accounts.account]\nprovider='chatgpt'")
                 .get("account")
                 .unwrap()
                 .clone();
         let mut credential = Credential {
+            material: super::super::Material::OAuth {
+                refresh_token: None,
+            },
+            provider_type: Some("chatgpt".into()),
             cloud_identity: None,
             secret: Secret::new("first-access"),
             expires_at: Some(1),
@@ -880,6 +888,72 @@ mod tests {
             scopes: vec![DIRECT.into()],
             earliest_refresh_at: None,
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn prepared_chatgpt_runtime_rejects_wrong_providers_and_logout_before_renewal() {
+        use crate::provider::runtime::Prepared;
+
+        let root = tempfile::tempdir().unwrap();
+        let store = FileStore::new(root.path().join("credentials.json"));
+        let mut credential = Credential::new(Secret::new(SENTINEL))
+            .oauth_token(None)
+            .for_provider("chatgpt");
+        credential.oauth = Some(registration());
+        store.put(Audience::Provider("work"), &credential).unwrap();
+        let http = std::sync::Arc::new(Fake::new(json!({}), json!({})));
+        let session =
+            Session::new(store.clone(), "work".into(), &credential, http.clone()).unwrap();
+        let profiles = crate::test_support::configured_providers(
+            "[accounts.work]\nprovider='chatgpt'\n[accounts.other]\nprovider='openai'",
+        );
+        let error = Prepared::credential(&session, profiles.get("other").unwrap(), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            crate::llm::Error::ChatGpt("renewable sessions require a validated ChatGPT instance")
+        ));
+        assert_eq!(
+            Prepared::credential(&session, profiles.get("work").unwrap(), None)
+                .await
+                .unwrap()
+                .unwrap(),
+            *credential.secret()
+        );
+        let mut rotated = credential.clone();
+        rotated.secret = Secret::new("private-rotated-access");
+        store.put(Audience::Provider("work"), &rotated).unwrap();
+        // Unlike Copilot, ChatGPT pins registration identity and permits token rotation mid-turn.
+        assert_eq!(
+            Prepared::credential(
+                &session,
+                profiles.get("work").unwrap(),
+                Some(credential.secret())
+            )
+            .await
+            .unwrap()
+            .unwrap(),
+            *rotated.secret()
+        );
+        store.remove(Audience::Provider("work")).unwrap();
+        let error = Prepared::credential(
+            &session,
+            profiles.get("work").unwrap(),
+            Some(credential.secret()),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            crate::llm::Error::ChatGpt(
+                "cannot renew authentication; retry later or run `bee auth login <instance>`"
+            )
+        ));
+        assert!(!format!("{error} {error:?}").contains(SENTINEL));
+        assert!(!format!("{error} {error:?}").contains("private-rotated-access"));
+        assert_eq!(http.calls.load(Ordering::SeqCst), 0);
     }
 
     fn token_json(id: &str) -> Value {
@@ -1005,7 +1079,7 @@ mod tests {
         let (_root, store) = store();
         install(&store, true);
         let profile =
-            crate::test_support::configured_providers("[providers.account]\npreset='chatgpt'")
+            crate::test_support::configured_providers("[accounts.account]\nprovider='chatgpt'")
                 .get("account")
                 .unwrap()
                 .clone();

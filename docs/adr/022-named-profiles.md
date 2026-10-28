@@ -4,6 +4,10 @@
 
 Accepted. Extends ADR-006, ADR-007 and ADR-019. The historical Rust `provider::Profile` type remains a connection.
 
+Configuration and default-membership rules are superseded by [ADR-028](028-account-model-availability-and-selection.md).
+Current profiles independently inherit enabled accounts or replace membership with `accounts`, and have one optional
+qualified model. The schema below is historical; selector precedence and durable profile ownership remain applicable.
+
 ## Context
 
 Connection names already identify credentials, OAuth registrations and model-discovery results. Calling these objects

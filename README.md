@@ -74,34 +74,54 @@ Bee merges up to three TOML files, lowest precedence first: the global
 are replaced rather than extended. Effective [permission rules](docs/tools.md#native-permission-rules) are an exception:
 trusted global and `BEE_CONFIG` rules concatenate, and project rules can only tighten decisions.
 A malformed or unreadable file, or a missing `BEE_CONFIG` file, stops Bee at launch
-with an actionable error that never repeats the file's contents. Provider connections (`[providers.<name>]`: the protocols
-the provider speaks, each with its base URL and options, plus model, credential reference and headers) are validated and
-selectable per ACPv2 session. An optional `model_protocols = { "vendor/model.v2" = "openai-responses" }` table
+with an actionable error that never repeats the file's contents. Configured accounts reference compiled-in providers:
+
+```toml
+model = "work/vendor/model-a"
+
+[accounts.work]
+provider = "openai"
+discovery = false
+models = ["vendor/model-a"]
+```
+
+Accounts own endpoints, credentials, headers and model availability. An optional
+`model_protocols = { "vendor/model.v2" = "openai-responses" }` table
 routes exact model IDs to configured protocols; unmapped IDs use `prefer` unless catalog hints are explicitly enabled.
-Optional [model discovery](docs/models.md) enriches ACP selectors and `bee models` commands with Models.dev metadata,
-cached offline fallback and separately enabled endpoint listings. Catalog refresh never blocks configured inference;
-explicit configuration wins over opted-in catalog protocol hints and context budgets.
+With `discovery = false`, exactly declared raw `models` are available; omitted or empty means none. With discovery on,
+successful selectable account results are intersected with optional `models`: omission applies no filter, `[]` permits none.
+Pending/first failed discovery authorizes no models; transient failures may retain same-account last-good stale results,
+while authorization loss clears visibility. These rules constrain explicit selection and inference.
+[Models.dev metadata](docs/models.md) enriches available models without adding choices. Root/profile defaults and the
+unified ACP picker use qualified `account-id/raw-model` references; only the raw suffix is sent to inference.
+No first-account/model or native-order default is chosen. `bee models list [ACCOUNT]` aggregates active accounts when
+omitted; public browsing uses `bee models list --catalog ID` separately.
 See the [documentation](https://noirbizarre.github.io/bee/#configuration).
 
-[Named profiles](docs/profiles.md) group connection references and independent model preferences for contexts such as
+[Named profiles](docs/profiles.md) scope accounts and an optional qualified `model` for contexts such as
 work and personal. Select one with `profile = "work"` or `BEE_PROFILE=work`; precedence is implicit `default` → global
-selector → `BEE_PROFILE` → `BEE_CONFIG` file → project selector. Unknown profiles fail without fallback. Existing
-configurations become `default` in memory, retaining connection names and credentials. Once explicit profiles are defined,
-an undeclared `default` is empty. ACP selections, account commands and durable session access are scoped to the active
-profile.
+selector → `BEE_PROFILE` → `BEE_CONFIG` file → project selector. Unknown profiles fail without fallback.
+Accounts with `enabled` omitted/true form the baseline. Every profile independently inherits it unless an explicit
+`accounts = [...]` replaces it, including disabled accounts when listed; `[]` means none. `[profiles.default]` affects only
+that profile. A root model excluded from a profile is dormant; an explicit profile model outside membership is an error.
+Successful account-bound recency remains preferred over configured defaults without automatic cross-account fallback.
 
 ## Authentication
 
-A connection's `credential` names an environment variable (`{ env = "KEY" }`) or Bee's credential store
-(`{ store = true }`, optionally with `login = "openrouter"` for a browser sign-in). `bee auth login`, `logout` and
-`status` manage the store, which is a `0600` file under `$XDG_DATA_HOME/bee`. Providers are data:
-`preset = "openrouter"` (also `openai`, `anthropic`, `opencode`, `opencode-go`, `deepseek`, `google-aistudio`,
-`google-cloud`, `groq`, `mistral`, `xai`,
-`ollama`, `chatgpt`, `github`) fills in a connection, and your own `presets` and `login_flows` tables extend or
-override the shipped ones. `bee auth login github` provides GitHub.com device login and account model discovery;
+An account's `credential` names an environment variable (`{ env = "KEY" }`) or Bee's credential store
+(`{ store = true }`). `bee auth login`, `logout` and `status` manage the store, a `0600` file under `$XDG_DATA_HOME/bee`.
+Each account references a compiled-in provider, for example `[accounts.work]` with `provider = "openai"`.
+`bee providers list` lists integrations; `bee providers show github` describes authentication and declared fields.
+Use `provider = "custom"` with a protocol and explicit base URL for compatible endpoints. Multiple accounts of one provider
+keep independent credentials, endpoints and model availability. Explicit login imports environment credentials and switches
+that account to stored authority. Omitted login/logout targets require exactly one active account; defaults and recency
+do not choose credential-mutation targets. Explicit configured targets can be disabled, and authenticating them does not
+enable them or alter profile membership. See [accounts and credentials](docs/providers.md).
+`bee auth login github` can create an enabled `github` account and join a restricted active profile when permitted,
+and provides GitHub.com device login and model discovery;
 an explicit `credential = { env = "COPILOT_GITHUB_TOKEN" }` override uses an environment GitHub user token instead.
 See [Copilot setup](docs/index.md#use-github-copilot) for consent identity and supported routing.
-OpenCode Zen and Go use separate console API-key connections: `bee auth login opencode --with-token` or
+OpenCode Zen and Go use separate console API-key accounts: `bee auth login opencode --with-token` or
 `bee auth login opencode-go --with-token`. See [OpenCode setup](docs/index.md#use-opencode-zen-or-go) for environment
 credentials, subscription requirements and model selection.
 Google AI Studio uses `GEMINI_API_KEY` for the Gemini Developer API, including its eligible API free tier;
@@ -109,7 +129,10 @@ Google AI Plus subscription quotas are not API credits. See [setup](docs/index.m
 Google Cloud uses renewable ADC and explicit project/location settings for official Vertex AI Gemini inference,
 charged to Google Cloud with applicable Cloud credits. Cloud billing is separate from AI Studio's free tier and
 Google AI Plus/Pro or Antigravity quotas. See [Cloud setup](docs/index.md#use-google-cloud).
-Presets supply human-readable provider names; ACP labels retain the configured connection ID to distinguish accounts.
+Providers supply human-readable names; picker labels combine account/model display names with ID fallbacks, retaining
+qualified IDs to disambiguate collisions. The compiled inventory includes OpenAI, Anthropic, OpenRouter, ChatGPT, Copilot,
+Ollama, OpenCode Zen/Go, DeepSeek, Google AI Studio/Cloud, Groq, Mistral, xAI and custom endpoints. Grok models use xAI;
+Groq is a separate provider. See the [inventory](docs/providers.md#inspect-compiled-in-providers).
 OpenRouter's sign-in returns an API key; Cloudflare uses a scoped API token and not Wrangler's login; remote MCP server
 authorization is a separate audience and is not implemented. Credentials are resolved when inference needs them. See the
 [documentation](https://noirbizarre.github.io/bee/#authentication).

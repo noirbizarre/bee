@@ -22,7 +22,7 @@ pub(super) struct State {
 impl Reply {
     pub(super) async fn login(
         &self,
-        profile: &crate::provider::Profile,
+        profile: &crate::account::Account,
         store: &crate::auth::FileStore,
         env: &crate::config::Environment,
         http: &dyn crate::http::LoginHttp,

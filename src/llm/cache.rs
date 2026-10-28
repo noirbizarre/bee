@@ -4,11 +4,11 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use super::{Error, Model};
-use crate::provider::Protocol;
-use crate::provider::cache::{
+use crate::account::cache::{
     AnthropicCache, AnthropicPolicy, AnthropicTtl, Breakpoints, CacheKey, CacheMode, OpenAiCache,
     OpenAiCacheOptions, OpenAiTtl, Retention,
 };
+use crate::provider::Protocol;
 
 #[cfg(test)]
 mod tests;

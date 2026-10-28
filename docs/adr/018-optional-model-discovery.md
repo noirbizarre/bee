@@ -4,6 +4,10 @@
 
 Accepted. Extends ADR-007, ADR-013 and ADR-014 with optional catalog hints and budgets.
 
+Partially superseded by [ADR-028](028-account-model-availability-and-selection.md): account availability now gates explicit
+selection and inference, public metadata cannot add choices, and native ordering cannot initialize a default. The schema
+and CLI below are historical; public cache isolation, provenance and opt-in enrichment rationale remain applicable.
+
 ## Context
 
 Opaque model IDs let private, new and local models run without a registry. They do not help users discover IDs or

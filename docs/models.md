@@ -1,20 +1,90 @@
-# Model discovery and metadata
+# Model availability, discovery and metadata
 
-Bee keeps these concepts separate:
+Accounts own model availability. Profiles scope accounts, and compiled-in providers supply implementation capabilities.
+The **public Models.dev catalog** enriches metadata; an **account endpoint listing** observes models at the configured
+target with current credentials. These remain separate: public descriptions never grant account availability, and a
+listing does not guarantee entitlement, remaining quota or successful inference.
 
-- A **profile** groups connection references and model preferences; see [named profiles](profiles.md).
-- A **provider connection** owns configured URLs, credentials, headers and base defaults.
-- A **protocol backend** is implemented code: Chat Completions, Responses or Anthropic Messages.
-- An **endpoint listing** is the model IDs visible through a particular configured endpoint with current credentials.
-- The **Models.dev catalog** describes publicly known providers and models. It suggests and enriches; it is not an
-  allowlist, an endpoint configuration source, or verification of your account's capabilities.
+## Account model availability
 
-Unknown, custom, fine-tuned and local model IDs remain valid without network access. Configured `base_url` values
-always win: Bee never applies catalog API URLs, environment-variable suggestions, headers or credentials.
+Account-local model IDs are opaque, case-sensitive raw wire IDs, including private, fine-tuned and local names.
+Availability is enforced for explicit selection and inference, including configured defaults, recency and resumed sessions.
+
+| Account configuration | Available models |
+| --- | --- |
+| `discovery = false`, nonempty `models` | Exactly the declared raw IDs. |
+| `discovery = false`, omitted `models` or `models = []` | None. |
+| `discovery = true`, omitted `models` | All selectable IDs from a successful account listing. |
+| `discovery = true`, nonempty `models` | Successful selectable account listing ∩ declared IDs. |
+| `discovery = true`, `models = []` | None. |
+
+```toml
+model = "work/vendor/model-a"
+
+[accounts.work]
+provider = "openai"
+discovery = false
+models = ["vendor/model-a", "vendor/model-b"]
+catalog = "openai"
+```
+
+Arrays replace across configuration layers. Omitted `models` and `models = []` are intentionally distinct when discovery
+is enabled. Default/selected IDs, `model_protocols`, context/metadata-map keys and public catalog entries cannot append
+choices. Unknown/private IDs work offline when declared with discovery off. Configuration parsing does no network work;
+statically impossible defaults fail early, while discovery-dependent choices are checked asynchronously before use.
+
+Discovery reports declared, pending, ready, stale, failed or unauthorized status per account. Pending or first failed
+discovery authorizes no models. A fresh successful empty listing is known empty. Transient failures can retain last-good
+results only for the same account and target, with original fetch time and a stale flag. Logout, authorization rejection,
+account replacement or target changes clear visibility; obsolete late responses cannot republish it. Identity-preserving
+OAuth renewal does not clear visibility. Private snapshots from different account authorities are never combined.
+
+Before each production prompt, Bee authenticates/renews the selected account, checks authority and profile membership,
+awaits required availability and native route/context facts, then freezes the turn. Explicit selection follows the same
+availability rule. `--endpoint` may observe metadata with automatic discovery off, but cannot override declared
+availability or expose an alternative unfiltered selectable list. Native hidden-model routing/context facts do not grant
+picker membership. No selected candidate means a choose-model error without authenticating an arbitrary account.
+
+## ACP and CLI
+
+The ACP picker combines available models across **all active accounts**. Machine values are qualified
+`<account-id>/<raw-model-id>` references. Only the first slash separates the account: `work/vendor/model-a` sends
+`vendor/model-a` on the wire. Account-local routing, context maps and metadata retain raw IDs.
+
+Labels combine account display name (provider label, then account ID as fallback) and model display name (raw ID as
+fallback). Qualified IDs remain visible to disambiguate collisions. Account/model selection changes atomically, with
+session busy/finalization guards and durable save before response. Cross-account changes discard native continuation
+even when the raw model ID is unchanged.
+
+Unselected, pending or unavailable sessions retain a usable picker with a presentation-only “Choose a model” option.
+Its empty value is never accepted as a model reference, persisted or sent to inference. The first real choice is never
+visually or automatically selected. Per-account status and model provenance/freshness accompany choices. No sole-model,
+first-declaration, native-order or public-catalog default exists. See [default and recency rules](profiles.md#configured-default-and-last-used-model).
+
+```sh
+bee models list --json
+bee models list work --json
+bee models list work --endpoint --json
+bee models providers --json
+bee models list --catalog anthropic --json
+bee models refresh
+bee models refresh work --json
+```
+
+`list [ACCOUNT]` aggregates active accounts when omitted, or restricts to the named active account. Discovery is bounded
+and concurrent. Human/JSON output uses qualified IDs, consistent display labels and per-account status. Successful
+results are printed even if another account fails. Ordinary list warns and succeeds with usable stale results; targeted
+discovery with no usable result returns nonzero. Explicit refresh failure remains nonzero even with stale data.
+
+`providers` and `--catalog ID` browse the public catalog independently of account membership, using public catalog IDs
+and raw model IDs. `--catalog` conflicts with a positional account and `--endpoint`. `refresh ACCOUNT` explicitly
+refreshes that account; untargeted `refresh` forces a public download even with public `refresh = false`, but respects
+`enabled = false`. Human freshness diagnostics go to stderr; JSON status and facts go to stdout. ACP stdout remains
+protocol-only. Compiled implementations are inspected separately with `bee providers list/show`.
 
 ## Automatic catalog refresh and cache
 
-For supported built-ins, start without a provider declaration or model ID:
+Supported native-name login can create a missing enabled account, without choosing a default model:
 
 ```sh
 bee auth login openrouter
@@ -22,223 +92,122 @@ bee auth login chatgpt
 bee auth login github
 ```
 
-Explicit login creates a missing connection in user configuration and adds it to the active profile. Existing connection
-overrides, profile model preferences and defaults are preserved. Bee writes only user configuration, preserving comments;
-if a project or `BEE_CONFIG` file overrides profile membership, update that membership array there first. Credentials stay
-in the private credential store. Successful authentication immediately discovers models; discovery failure does not undo
-login. Manual token login uses the same hook. ChatGPT still requires its existing browser OAuth flow.
+New accounts may join an explicitly restricted active profile subject to effective-layer/origin checks. Existing-account
+login changes neither enabled state nor membership. Successful authentication triggers discovery; discovery failure
+does not undo login. Credentials stay in the private store. ChatGPT requires its browser OAuth flow.
 
-The OpenRouter, ChatGPT, GitHub Copilot and OpenCode Go presets enable native discovery automatically.
-Legacy OpenCode Zen configuration retains opt-in discovery; first-use CLI onboarding enables it explicitly.
-Google AI Studio (`google-aistudio`) enables generic OpenAI-compatible model listing automatically.
-Set `discover_models = false` to disable
-automatic listing on a connection. `[catalog]` below controls public Models.dev metadata independently of native discovery.
+OpenRouter, ChatGPT, GitHub Copilot and OpenCode Go enable native discovery by default. OpenCode Zen remains opt-in;
+set `discovery = true`. Google AI Studio enables generic compatibility listing by default. `discovery = false` disables
+automatic account listing without disabling native authentication, headers, renewal or route restrictions.
+Google Cloud requires `discovery = false` and declared models; unsupported true discovery is rejected.
 
-Production ACP starts optional background discovery after initialization. Session creation and inference do not wait
-for a catalog request. Embedded runtimes remain offline unless the caller supplies a discovery service.
+Production ACP starts background discovery after initialization. Public catalog requests do not block sessions or
+inference; discovery-enabled account availability may need to be awaited. Embedded runtimes stay offline unless a
+discovery service is supplied. Public policy is independent:
 
 ```toml
 [catalog]
-enabled = true                  # false disables both network and cached catalog use
+enabled = true                  # false disables both network and cached public catalog use
 refresh = true                  # false permits cache-only use
 refresh_interval_secs = 86400    # positive 32-bit seconds; default one day
 ```
 
-Bee downloads `https://models.dev/api.json`. Only validated public catalog data is atomically cached at
-`$XDG_CACHE_HOME/bee/models.dev.json`, or `~/.cache/bee/models.dev.json`. Relative XDG cache roots are ignored.
-No cache root means memory-only discovery. Cache write failure does not discard a successful download.
+Bee downloads `https://models.dev/api.json`. Only validated public data is atomically cached at
+`$XDG_CACHE_HOME/bee/models.dev.json`, falling back to `~/.cache/bee/models.dev.json`. Relative XDG cache roots are
+ignored; no usable root means memory-only public caching. Write failure does not discard a successful download.
+Fresh cache skips downloading. Expired data refreshes in the background with stale fallback and exponential retry
+from one minute to one hour. Corrupt, future-dated and unsupported envelopes are ignored. Stale public metadata has
+no maximum age, including opted-in hints/budgets, but cannot grant model availability.
 
-Fresh cache skips downloading. Expired data refreshes in the background; failures retain the last valid snapshot,
-mark it stale and retry with exponential backoff from one minute up to one hour. Corrupt, future-dated and unsupported
-cache envelopes are ignored. Stale data remains usable without a maximum age, including for explicitly enabled
-protocol hints and context budgets. Explicit configuration remains authoritative.
-
-Downloads have a 15-second whole-request deadline, no redirects, and a 32 MiB body limit. Endpoint listings use a
-4 MiB body limit. Catalogs are bounded to 4096 providers and 100000 model entries. Diagnostics do not expose upstream
-bodies, credential values or URLs. Discovery failure never prevents manually configured models from running.
+Downloads have a 15-second whole-request deadline, no redirects and a 32 MiB body limit; endpoint listings use 4 MiB.
+Catalogs are bounded to 4096 providers and 100000 models. Diagnostics never expose bodies, credentials or URLs.
+Private endpoint IDs never enter the persistent public cache. CLI invocations rediscover private results rather than
+sharing a persistent account catalog.
 
 ## Associate and override metadata
 
 ```toml
-[providers.work]
-preset = "openai"
-model = "my-private-model"
-catalog_provider = "openai"       # explicit Models.dev ID; inherited from known shipped presets
-catalog_protocol_hints = false   # opt-in only
-catalog_context_window = false   # opt-in only
-discover_models = false          # generic endpoint listing is opt-in; supported native presets enable it
-
+[accounts.work]
+provider = "openai"
+discovery = false
+models = ["my-private-model"]
+catalog = "openai"
+catalog_protocol_hints = false
+catalog_context_window = false
 metadata = { tool_call = true }
 model_metadata = { "my-private-model" = { display_name = "Private model", structured_output = false } }
 context_window = 32768
 model_context_windows = { "my-private-model" = 16384 }
 ```
 
-Arbitrary connection names are never matched to a catalog provider implicitly. Missing/unknown `catalog_provider` entries
-are valid and simply have no enrichment. Presets carry associations as data; they do not hard-code model lists.
+`catalog` is an optional Models.dev association supplied by provider defaults or explicit configuration. Account names
+are never implicitly matched to catalog providers; an unknown association simply provides no enrichment. Google's public
+Models.dev ID remains `google`, separate from the compiled provider `google-aistudio` and raw `google/...` model paths.
+Configured URLs always win; public API URLs, environment suggestions, headers and credentials are never applied.
 
 `metadata` and exact, case-sensitive `model_metadata` entries accept:
 
 - `display_name`: nonempty, control-free string.
-- `input_modalities`, `output_modalities`: lists of nonempty, control-free modality names (at most 32 entries).
-- `tool_call`, `structured_output`: optional booleans. Missing means unknown, not false.
-- `input_limit`, `output_limit`: positive 32-bit token limits, informational rather than request settings.
+- `input_modalities`, `output_modalities`: at most 32 nonempty, control-free names.
+- `tool_call`, `structured_output`: optional booleans; missing means unknown.
+- `input_limit`, `output_limit`: positive 32-bit informational limits, not request settings.
 
-Metadata fields resolve independently: model override → connection default → native declaration → public catalog → unknown.
-Explicit false values
-override true catalog declarations. Tables merge per key across configuration layers and presets; empty tables retain
-inherited values. Existing `model_protocols`, `context_window` and `model_context_windows` remain the canonical explicit
-routing/context settings. Catalog context/input/output limits stay distinct; output limits never silently replace
-`max_output_tokens` or protocol-specific request options.
-
-ACP and JSON output attach per-field source, confidence, fetch time and stale status. Configuration/catalog facts are
-**declared**; npm protocol hints are **inferred**. Unverified capabilities stay absent/unknown rather than becoming
-guarantees. Catalog modalities describe the model, not additional inference features implemented by Bee. Capability
-overrides describe facts; they do not add wire features or automatically suppress tools.
+Fields resolve independently: exact model override → account default → native declaration → public catalog → unknown.
+Explicit false overrides true declarations. Tables merge per key across layers/provider defaults; empty tables retain
+inherited values. Metadata cannot add wire features or availability, nor automatically suppress tools. ACP/JSON facts
+carry source, declared/inferred confidence, fetch time and stale status. Catalog modalities do not extend Bee's subset.
+`inference_succeeded_at` records successful account inference observations without promising permanent access.
 
 ## Optional protocol hints and context budgets
 
-With `catalog_protocol_hints = true`, resolution is:
+With `catalog_protocol_hints = true`, resolution is exact configured `model_protocols` → Copilot exact native
+`supported_endpoints` → recognized catalog npm hint for an already configured protocol → `prefer`.
+Model `provider.npm` wins over provider `npm`; `family` is never a routing signal. `@ai-sdk/anthropic` hints Messages,
+`@ai-sdk/openai-compatible` hints Chat and `@ai-sdk/openai` hints Responses. Unknown packages/unconfigured targets fall
+back to preference. Hints are inferred, not verified. Failures never trigger another protocol attempt.
 
-1. Exact configured `model_protocols` mapping.
-2. GitHub Copilot's exact native `supported_endpoints` declarations, when available.
-3. Recognized catalog npm hint, only if that protocol is already configured on the connection.
-4. Existing `prefer` fallback.
+With `catalog_context_window = true`, capacity is exact `model_context_windows` → account `context_window` → Copilot
+native total context → valid catalog capacity → unknown. Native Copilot routing/capacity applies independently of public
+opt-ins; `max_prompt_tokens` remains informational. Public input/output limits never replace request output settings.
+Approximate accounting and transactional whole-turn eviction still apply. The enforced fact's provenance is exposed in
+`_meta["bee.dev/context"].window`.
 
-Bee reads model `provider.npm`, falling back to provider-level `npm` only when absent. `@ai-sdk/anthropic` hints Messages;
-`@ai-sdk/openai-compatible` hints Chat; `@ai-sdk/openai` hints Responses, matching the AI SDK's default since v5.
-Unsupported/unmapped packages and unconfigured targets fall back to `prefer`. `family` is never a routing signal.
-Hints are approximate: one SDK can expose several APIs. Use an explicit mapping when your endpoint differs.
-Failures never trigger another protocol attempt.
-
-With `catalog_context_window = true`, capacity resolves as exact `model_context_windows` entry → connection
-`context_window` → Copilot native total context capacity → valid catalog context capacity → unknown.
-Copilot native routing and total capacity apply independently of public catalog opt-ins; `max_prompt_tokens`
-remains a separate informational input limit. The existing approximate accounting and transactional
-oldest-whole-turn eviction apply. Input/output catalog limits remain informational. Context reports identify the
-enforced window's provenance in `_meta["bee.dev/context"].window`.
-
-Both routing and budget are frozen for the entire model/tool loop. Copilot may await its first native listing to resolve
-the exact model route; explicit model/protocol mappings proceed without waiting for optional discovery.
-Other configured models do not wait for discovery;
-first-use authentication without a model can await native discovery before taking the inference snapshot.
-A later protocol change strips native continuation from the next turn's working history while preserving portable
-messages. Only successful non-refused completion commits that history and route; cancellation/failure preserves
-previously committed context.
+Availability checks and required native facts precede the frozen model/tool loop, even with an explicit routing map.
+Public enrichment remains optional. Later route changes strip native continuation while retaining portable messages;
+only successful non-refused completion commits working history and route.
 
 ## Endpoint-specific visibility
 
-`discover_models = true` enables independent connection-owned background enumeration every five minutes after success.
-Failures retry with exponential backoff from one minute to one hour. Concurrent refresh callers share an in-flight result.
-Listing uses existing credentials and never starts browser login; successful browser login triggers immediate discovery.
-ChatGPT OAuth credentials are renewed when necessary before listing. Missing credentials or unsupported listings do not
-prevent manually configured inference.
+Enabled listing refreshes every five minutes after success, retries failures exponentially from one minute to one hour
+and shares in-flight refreshes. Listing never initiates browser login. ChatGPT OAuth renews before listing when needed.
+Native adapters come from compiled provider capabilities, not string-valued configuration selectors.
 
-Native integration identity is explicit (`discovery = "openrouter"`, `"chatgpt"` or `"github"`, supplied by the
-relevant preset), separate
-from `catalog_provider` and inference protocols. Arbitrary connection names never select an adapter implicitly.
-OpenRouter requests its authenticated `/models/user` API, preserving returned labels, modalities, supported-parameter
-declarations and context limits. Its scope is user preferences, privacy settings and guardrails: it does not establish
-remaining credits, quota, routing availability or successful inference. Pagination links are bounded and validated against
-the listing origin/path before credentials are attached. Incomplete refreshes never replace a complete catalogue.
-
-Generic OpenAI-compatible discovery appends `/models` to each distinct configured base URL, retaining gateway paths,
-and uses the unpaginated `data[].id` contract. The `chatgpt` preset uses OpenAI's
-account-specific `models[]` contract, keeps `visibility = "list"` entries, and presents `display_name` labels with exact
-`slug` IDs in server order. Its automatic endpoint discovery is enabled by the preset. Account names and IDs remain
-separate from the public Models.dev cache.
-Generic responses advertising more pages are unsupported rather than presented as complete.
-Google AI Studio uses this generic path at `https://generativelanguage.googleapis.com/v1beta/openai/models`, authenticated
-with its API key as a bearer token. IDs remain exact suggestions; configure or select a model explicitly. The external
-Models.dev association remains `google`, independent of Bee's `google-aistudio` preset ID. Native Gemini Models API
-pagination and capability/limit metadata are not implemented by this compatibility listing.
-Google Cloud (`google-cloud`) uses explicitly configured `google/...` model IDs and optional per-model context windows.
-It does not enable generic endpoint discovery or reuse AI Studio's catalogue as project/region availability evidence.
-`discover_models = true` is rejected for Cloud until a verified listing contract exists. Configuring a model does not
-establish access, current regional availability, remaining quota or credit eligibility; see [setup](index.md#use-google-cloud).
-Copilot uses account-authenticated `/models`, preserving native order and capability/limit declarations. Explicitly disabled,
-non-picker, non-tool or non-streaming models are excluded from automatic choices. Exact `/chat/completions`, `/responses`
-and `/v1/messages` declarations select supported protocols in configured preference order. Unknown-only declarations never
-become guessed routes, and a conflicting explicit mapping fails before inference. Bee does not automatically enable model
-policies. Copilot auth mode and target preparation remain active with discovery disabled; see
-[setup](index.md#use-github-copilot) and [ADR-024](adr/024-github-copilot-authentication.md).
-Generic results are sorted/deduplicated; native results preserve server order. Results are bounded to 100000 IDs and kept
-in memory per connection within the runtime's active profile. Same-account transient failures retain the last good catalogue
-with its original successful fetch time, latest attempt/error and stale flag. Account replacement, logout or authorization
-rejection removes previous visibility; late responses cannot republish invalidated data. OAuth token renewal alone
-does not
-change account identity. External credential changes are observed on refresh. CLI invocations rediscover rather than sharing
-a persistent private catalogue. Listing is an observation, never an authorization guarantee.
-
-Endpoint IDs never enter the persistent public catalog cache. Listing confirms visibility only, not tool calls,
-structured output, modalities or support for every inference protocol. Native metadata declares capabilities; it does not
-verify them. `inference_succeeded_at` records actual successful inference observations for that connection/account, without
-promising permanent access. Empty observations mean unverified, not unavailable. Bee never automatically probes models.
-
-## ACP and CLI
-
-ACP model options retain configured/default IDs first, then any selected custom ID, endpoint IDs and catalog IDs,
-without duplicates. Display names are labels; the exact ID is sent to inference. Descriptions and
-`_meta["bee.dev/models"]` expose provenance/freshness. Refresh sends complete `config_option_update` options to open
-sessions without replacing explicit or legacy pinned selections. New sessions first consider their profile's
-[account-bound last-used model](profiles.md#configured-default-and-last-used-model); fresh account discovery can invalidate
-automatic reuse and warn about a safe fallback or required explicit selection. When there is no selected/configured
-model, a ranked native result initializes
-the choice from provider ordering. That choice is pinned to the connection and durably saved before publication; later
-refreshes and restarts retain it, even if the model disappears from the listing. Active turns defer background selection
-initialization until idle. OpenCode's public offering lists are unranked and never initialize a default; select a text
-model explicitly, since listing does not establish Bee compatibility or account access. Public Models.dev entries never
-supply defaults. Without native results, clients can still set
-any well-formed ID; a connection with no selection has no model selector yet.
-
-```sh
-bee models providers --json
-bee models list work --json
-bee models list --catalog-provider anthropic --json
-bee models list work --endpoint --json
-bee models refresh
-bee models refresh work --json
-```
-
-`providers` and `--catalog-provider` browse the dynamic global catalog without requiring configured connections.
-`list [CONNECTION]` uses the active profile's default connection when omitted. Explicit targets must be members of the
-active profile; its model preferences override connection defaults. Supported connections discover natively on `list`.
-`--endpoint` explicitly queries endpoint visibility
-even if automatic listing is disabled, and does not require a catalog download. Ordinary queries refresh expired or
-missing catalog data when enabled, falling back visibly to stale cache. Configured IDs remain listable offline.
-
-`refresh CONNECTION` explicitly refreshes that connection; untargeted `refresh` forces a public download even with
-`refresh = false`, but respects public `enabled = false`. A forced refresh failure has a
-failure exit status, even if a stale catalog remains available. Human-readable output labels freshness on stderr;
-`--json` includes status and facts on stdout. Only these binary command paths print: ACP stdout stays protocol-only.
-
-See [ADR-018](adr/018-optional-model-discovery.md) for architecture and tradeoffs.
+- **OpenRouter:** authenticated `/models/user`, preserving user preferences, privacy/guardrails, labels, modalities,
+  supported parameters and context limits. Pagination origins/paths are validated before credentials are attached;
+  incomplete refresh never replaces a complete listing. Visibility is not a credit, quota or routing guarantee.
+- **ChatGPT:** account-specific `models[]`, retaining `visibility = "list"`, exact `slug` IDs, labels and server order.
+  Listing is separate from OpenAI API keys and does not establish plan entitlement.
+- **GitHub Copilot:** direct authenticated `/models` with native ordering and limits. Disabled, non-picker, non-tool or
+  non-streaming entries are not selectable. Exact `/chat/completions`, `/responses` and `/v1/messages` declarations
+  choose supported routes in configured preference order. Unknown-only declarations are not guessed, and conflicting
+  explicit mappings fail. Bee never enables model policies automatically. See [setup](index.md#use-github-copilot).
+- **Generic compatibility:** `/models` appended to each distinct base URL, preserving gateway paths; unpaginated
+  `data[].id`, sorted/deduplicated. Advertising more pages is unsupported rather than silently treated as complete.
+- **Google AI Studio:** generic API-key bearer listing at
+  `https://generativelanguage.googleapis.com/v1beta/openai/models`. Native Gemini pagination and capability/limit
+  metadata are not implemented. No implicit model default or quota guarantee.
+- **Google Cloud:** declared exact `google/...` IDs only. No verified project/region listing contract; `discovery = true`
+  is rejected. AI Studio's public catalog is not Cloud availability evidence. See [setup](index.md#use-google-cloud).
+- **OpenCode Zen / Go:** separate `/inference/v1/models` and `/inference/go/v1/models` offerings and credentials.
+  Lists are unranked; select a text model explicitly. Neither listing proves subscription entitlement or Bee compatibility.
 
 ## Native adapter coverage
 
-The shared layer permits provider-specific authentication, pagination, metadata and availability semantics.
-Adapters are incremental; entries marked planned currently use manual connection/model configuration.
+OpenRouter, ChatGPT, Copilot, OpenCode offerings and generic AI Studio listing are implemented as described above.
+Native paginated Anthropic and Mistral APIs, Cloudflare AI Gateway routing discovery, native Gemini Models metadata,
+and Amazon Bedrock foundation-model/inference-profile discovery remain follow-up work. Configure declared models with
+discovery off where a suitable listing is unavailable. Cloudflare Workers AI enumeration is separate from AI Gateway;
+Bedrock must distinguish published foundation models from account/region/IAM-authorized invocation targets.
 
-| Integration | Coverage and approach | Scope and constraints |
-| --- | --- | --- |
-| OpenRouter | Implemented: native authenticated Models API (`/models/user`) | User preferences/privacy/guardrails; no credit, quota or inference guarantee |
-| ChatGPT / Codex OAuth | Implemented: existing official OAuth and account catalogue integration | Separate from OpenAI API keys; visible catalogue metadata is not entitlement |
-| GitHub Copilot | Implemented: direct user-token `/models`, exact protocol declarations and native limits | GitHub.com accounts; private account visibility, no quota or inference guarantee |
-| Anthropic Claude | Planned: native Models API with pagination | API-key/workspace scope; Claude subscription/OAuth is not API access |
-| OpenCode Zen | Implemented: `/inference/v1/models` | Public offering IDs, not entitlement; API keys, explicit text-model selection |
-| OpenCode Go | Implemented: `/inference/go/v1/models` | Separate credentials/catalogue; subscription access, explicit text-model selection |
-| Cloudflare AI Gateway | Planned: gateway routing/provider configuration discovery or configuration | Preserve upstream provider/model identity; not Workers AI enumeration |
-| Google AI Studio | Implemented: authenticated OpenAI-compatible `/models`; native Gemini Models adapter planned | Exact model suggestions; no implicit default, quota or capability guarantee |
-| Google Cloud | Configured models; endpoint discovery unavailable | Exact `google/...` IDs; access and availability depend on project, region and API |
-| Amazon Bedrock | Planned: foundation-model and inference-profile APIs | Account, region, IAM and model access; distinguish published models from invocation targets |
-| Mistral | Planned: native authenticated Models API | Connection-scoped results and documented metadata |
-
-Provider references: [OpenRouter Models API](https://openrouter.ai/docs/guides/overview/models),
-[ChatGPT integration](adr/020-chatgpt-plan-authentication.md),
-[Anthropic models](https://platform.claude.com/docs/en/api/models/list),
-[Zen](https://opencode.ai/docs/zen/), [Go](https://opencode.ai/docs/go/),
-[AI Gateway](https://developers.cloudflare.com/ai-gateway/),
-[Gemini models](https://ai.google.dev/api/models),
-[Bedrock models](https://docs.aws.amazon.com/bedrock/latest/APIReference/API_ListFoundationModels.html),
-[Bedrock inference profiles](https://docs.aws.amazon.com/bedrock/latest/APIReference/API_ListInferenceProfiles.html),
-and [Mistral models](https://docs.mistral.ai/api/endpoint/models).
+See [ADR-028](adr/028-account-model-availability-and-selection.md) for current availability and selection decisions and
+[ADR-018](adr/018-optional-model-discovery.md) for public metadata/cache rationale.

@@ -65,8 +65,8 @@ def main():
             root = Path(temporary)
             config = root / "bee.toml"
             config.write_text(
-                "[providers.test]\nmodel='fixture'\n"
-                "[providers.test.protocols.openai-chat]\n"
+                "model='test/fixture'\n[accounts.test]\nprovider='custom'\nmodels=['fixture']\n"
+                "[accounts.test.protocols.openai-chat]\n"
                 f"base_url='http://127.0.0.1:{model.server_port}'\n",
                 encoding="utf-8",
             )

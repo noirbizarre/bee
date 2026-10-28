@@ -341,7 +341,7 @@ fn native_replay_is_counted_once_and_anthropic_output_overrides_are_reserved() {
         assert!(model.context(&messages, &[]).unwrap().estimated_input > native.estimated_input);
     }
     let profiles = support::configured_providers(&format!(
-        "[providers.test]\nmodel='m'\nmax_output_tokens=100\n[providers.test.protocols.anthropic-messages]\nbase_url='{}'\noptions={{max_tokens=7}}",
+        "model='test/m'\n[accounts.test]\nprovider='custom'\nmodels=['m']\nmax_output_tokens=100\n[accounts.test.protocols.anthropic-messages]\nbase_url='{}'\noptions={{max_tokens=7}}",
         server.url
     ));
     let model = Model::new(profiles.get("test").unwrap().clone(), "m".into(), None).unwrap();

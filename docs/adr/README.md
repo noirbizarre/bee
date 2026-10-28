@@ -49,3 +49,5 @@ by editing the old one. The history is the value.
 - [ADR-024](024-github-copilot-authentication.md) — Integrate GitHub Copilot device OAuth, direct tokens and native models
 - [ADR-025](025-google-cloud-provider.md) — Integrate Google Cloud Gemini with trusted project routing and renewable ADC
 - [ADR-026](026-opencode-offerings.md) — Separate OpenCode Zen and Go credentials with shared API-key integration
+- [ADR-027](027-provider-registry-and-instance-authentication.md) — Register provider types and instance-owned authentication
+- [ADR-028](028-account-model-availability-and-selection.md) — Account-scoped availability and qualified model selection

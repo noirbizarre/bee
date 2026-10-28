@@ -1,4 +1,4 @@
-//! Provider profiles read from the layered configuration, in-process.
+//! Account configuration and native/generic protocol contracts, in-process.
 //!
 //! Every test describes its own environment and project directory, so none
 //! touches a developer's real configuration.
@@ -7,8 +7,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use bee::Error;
+use bee::account::{
+    Accounts as Providers, CredentialSource, MaxTokensField, ModelRef, Protocol, ProtocolOptions,
+};
 use bee::config::{Config, Environment, project_config_path};
-use bee::provider::{CredentialSource, MaxTokensField, Protocol, ProtocolOptions, Providers};
 use pretty_assertions::assert_eq;
 use rstest::rstest;
 use tempfile::TempDir;
@@ -47,7 +49,7 @@ impl Sandbox {
     fn providers(&self) -> bee::Result<Providers> {
         fs::create_dir_all(self.project_dir()).unwrap();
         let env = Environment::new(None, Some(self.root.path().join("home")), None);
-        Providers::from_config(&Config::load(&env, &self.project_dir()).unwrap())
+        Providers::from_config(&Config::load(&env, &self.project_dir())?)
     }
 }
 
@@ -59,12 +61,62 @@ fn load(text: &str) -> bee::Result<Providers> {
 }
 
 #[test]
+fn model_suggestions_deduplicate_exact_ids_without_creating_a_default_or_rewriting_filters() {
+    let providers = load("[accounts.work]\nprovider='openai'\ndiscovery=false\nmodels=['vendor/Model','vendor/Model','vendor/model']").unwrap();
+    let account = providers.get("work").unwrap();
+    assert_eq!(account.suggested_models(), ["vendor/Model", "vendor/model"]);
+    assert_eq!(
+        account.models(),
+        ["vendor/Model", "vendor/Model", "vendor/model"]
+    );
+    assert_eq!(providers.configured_model(), None);
+    let omitted = load("[accounts.work]\nprovider='openai'").unwrap();
+    assert!(omitted.get("work").unwrap().suggested_models().is_empty());
+    assert!(omitted.get("work").unwrap().model_filter().is_none());
+}
+
+#[test]
+fn invalid_model_metadata_keys_and_values_keep_leaf_provenance_without_leaking_ids() {
+    for (model, metadata) in [
+        ("private-model-sentinel ", "{display_name='valid'}"),
+        ("private-model-sentinel", "{display_name=42}"),
+        ("private-model-sentinel", "{input_limit=0}"),
+        ("private-model-sentinel", "{output_modalities=['']}"),
+        (
+            "private-model-sentinel",
+            "{unknown='private-value-sentinel'}",
+        ),
+    ] {
+        let sandbox = Sandbox::new();
+        sandbox.write(
+            &sandbox.global(),
+            "[accounts.work]\nprovider='openai'\nmodel_metadata.base={display_name='Base'}",
+        );
+        sandbox.write(
+            &sandbox.project(),
+            &format!("[accounts.work.model_metadata]\n'{model}'={metadata}"),
+        );
+        let error = sandbox.providers().unwrap_err();
+        match &error {
+            Error::ProviderInvalid { key, path, .. } => {
+                assert_eq!(key, "accounts.work.model_metadata");
+                assert_eq!(path, &sandbox.project().display().to_string());
+            }
+            other => panic!("expected metadata validation error, got {other:?}"),
+        }
+        let output = rendered(error);
+        assert!(!output.contains("private-model-sentinel"), "{output}");
+        assert!(!output.contains("private-value-sentinel"), "{output}");
+    }
+}
+
+#[test]
 fn google_cloud_constructs_global_and_regional_targets_independently_of_connection_names() {
     for (location, host) in [
         ("global", "aiplatform.googleapis.com"),
         ("europe-west4", "europe-west4-aiplatform.googleapis.com"),
     ] {
-        let providers = load(&format!("[providers.work]\npreset='google-cloud'\nmodel='google/gemini-2.5-flash'\ngoogle_cloud={{project='resource-project',location='{location}'}}")).unwrap();
+        let providers = load(&format!("model='work/google/gemini-2.5-flash'\n[accounts.work]\nprovider='google-cloud'\nmodels=['google/gemini-2.5-flash']\ngoogle_cloud={{project='resource-project',location='{location}'}}")).unwrap();
         let profile = providers.get("work").unwrap();
         assert_eq!(profile.display_name(), Some("Google Cloud"));
         assert_eq!(
@@ -77,8 +129,11 @@ fn google_cloud_constructs_global_and_regional_targets_independently_of_connecti
                 "https://{host}/v1/projects/resource-project/locations/{location}/endpoints/openapi"
             )
         );
-        assert!(!profile.discover_models());
-        assert_eq!(profile.default_model(), Some("google/gemini-2.5-flash"));
+        assert!(!profile.discovery());
+        assert_eq!(
+            providers.configured_model(),
+            Some(&ModelRef::parse("work/google/gemini-2.5-flash").unwrap())
+        );
         assert!(!format!("{profile:?} {:?}", profile.google_cloud()).contains("resource-project"));
     }
 }
@@ -93,19 +148,22 @@ fn google_cloud_constructs_global_and_regional_targets_independently_of_connecti
 #[case("credential={env='SECRET'}")]
 #[case("credential={adc=false}")]
 #[case("credential={adc=true,store=true}")]
-#[case("discover_models=true")]
+#[case("discovery=true")]
 fn google_cloud_refuses_unsafe_overrides_without_echoing_configuration(#[case] extra: &str) {
-    let error = load(&format!("[providers.work]\npreset='google-cloud'\n{extra}")).unwrap_err();
+    let error = load(&format!(
+        "[accounts.work]\nprovider='google-cloud'\n{extra}"
+    ))
+    .unwrap_err();
     assert!(!format!("{error:?} {error}").contains(SECRET));
 }
 
 #[test]
 fn copilot_authentication_survives_env_overrides_and_disabled_discovery() {
-    let providers = load("[providers.work]\npreset='github'\ncredential={env='COPILOT_GITHUB_TOKEN'}\ndiscover_models=false").unwrap();
+    let providers = load("[accounts.work]\nprovider='github'\ncredential={env='COPILOT_GITHUB_TOKEN'}\ndiscovery=false").unwrap();
     let profile = providers.get("work").unwrap();
     assert!(profile.is_copilot());
-    assert_eq!(profile.catalog_provider(), Some("github-copilot"));
-    assert!(!profile.discover_models());
+    assert_eq!(profile.catalog(), Some("github-copilot"));
+    assert!(!profile.discovery());
     assert!(profile.login_spec().is_none());
     assert_eq!(
         profile.credential(),
@@ -121,26 +179,26 @@ fn copilot_authentication_survives_env_overrides_and_disabled_discovery() {
 #[case("credential={store=true,login='chatgpt'}")]
 #[case("protocols.openai-chat.base_url='https://evil.example/sk-super-secret-token'")]
 fn copilot_rejects_unsafe_connection_overrides_without_repeating_values(#[case] extra: &str) {
-    let error = load(&format!("[providers.work]\npreset='github'\n{extra}")).unwrap_err();
+    let error = load(&format!("[accounts.work]\nprovider='github'\n{extra}")).unwrap_err();
     let rendered = format!("{error:?} {error}");
     assert!(!rendered.contains(SECRET));
     assert!(!rendered.contains("unsupported-secret"));
 }
 
 #[test]
-fn context_windows_merge_per_model_across_presets_and_layers() {
+fn context_windows_merge_per_model_across_instance_layers() {
     let sandbox = Sandbox::new();
-    sandbox.write(&sandbox.global(), "[presets.local]\ncontext_window=10000\nmodel_context_windows={small=1000,large=20000}\n[presets.local.protocols.openai-chat]\n[providers.work]\npreset='local'\nmodel_context_windows={small=2000}\n");
+    sandbox.write(&sandbox.global(), "[accounts.work]\nprovider='openai'\ncontext_window=10000\nmodel_context_windows={small=2000,large=20000}\n");
     sandbox.write(
         &sandbox.project(),
-        "[providers.work]\ncontext_window=12000\nmodel_context_windows={large=30000}\n",
+        "[accounts.work]\ncontext_window=12000\nmodel_context_windows={large=30000}\n",
     );
     let providers = sandbox.providers().unwrap();
     let profile = providers.get("work").unwrap();
     assert_eq!(profile.context_window("small"), Some(2000));
     assert_eq!(profile.context_window("large"), Some(30000));
     assert_eq!(profile.context_window("unknown"), Some(12000));
-    let unknown = load("[providers.work.protocols.openai-chat]").unwrap();
+    let unknown = load("[accounts.work]\nprovider='custom'\n[accounts.work.protocols.openai-chat]\nbase_url='https://gateway.example'").unwrap();
     assert_eq!(
         unknown.get("work").unwrap().context_window("anything"),
         None
@@ -158,7 +216,7 @@ fn context_windows_merge_per_model_across_presets_and_layers() {
 #[case("model_context_windows='sk-super-secret-token'")]
 fn invalid_context_limits_never_echo_values_or_model_map_keys(#[case] setting: &str) {
     let error = load(&format!(
-        "[providers.work]\n{setting}\n[providers.work.protocols.openai-chat]"
+        "[accounts.work]\nprovider='custom'\n{setting}\n[accounts.work.protocols.openai-chat]\nbase_url='https://gateway.example'"
     ))
     .unwrap_err();
     assert!(!format!("{error:?} {error}").contains(SECRET));
@@ -167,32 +225,34 @@ fn invalid_context_limits_never_echo_values_or_model_map_keys(#[case] setting: &
 #[test]
 fn context_model_map_diagnostics_preserve_leaf_provenance_and_redact_debug() {
     let sandbox = Sandbox::new();
-    sandbox.write(&sandbox.global(), &format!("[providers.work]\nmodel_context_windows={{'{SECRET}'=0}}\n[providers.work.protocols.openai-chat]"));
-    sandbox.write(&sandbox.project(), "[providers.work]\ncontext_window=2000");
+    sandbox.write(&sandbox.global(), &format!("[accounts.work]\nprovider='custom'\nmodel_context_windows={{'{SECRET}'=0}}\n[accounts.work.protocols.openai-chat]\nbase_url='https://gateway.example'"));
+    sandbox.write(&sandbox.project(), "[accounts.work]\ncontext_window=2000");
     let error = sandbox.providers().unwrap_err();
     let Error::ProviderInvalid { path, .. } = error else {
         panic!("invalid context limit must retain its typed provenance");
     };
     // Diagnostic formatting escapes Windows separators; compare filesystem paths.
     assert_eq!(Path::new(&path), sandbox.global());
-    sandbox.write(&sandbox.global(), &format!("[providers.work]\nmodel_context_windows={{'{SECRET}'=1000}}\n[providers.work.protocols.openai-chat]"));
+    sandbox.write(&sandbox.global(), &format!("[accounts.work]\nprovider='custom'\nmodel_context_windows={{'{SECRET}'=1000}}\n[accounts.work.protocols.openai-chat]\nbase_url='https://gateway.example'"));
     assert!(!format!("{:?}", sandbox.providers().unwrap()).contains(SECRET));
 }
 
 #[test]
 fn exact_model_mappings_override_preference_without_restricting_unknown_models() {
     let providers = load(r#"
-[providers.gateway]
+model = "gateway/vendor/model.v2"
+[accounts.gateway]
+provider = "custom"
+discovery = false
 prefer = ["openai-chat"]
-model = "vendor/model.v2"
-models = ["suggested"]
+models = ["vendor/model.v2", "suggested"]
 model_protocols = { "vendor/model.v2" = "openai-responses", "模型 / custom:1" = "anthropic-messages" }
-protocols = { openai-chat = {}, openai-responses = {}, anthropic-messages = {} }
+protocols = { openai-chat = {base_url='https://gateway.example/chat'}, openai-responses = {base_url='https://gateway.example/responses'}, anthropic-messages = {base_url='https://gateway.example/messages'} }
 "#).unwrap();
     let profile = providers.get("gateway").unwrap();
     assert_eq!(
         profile
-            .endpoint_for_model(profile.default_model().unwrap())
+            .endpoint_for_model(&providers.configured_model().unwrap().model)
             .protocol(),
         Protocol::OpenAiResponses
     );
@@ -211,7 +271,7 @@ protocols = { openai-chat = {}, openai-responses = {}, anthropic-messages = {} }
             Protocol::OpenAiChat
         );
     }
-    assert_eq!(profile.suggested_models(), ["vendor/model.v2", "suggested"]);
+    assert_eq!(profile.models(), ["vendor/model.v2", "suggested"]);
 }
 
 #[test]
@@ -226,7 +286,7 @@ fn invalid_model_mappings_are_rejected_without_printing_keys_or_values() {
         "{ \"control\\nkey\" = 'openai-chat' }".into(),
     ] {
         let error = load(&format!(
-            "[providers.p]\nprotocols={{openai-chat={{}}}}\nmodel_protocols={mapping}"
+            "[accounts.p]\nprovider='custom'\nprotocols={{openai-chat={{base_url='https://gateway.example'}}}}\nmodel_protocols={mapping}"
         ))
         .unwrap_err();
         assert!(!format!("{error} {error:?}").contains(SECRET));
@@ -239,13 +299,13 @@ fn invalid_model_mappings_are_rejected_without_printing_keys_or_values() {
 #[test]
 fn layered_model_mappings_merge_literal_ids_and_preserve_entry_origins() {
     let sandbox = Sandbox::new();
-    sandbox.write(&sandbox.global(), "[providers.p]\nprefer=['openai-chat']\nprotocols={openai-chat={},openai-responses={},anthropic-messages={}}\nmodel_protocols={'vendor/a.v2'='openai-chat',other='anthropic-messages'}");
+    sandbox.write(&sandbox.global(), "[accounts.p]\nprovider='custom'\nprefer=['openai-chat']\nprotocols={openai-chat={base_url='https://gateway.example/chat'},openai-responses={base_url='https://gateway.example/responses'},anthropic-messages={base_url='https://gateway.example/messages'}}\nmodel_protocols={'vendor/a.v2'='openai-chat',other='anthropic-messages'}");
     let selected = sandbox.root.path().join("selected.toml");
     sandbox.write(
         &selected,
-        "[providers.p.model_protocols]\n'vendor/a.v2'='openai-responses'",
+        "[accounts.p.model_protocols]\n'vendor/a.v2'='openai-responses'",
     );
-    sandbox.write(&sandbox.project(), "[providers.p]\nmodel_protocols={}");
+    sandbox.write(&sandbox.project(), "[accounts.p]\nmodel_protocols={}");
     let env = Environment::new(None, Some(sandbox.root.path().join("home")), Some(selected));
     let config = Config::load(&env, &sandbox.project_dir()).unwrap();
     let providers = Providers::from_config(&config).unwrap();
@@ -259,11 +319,11 @@ fn layered_model_mappings_merge_literal_ids_and_preserve_entry_origins() {
         Protocol::AnthropicMessages
     );
 
-    sandbox.write(&sandbox.global(), &format!("[providers.p]\nprotocols={{openai-chat={{}}}}\nmodel_protocols={{'{SECRET}'='openai-responses'}}"));
+    sandbox.write(&sandbox.global(), &format!("[accounts.p]\nprovider='custom'\nprotocols={{openai-chat={{base_url='https://gateway.example'}}}}\nmodel_protocols={{'{SECRET}'='openai-responses'}}"));
     // An unrelated contribution must not move the invalid entry's origin.
     sandbox.write(
         &sandbox.project(),
-        "[providers.p.model_protocols]\nother='openai-chat'",
+        "[accounts.p.model_protocols]\nother='openai-chat'",
     );
     let env = Environment::new(None, Some(sandbox.root.path().join("home")), None);
     let config = Config::load(&env, &sandbox.project_dir()).unwrap();
@@ -277,7 +337,7 @@ fn layered_model_mappings_merge_literal_ids_and_preserve_entry_origins() {
     assert!(!format!("{error:?}").contains(SECRET));
     sandbox.write(
         &sandbox.project(),
-        &format!("[providers.p.model_protocols]\n'{SECRET}'=1"),
+        &format!("[accounts.p.model_protocols]\n'{SECRET}'=1"),
     );
     let error = Config::load(&env, &sandbox.project_dir()).unwrap_err();
     assert!(matches!(error, Error::ConfigConflict { .. }));
@@ -285,15 +345,17 @@ fn layered_model_mappings_merge_literal_ids_and_preserve_entry_origins() {
 }
 
 #[test]
-fn inference_limits_are_positive_and_work_in_presets() {
-    let providers = load("[presets.local]\ntimeout_ms=456\nmax_output_tokens=123\n[ presets.local.protocols.openai-chat ]\n[providers.work]\npreset='local'\n").unwrap();
+fn inference_limits_are_positive_and_override_native_defaults() {
+    let providers =
+        load("[accounts.work]\nprovider='openai'\ntimeout_ms=456\nmax_output_tokens=123\n")
+            .unwrap();
     let profile = providers.get("work").unwrap();
     assert_eq!(profile.timeout(), std::time::Duration::from_millis(456));
     assert_eq!(profile.max_output_tokens(), 123);
     for field in ["timeout_ms", "max_output_tokens"] {
         for value in ["0", "-1", "4294967296", "'sk-secret'"] {
             let error = load(&format!(
-                "[providers.work]\n{field}={value}\n[providers.work.protocols.openai-chat]"
+                "[accounts.work]\nprovider='custom'\n{field}={value}\n[accounts.work.protocols.openai-chat]\nbase_url='https://gateway.example'"
             ))
             .unwrap_err();
             assert!(!format!("{error:?} {error}").contains("sk-secret"));
@@ -310,22 +372,24 @@ fn no_provider_configuration_is_not_an_error() {
     let providers = load("").unwrap();
 
     assert!(providers.is_empty());
-    assert_eq!(providers.default_name(), None);
+    assert!(providers.configured_model().is_none());
 }
 
 #[test]
-fn several_profiles_can_share_one_protocol_with_their_own_endpoints() {
+fn several_accounts_can_share_one_protocol_with_their_own_endpoints() {
     let providers = load(
         r#"
-provider = "work"
+model = "work/corp/ft-2026"
 
-[providers.work]
+[accounts.work]
+provider = "custom"
 protocols = { openai-chat = { base_url = "https://gateway.corp.example/v1/" } }
-model = "corp/ft-2026"
+models = ["corp/ft-2026"]
 
-[providers.local]
+[accounts.local]
+provider = "custom"
 protocols = { openai-chat = { base_url = "http://localhost:11434/v1" } }
-model = "llama3:8b"
+models = ["llama3:8b"]
 "#,
     )
     .unwrap();
@@ -336,14 +400,19 @@ model = "llama3:8b"
     assert_eq!(local.protocol(), Protocol::OpenAiChat);
     assert_eq!(work.base_url(), "https://gateway.corp.example/v1");
     assert_eq!(local.base_url(), "http://localhost:11434/v1");
-    assert_eq!(providers.default_name(), Some("work"));
+    assert_eq!(
+        providers
+            .configured_model()
+            .map(|model| model.account.as_str()),
+        Some("work")
+    );
 }
 
 #[test]
-fn a_profile_name_says_nothing_about_its_protocol() {
+fn an_account_name_says_nothing_about_its_protocol() {
     // Named like a commercial provider, and not speaking its protocol.
     let providers = load(
-        "[providers.anthropic]\nprotocols = { openai-chat = { base_url = \"http://proxy.local\" } }",
+        "[accounts.anthropic]\nprovider='custom'\nprotocols = { openai-chat = { base_url = \"http://proxy.local\" } }",
     )
     .unwrap();
 
@@ -357,17 +426,23 @@ fn a_profile_name_says_nothing_about_its_protocol() {
 #[case::openai("openai-chat", "https://api.openai.com/v1")]
 #[case::responses("openai-responses", "https://api.openai.com/v1")]
 #[case::anthropic("anthropic-messages", "https://api.anthropic.com")]
-fn the_base_url_defaults_to_the_protocols_and_is_overridable(
+fn custom_protocols_require_explicit_base_urls_and_preserve_overrides(
     #[case] protocol: &str,
     #[case] default_url: &str,
 ) {
-    let defaulted = load(&format!("[providers.p.protocols.{protocol}]")).unwrap();
+    assert!(
+        load(&format!(
+            "[accounts.p]\nprovider='custom'\n[accounts.p.protocols.{protocol}]"
+        ))
+        .is_err()
+    );
+    let explicit = load(&format!("[accounts.p]\nprovider='custom'\n[accounts.p.protocols.{protocol}]\nbase_url='{default_url}'")).unwrap();
     let overridden = load(&format!(
-        "[providers.p.protocols.{protocol}]\nbase_url = \"https://other.example\""
+        "[accounts.p]\nprovider='custom'\n[accounts.p.protocols.{protocol}]\nbase_url = \"https://other.example\""
     ))
     .unwrap();
 
-    assert_eq!(defaulted.get("p").unwrap().base_url(), default_url);
+    assert_eq!(explicit.get("p").unwrap().base_url(), default_url);
     assert_eq!(
         overridden.get("p").unwrap().base_url(),
         "https://other.example"
@@ -379,26 +454,27 @@ fn the_base_url_defaults_to_the_protocols_and_is_overridable(
 #[case("acme/ft-llama3:2026-01")]
 #[case("accounts/me/models/tuned@v2")]
 #[case("model that is not in any catalog")]
-fn any_model_id_is_accepted_without_a_catalog_or_an_allowlist(#[case] model: &str) {
+fn declared_raw_model_ids_are_preserved_without_a_catalog(#[case] model: &str) {
     let providers = load(&format!(
-        "[providers.p]\nprotocols = {{ openai-chat = {{}} }}\nmodel = \"{model}\"\nmodels = [\"{model}\"]"
+        "model='p/{model}'\n[accounts.p]\nprovider='custom'\ndiscovery=false\nprotocols = {{ openai-chat = {{base_url='https://gateway.example'}} }}\nmodels = [\"{model}\"]"
     ))
     .unwrap();
 
-    assert_eq!(providers.get("p").unwrap().model(), Some(model));
+    assert_eq!(providers.configured_model().unwrap().model, model);
     assert_eq!(providers.get("p").unwrap().models(), [model]);
 }
 
-/// A profile that speaks both protocols, each at its own URL.
+/// A custom account that speaks both protocols, each at its own URL.
 const BOTH: &str = r#"
-[providers.p]
+[accounts.p]
+provider = "custom"
 prefer = ["anthropic-messages", "openai-chat"]
 
-[providers.p.protocols.openai-chat]
+[accounts.p.protocols.openai-chat]
 base_url = "https://gw.example/openai/v1"
 options = { max_tokens_field = "max_completion_tokens" }
 
-[providers.p.protocols.anthropic-messages]
+[accounts.p.protocols.anthropic-messages]
 base_url = "https://gw.example/anthropic"
 options = { max_tokens = 2048 }
 "#;
@@ -455,8 +531,8 @@ fn swapping_prefer_swaps_the_preferred_endpoint_whatever_the_names_sort_like() {
 #[test]
 fn protocols_that_prefer_leaves_out_follow_in_a_fixed_order() {
     let providers = load(
-        "[providers.p]\nprefer = [\"anthropic-messages\"]\n\
-         [providers.p.protocols.openai-chat]\n[providers.p.protocols.anthropic-messages]",
+        "[accounts.p]\nprovider='custom'\nprefer = [\"anthropic-messages\"]\n\
+         [accounts.p.protocols.openai-chat]\nbase_url='https://gateway.example/chat'\n[accounts.p.protocols.anthropic-messages]\nbase_url='https://gateway.example/messages'",
     )
     .unwrap();
 
@@ -472,9 +548,9 @@ fn protocols_that_prefer_leaves_out_follow_in_a_fixed_order() {
 
 #[test]
 fn one_protocol_needs_no_preference_and_prefer_may_still_name_it() {
-    assert!(load("[providers.p.protocols.openai-chat]").is_ok());
+    assert!(load("[accounts.p]\nprovider='custom'\n[accounts.p.protocols.openai-chat]\nbase_url='https://gateway.example'").is_ok());
     assert!(
-        load("[providers.p]\nprefer = [\"openai-chat\"]\n[providers.p.protocols.openai-chat]")
+        load("[accounts.p]\nprovider='custom'\nprefer = [\"openai-chat\"]\n[accounts.p.protocols.openai-chat]\nbase_url='https://gateway.example'")
             .is_ok()
     );
 }
@@ -482,7 +558,7 @@ fn one_protocol_needs_no_preference_and_prefer_may_still_name_it() {
 #[test]
 fn the_responses_protocol_rejects_unrelated_generation_options() {
     let text = rendered(
-        load("[providers.p.protocols.openai-responses.options]\nmax_tokens = 5").unwrap_err(),
+        load("[accounts.p]\nprovider='custom'\n[accounts.p.protocols.openai-responses]\nbase_url='https://gateway.example'\n[accounts.p.protocols.openai-responses.options]\nmax_tokens = 5").unwrap_err(),
     );
 
     assert!(text.contains("bee::provider::unknown_key"), "{text}");
@@ -491,7 +567,7 @@ fn the_responses_protocol_rejects_unrelated_generation_options() {
 
 #[test]
 fn an_empty_responses_options_table_keeps_native_cache_defaults() {
-    let providers = load("[providers.p.protocols.openai-responses]\noptions = {}").unwrap();
+    let providers = load("[accounts.p]\nprovider='custom'\n[accounts.p.protocols.openai-responses]\nbase_url='https://gateway.example'\noptions = {}").unwrap();
 
     assert_eq!(
         *providers.get("p").unwrap().options(),
@@ -545,7 +621,7 @@ fn native_cache_configuration_is_typed_and_invalid_values_never_reach_diagnostic
         ("anthropic-messages", "prompt_cache_retention = '24h'"),
     ] {
         let error = load(&format!(
-            "[providers.p.protocols.{protocol}.options]\n{option}"
+            "[accounts.p]\nprovider='custom'\n[accounts.p.protocols.{protocol}]\nbase_url='https://gateway.example'\n[accounts.p.protocols.{protocol}.options]\n{option}"
         ))
         .unwrap_err();
         assert!(!format!("{error:?}").contains(SECRET));
@@ -554,37 +630,39 @@ fn native_cache_configuration_is_typed_and_invalid_values_never_reach_diagnostic
         assert!(diagnostic.contains("bee::provider::"));
     }
     for value in ["", &"a".repeat(65)] {
-        assert!(load(&format!("[providers.p.protocols.openai-responses.options]\nprompt_cache_key={{mode='explicit',value='{value}'}}")).is_err());
+        assert!(load(&format!("[accounts.p]\nprovider='custom'\n[accounts.p.protocols.openai-responses]\nbase_url='https://gateway.example'\n[accounts.p.protocols.openai-responses.options]\nprompt_cache_key={{mode='explicit',value='{value}'}}")).is_err());
     }
 }
 
 #[test]
 fn higher_layers_can_disable_inherited_write_policies_without_changing_value_types() {
-    use bee::provider::cache::{AnthropicPolicy, CacheKey, Retention};
+    use bee::account::cache::{AnthropicPolicy, CacheKey, Retention};
     let sandbox = Sandbox::new();
     sandbox.write(
         &sandbox.global(),
         r#"
-[presets.cached.protocols.openai-responses.options]
+[accounts.p]
+provider='custom'
+prefer=['openai-responses']
+[accounts.p.protocols.openai-responses]
+base_url='https://gateway.example/responses'
+[accounts.p.protocols.openai-responses.options]
 prompt_cache_options = { enabled=true, mode='explicit', ttl='12h', breakpoints='instructions' }
 prompt_cache_key = {mode='explicit', value='private-application-key'}
-[providers.p]
-preset='cached'
-prefer=['openai-responses']
-[providers.p.protocols.openai-responses.options]
-prompt_cache_options = {enabled=true}
-[providers.p.protocols.anthropic-messages.options]
+[accounts.p.protocols.anthropic-messages]
+base_url='https://gateway.example/messages'
+[accounts.p.protocols.anthropic-messages.options]
 cache_control = {policy='stable-prefix-and-automatic',ttl='1h'}
 "#,
     );
     sandbox.write(
         &sandbox.project(),
         r#"
-[providers.p.protocols.openai-responses.options]
+[accounts.p.protocols.openai-responses.options]
 prompt_cache_options = {enabled=false}
 prompt_cache_key = {mode='disabled'}
 prompt_cache_retention = 'default'
-[providers.p.protocols.anthropic-messages.options]
+[accounts.p.protocols.anthropic-messages.options]
 cache_control = {policy='disabled'}
 "#,
     );
@@ -614,9 +692,9 @@ cache_control = {policy='disabled'}
 #[test]
 fn protocols_that_prefer_leaves_out_follow_in_the_order_of_protocol_all() {
     let providers = load(
-        "[providers.p]\nprefer = [\"anthropic-messages\"]\n\
-         [providers.p.protocols.openai-responses]\n[providers.p.protocols.openai-chat]\n\
-         [providers.p.protocols.anthropic-messages]",
+        "[accounts.p]\nprovider='custom'\nprefer = [\"anthropic-messages\"]\n\
+         [accounts.p.protocols.openai-responses]\nbase_url='https://gateway.example/responses'\n[accounts.p.protocols.openai-chat]\nbase_url='https://gateway.example/chat'\n\
+         [accounts.p.protocols.anthropic-messages]\nbase_url='https://gateway.example/messages'",
     )
     .unwrap();
 
@@ -639,7 +717,7 @@ fn protocols_that_prefer_leaves_out_follow_in_the_order_of_protocol_all() {
 
 #[test]
 fn an_endpoint_the_profile_does_not_list_is_none() {
-    let providers = load("[providers.p.protocols.openai-chat]").unwrap();
+    let providers = load("[accounts.p]\nprovider='custom'\n[accounts.p.protocols.openai-chat]\nbase_url='https://gateway.example'").unwrap();
 
     assert!(
         providers
@@ -651,17 +729,22 @@ fn an_endpoint_the_profile_does_not_list_is_none() {
 }
 
 #[test]
-fn headers_and_options_belong_only_to_their_own_profile() {
+fn headers_and_options_belong_only_to_their_own_account() {
     let providers = load(
         r#"
-provider = "a"
-
-[providers.a]
+[accounts.a]
+provider='custom'
 headers = { "X-Team" = "infra" }
-[providers.a.protocols.openai-chat.options]
+[accounts.a.protocols.openai-chat]
+base_url='https://gateway.example/chat'
+[accounts.a.protocols.openai-chat.options]
 max_tokens_field = "max_completion_tokens"
 
-[providers.b.protocols.anthropic-messages.options]
+[accounts.b]
+provider='custom'
+[accounts.b.protocols.anthropic-messages]
+base_url='https://gateway.example/messages'
+[accounts.b.protocols.anthropic-messages.options]
 version = "2023-06-01"
 max_tokens = 4096
 "#,
@@ -692,7 +775,7 @@ max_tokens = 4096
 #[test]
 fn a_credential_is_a_named_environment_variable() {
     let providers = load(
-        "[providers.p]\nprotocols = { openai-chat = {} }\ncredential = { env = \"GATEWAY_KEY\" }",
+        "[accounts.p]\nprovider='custom'\nprotocols = { openai-chat = {base_url='https://gateway.example'} }\ncredential = { env = \"GATEWAY_KEY\" }",
     )
     .unwrap();
 
@@ -707,7 +790,7 @@ fn a_credential_is_a_named_environment_variable() {
 #[case::browser_sign_in("{ store = true, login = \"openrouter\" }", Some("openrouter"))]
 fn a_credential_can_live_in_the_store(#[case] credential: &str, #[case] login: Option<&str>) {
     let providers = load(&format!(
-        "[providers.p]\nprotocols = {{ openai-chat = {{}} }}\ncredential = {credential}"
+        "[accounts.p]\nprovider='custom'\nprotocols = {{ openai-chat = {{base_url='https://gateway.example'}} }}\ncredential = {credential}"
     ))
     .unwrap();
 
@@ -722,7 +805,7 @@ fn a_credential_can_live_in_the_store(#[case] credential: &str, #[case] login: O
 #[test]
 fn the_debug_output_names_the_kind_of_credential_and_nothing_else() {
     let providers = load(
-        "[providers.p]\nprotocols = { openai-chat = {} }\ncredential = { env = \"GATEWAY_KEY\" }",
+        "[accounts.p]\nprovider='custom'\nprotocols = { openai-chat = {base_url='https://gateway.example'} }\ncredential = { env = \"GATEWAY_KEY\" }",
     )
     .unwrap();
 
@@ -733,10 +816,12 @@ fn the_debug_output_names_the_kind_of_credential_and_nothing_else() {
 }
 
 #[test]
-fn a_single_profile_is_the_default_without_naming_it() {
-    let providers = load("[providers.only]\nprotocols = { openai-chat = {} }").unwrap();
+fn a_single_account_and_model_do_not_create_a_default() {
+    let providers =
+        load("[accounts.only]\nprovider='openai'\ndiscovery=false\nmodels=['sole-model']").unwrap();
 
-    assert_eq!(providers.default_name(), Some("only"));
+    assert_eq!(providers.configured_model(), None);
+    assert!(providers.configured_model().is_none());
 }
 
 #[test]
@@ -745,20 +830,20 @@ fn the_project_file_overrides_the_global_one_key_by_key() {
     sandbox.write(
         &sandbox.global(),
         r#"
-provider = "gw"
-[providers.gw]
+model = "gw/global-model"
+[accounts.gw]
+provider='custom'
 protocols = { openai-chat = { base_url = "https://global.example/v1" } }
-model = "global-model"
-models = ["g1", "g2"]
+models = ["global-model", "g1", "g2"]
 headers = { "X-Org" = "global", "X-Keep" = "yes" }
 "#,
     );
     sandbox.write(
         &sandbox.project(),
         r#"
-[providers.gw]
-model = "project-model"
-models = ["p1"]
+model = "gw/project-model"
+[accounts.gw]
+models = ["project-model", "p1"]
 headers = { "X-Org" = "project" }
 "#,
     );
@@ -767,10 +852,10 @@ headers = { "X-Org" = "project" }
 
     let gw = providers.get("gw").unwrap();
     // Scalars: the higher layer wins, the rest is inherited.
-    assert_eq!(gw.model(), Some("project-model"));
+    assert_eq!(providers.configured_model().unwrap().model, "project-model");
     assert_eq!(gw.base_url(), "https://global.example/v1");
     // Arrays are replaced, never concatenated (ADR-006).
-    assert_eq!(gw.models(), ["p1"]);
+    assert_eq!(gw.models(), ["project-model", "p1"]);
     // Tables merge key by key.
     assert_eq!(
         gw.headers(),
@@ -782,209 +867,283 @@ headers = { "X-Org" = "project" }
 }
 
 #[test]
-fn a_project_can_add_a_profile_and_choose_it_as_the_default() {
+fn a_project_can_add_an_account_and_choose_a_qualified_default() {
     let sandbox = Sandbox::new();
     sandbox.write(
         &sandbox.global(),
-        "provider = \"a\"\n[providers.a]\nprotocols = { openai-chat = {} }",
+        "model='a/first'\n[accounts.a]\nprovider='custom'\nmodels=['first']\nprotocols = { openai-chat = {base_url='https://gateway.example/chat'} }",
     );
     sandbox.write(
         &sandbox.project(),
-        "provider = \"b\"\n[providers.b]\nprotocols = { anthropic-messages = {} }",
+        "model='b/second'\n[accounts.b]\nprovider='custom'\nmodels=['second']\nprotocols = { anthropic-messages = {base_url='https://gateway.example/messages'} }",
     );
 
     let providers = sandbox.providers().unwrap();
 
     assert_eq!(providers.names().collect::<Vec<_>>(), ["a", "b"]);
-    assert_eq!(providers.default_name(), Some("b"));
+    assert_eq!(
+        providers
+            .configured_model()
+            .map(|model| model.account.as_str()),
+        Some("b")
+    );
+}
+
+#[test]
+fn model_declarations_preserve_omitted_and_empty_filters_in_both_discovery_modes() {
+    for discovery in [false, true] {
+        for (declaration, expected) in [
+            ("", None),
+            ("models=[]", Some(Vec::<String>::new())),
+            (
+                "models=['vendor/model','local']",
+                Some(vec!["vendor/model".into(), "local".into()]),
+            ),
+        ] {
+            let accounts = load(&format!(
+                "[accounts.p]\nprovider='openai'\ndiscovery={discovery}\n{declaration}"
+            ))
+            .unwrap();
+            let account = accounts.get("p").unwrap();
+            assert_eq!(account.discovery(), discovery);
+            assert_eq!(account.model_filter(), expected.as_deref());
+            assert_eq!(accounts.configured_model(), None);
+        }
+    }
+}
+
+#[test]
+fn configured_defaults_require_declared_or_potentially_discovered_availability() {
+    for (discovery, declaration, valid) in [
+        (false, "", false),
+        (false, "models=[]", false),
+        (false, "models=['selected']", true),
+        (false, "models=['other']", false),
+        (true, "", true),
+        (true, "models=[]", false),
+        (true, "models=['selected']", true),
+        (true, "models=['other']", false),
+    ] {
+        let result = load(&format!(
+            "model='p/selected'\n[accounts.p]\nprovider='openai'\ndiscovery={discovery}\n{declaration}"
+        ));
+        assert_eq!(
+            result.is_ok(),
+            valid,
+            "discovery={discovery}, {declaration}"
+        );
+    }
+}
+
+#[test]
+fn obsolete_selectors_and_account_fields_are_rejected_without_value_echoes() {
+    for text in [
+        format!("provider='{SECRET}'"),
+        format!("[providers.p]\ntype='{SECRET}'"),
+        format!("[accounts.p]\nprovider='openai'\nmodel='{SECRET}'"),
+        format!("[accounts.p]\nprovider='openai'\ntype='{SECRET}'"),
+        format!("[accounts.p]\nprovider='openai'\ndiscover_models='{SECRET}'"),
+        format!("[accounts.p]\nprovider='openai'\ncatalog_provider='{SECRET}'"),
+        format!("[accounts.p]\nprovider='openai'\nenabled='{SECRET}'"),
+        format!("[accounts.p]\nprovider='openai'\ndiscovery='{SECRET}'"),
+        format!("[accounts.p]\nprovider='openai'\ncatalog=['{SECRET}']"),
+        format!("[profiles.bad]\nconnections=['{SECRET}']"),
+        format!("[profiles.bad]\nprovider='{SECRET}'"),
+        format!("[profiles.bad.models.p]\nmodel='{SECRET}'"),
+    ] {
+        let error = load(&text).unwrap_err();
+        assert!(!format!("{error} {error:?}").contains(SECRET));
+    }
+    let accounts =
+        load("[accounts.p]\nprovider='openai'\ncatalog='private-catalog'\ndiscovery=false")
+            .unwrap();
+    assert_eq!(
+        accounts.get("p").unwrap().catalog(),
+        Some("private-catalog")
+    );
+    assert!(!format!("{accounts:?}").contains("private-catalog"));
 }
 
 /// The diagnostic code an invalid configuration must produce.
 #[rstest]
 #[case::unknown_protocol(
-    "[providers.p]\nprotocols = { grpc = {} }",
+    "[accounts.p]\nprovider='custom'\nprotocols = { grpc = {base_url='https://gateway.example'} }",
     "bee::provider::unknown_protocol"
 )]
-#[case::protocols_by_name_only(
-    "[providers.openai]\nmodel = \"gpt-4o\"",
-    "bee::provider::missing_key"
-)]
-#[case::protocols_wrong_type("[providers.p]\nprotocols = 3", "bee::provider::wrong_type")]
-#[case::protocols_as_a_list_of_names(
-    "[providers.p]\nprotocols = [\"openai-chat\"]",
+#[case::protocols_by_name_only("[accounts.openai]\nmodels = ['gpt-4o']", "bee::provider::invalid")]
+#[case::protocols_wrong_type(
+    "[accounts.p]\nprovider='openai'\nprotocols = 3",
     "bee::provider::wrong_type"
 )]
-#[case::no_protocol_listed("[providers.p]\nprotocols = {}", "bee::provider::invalid")]
+#[case::protocols_as_a_list_of_names(
+    "[accounts.p]\nprovider='openai'\nprotocols = [\"openai-chat\"]",
+    "bee::provider::wrong_type"
+)]
+#[case::no_protocol_listed(
+    "[accounts.p]\nprovider='custom'\nprotocols = {}",
+    "bee::provider::invalid"
+)]
 #[case::protocol_entry_not_a_table(
-    "[providers.p]\nprotocols = { openai-chat = \"https://x.example\" }",
+    "[accounts.p]\nprovider='openai'\nprotocols = { openai-chat = \"https://x.example\" }",
     "bee::provider::wrong_type"
 )]
 #[case::the_singular_protocol_key(
-    "[providers.p]\nprotocol = \"openai-chat\"",
-    "bee::provider::unknown_key"
+    "[accounts.p]\nprovider='custom'\nprotocol = \"openai-chat\"",
+    "bee::provider::invalid"
 )]
 #[case::base_url_beside_protocols(
-    "[providers.p]\nprotocols = { openai-chat = {} }\nbase_url = \"https://x.example\"",
-    "bee::provider::unknown_key"
+    "[accounts.p]\nprovider='custom'\nprotocols = { openai-chat = {base_url='https://gateway.example'} }\nbase_url = \"https://x.example\"",
+    "bee::provider::invalid"
 )]
 #[case::options_beside_protocols(
-    "[providers.p]\nprotocols = { openai-chat = {} }\noptions = {}",
-    "bee::provider::unknown_key"
+    "[accounts.p]\nprovider='custom'\nprotocols = { openai-chat = {base_url='https://gateway.example'} }\noptions = {}",
+    "bee::provider::invalid"
 )]
 #[case::several_protocols_without_a_preference(
-    "[providers.p]\nprotocols = { openai-chat = {}, anthropic-messages = {} }",
+    "[accounts.p]\nprovider='custom'\nprotocols = { openai-chat = {base_url='https://gateway.example/chat'}, anthropic-messages = {base_url='https://gateway.example/messages'} }",
     "bee::provider::no_preference"
 )]
 #[case::prefer_names_an_unknown_protocol(
-    "[providers.p]\nprotocols = { openai-chat = {} }\nprefer = [\"grpc\"]",
+    "[accounts.p]\nprovider='custom'\nprotocols = { openai-chat = {base_url='https://gateway.example'} }\nprefer = [\"grpc\"]",
     "bee::provider::unknown_protocol"
 )]
 #[case::prefer_names_a_protocol_the_profile_lacks(
-    "[providers.p]\nprotocols = { openai-chat = {} }\nprefer = [\"anthropic-messages\"]",
+    "[accounts.p]\nprovider='custom'\nprotocols = { openai-chat = {base_url='https://gateway.example'} }\nprefer = [\"anthropic-messages\"]",
     "bee::provider::invalid"
 )]
 #[case::prefer_repeats_a_protocol(
-    "[providers.p]\nprotocols = { openai-chat = {} }\nprefer = [\"openai-chat\", \"openai-chat\"]",
+    "[accounts.p]\nprovider='custom'\nprotocols = { openai-chat = {base_url='https://gateway.example'} }\nprefer = [\"openai-chat\", \"openai-chat\"]",
     "bee::provider::invalid"
 )]
 #[case::prefer_not_an_array(
-    "[providers.p]\nprotocols = { openai-chat = {} }\nprefer = \"openai-chat\"",
+    "[accounts.p]\nprovider='custom'\nprotocols = { openai-chat = {base_url='https://gateway.example'} }\nprefer = \"openai-chat\"",
     "bee::provider::wrong_type"
 )]
 #[case::an_option_of_a_protocol_with_none(
-    "[providers.p]\nprotocols = { openai-responses = { options = { max_tokens_field = \"max_tokens\" } } }",
+    "[accounts.p]\nprovider='custom'\nprotocols = { openai-responses = {base_url='https://gateway.example', options = { max_tokens_field = \"max_tokens\" } } }",
     "bee::provider::unknown_key"
 )]
 #[case::all_three_protocols_without_a_preference(
-    "[providers.p]\nprotocols = { openai-chat = {}, openai-responses = {}, anthropic-messages = {} }",
+    "[accounts.p]\nprovider='custom'\nprotocols = { openai-chat = {base_url='https://gateway.example/chat'}, openai-responses = {base_url='https://gateway.example/responses'}, anthropic-messages = {base_url='https://gateway.example/messages'} }",
     "bee::provider::no_preference"
 )]
 #[case::an_endpoint_with_an_unknown_key(
-    "[providers.p]\nprotocols = { openai-chat = { version = \"1\" } }",
+    "[accounts.p]\nprovider='custom'\nprotocols = { openai-chat = {base_url='https://gateway.example', version = \"1\" } }",
     "bee::provider::unknown_key"
 )]
 #[case::an_option_of_another_protocols_endpoint(
-    "[providers.p]\nprotocols = { openai-chat = { options = { max_tokens = 5 } } }",
+    "[accounts.p]\nprovider='custom'\nprotocols = { openai-chat = {base_url='https://gateway.example', options = { max_tokens = 5 } } }",
     "bee::provider::unknown_key"
 )]
-#[case::providers_not_a_table("providers = \"x\"", "bee::provider::wrong_type")]
-#[case::profile_not_a_table("[providers]\np = \"x\"", "bee::provider::wrong_type")]
+#[case::accounts_not_a_table("accounts = \"x\"", "bee::provider::wrong_type")]
+#[case::account_not_a_table("[accounts]\np = \"x\"", "bee::provider::wrong_type")]
 #[case::misspelled_key(
-    "[providers.p]\nprotocols = { openai-chat = {} }\nbase_ulr = \"https://x.example\"",
+    "[accounts.p]\nprovider='custom'\nprotocols = { openai-chat = {base_url='https://gateway.example'} }\nbase_ulr = \"https://x.example\"",
     "bee::provider::unknown_key"
 )]
 #[case::bad_scheme(
-    "[providers.p]\nprotocols = { openai-chat = { base_url = \"ftp://x.example\" } }",
+    "[accounts.p]\nprovider='custom'\nprotocols = { openai-chat = { base_url = \"ftp://x.example\" } }",
     "bee::provider::invalid"
 )]
 #[case::url_without_host(
-    "[providers.p]\nprotocols = { openai-chat = { base_url = \"https://\" } }",
+    "[accounts.p]\nprovider='custom'\nprotocols = { openai-chat = { base_url = \"https://\" } }",
     "bee::provider::invalid"
 )]
 #[case::url_with_userinfo(
-    "[providers.p]\nprotocols = { openai-chat = { base_url = \"https://user:pw@x.example\" } }",
+    "[accounts.p]\nprovider='custom'\nprotocols = { openai-chat = { base_url = \"https://user:pw@x.example\" } }",
     "bee::provider::invalid"
 )]
 #[case::url_with_query(
-    "[providers.p]\nprotocols = { openai-chat = { base_url = \"https://x.example/?k=v\" } }",
+    "[accounts.p]\nprovider='custom'\nprotocols = { openai-chat = { base_url = \"https://x.example/?k=v\" } }",
     "bee::provider::invalid"
 )]
-#[case::empty_model(
-    "[providers.p]\nprotocols = { openai-chat = {} }\nmodel = \"\"",
-    "bee::provider::invalid"
-)]
-#[case::model_wrong_type(
-    "[providers.p]\nprotocols = { openai-chat = {} }\nmodel = 4",
-    "bee::provider::wrong_type"
-)]
+#[case::empty_model("model=''\n[accounts.p]\nprovider='openai'", "bee::profile::setting")]
+#[case::model_wrong_type("model=4\n[accounts.p]\nprovider='openai'", "bee::profile::setting")]
 #[case::models_not_an_array(
-    "[providers.p]\nprotocols = { openai-chat = {} }\nmodels = \"a\"",
+    "[accounts.p]\nprovider='custom'\nprotocols = { openai-chat = {base_url='https://gateway.example'} }\nmodels = \"a\"",
     "bee::provider::wrong_type"
 )]
 #[case::blank_model_in_list(
-    "[providers.p]\nprotocols = { openai-chat = {} }\nmodels = [\"ok\", \" \"]",
+    "[accounts.p]\nprovider='custom'\nprotocols = { openai-chat = {base_url='https://gateway.example'} }\nmodels = [\"ok\", \" \"]",
     "bee::provider::invalid"
 )]
 #[case::header_name_with_space(
-    "[providers.p]\nprotocols = { openai-chat = {} }\nheaders = { \"Bad Name\" = \"v\" }",
+    "[accounts.p]\nprovider='custom'\nprotocols = { openai-chat = {base_url='https://gateway.example'} }\nheaders = { \"Bad Name\" = \"v\" }",
     "bee::provider::invalid"
 )]
 #[case::header_value_with_newline(
-    "[providers.p]\nprotocols = { openai-chat = {} }\nheaders = { \"X-A\" = \"v\\r\\nX-B: w\" }",
+    "[accounts.p]\nprovider='custom'\nprotocols = { openai-chat = {base_url='https://gateway.example'} }\nheaders = { \"X-A\" = \"v\\r\\nX-B: w\" }",
     "bee::provider::invalid"
 )]
 #[case::header_value_not_a_string(
-    "[providers.p]\nprotocols = { openai-chat = {} }\nheaders = { \"X-A\" = 1 }",
+    "[accounts.p]\nprovider='custom'\nprotocols = { openai-chat = {base_url='https://gateway.example'} }\nheaders = { \"X-A\" = 1 }",
     "bee::provider::wrong_type"
 )]
 #[case::headers_differing_by_case(
-    "[providers.p]\nprotocols = { openai-chat = {} }\nheaders = { \"X-A\" = \"1\", \"x-a\" = \"2\" }",
+    "[accounts.p]\nprovider='custom'\nprotocols = { openai-chat = {base_url='https://gateway.example'} }\nheaders = { \"X-A\" = \"1\", \"x-a\" = \"2\" }",
     "bee::provider::invalid"
 )]
 #[case::credential_without_a_source(
-    "[providers.p]\nprotocols = { openai-chat = {} }\ncredential = {}",
+    "[accounts.p]\nprovider='custom'\nprotocols = { openai-chat = {base_url='https://gateway.example'} }\ncredential = {}",
     "bee::provider::invalid"
 )]
 #[case::credential_with_an_unknown_source(
-    "[providers.p]\nprotocols = { openai-chat = {} }\ncredential = { file = \"/x\" }",
+    "[accounts.p]\nprovider='custom'\nprotocols = { openai-chat = {base_url='https://gateway.example'} }\ncredential = { file = \"/x\" }",
     "bee::provider::unknown_key"
 )]
 #[case::credential_that_is_a_literal_key(
-    "[providers.p]\nprotocols = { openai-chat = {} }\ncredential = { env = \"sk-abc-123\" }",
+    "[accounts.p]\nprovider='custom'\nprotocols = { openai-chat = {base_url='https://gateway.example'} }\ncredential = { env = \"sk-abc-123\" }",
     "bee::provider::invalid"
 )]
 #[case::credential_with_two_sources(
-    "[providers.p]\nprotocols = { openai-chat = {} }\ncredential = { env = \"K\", store = true }",
+    "[accounts.p]\nprovider='custom'\nprotocols = { openai-chat = {base_url='https://gateway.example'} }\ncredential = { env = \"K\", store = true }",
     "bee::provider::invalid"
 )]
 #[case::credential_store_disabled(
-    "[providers.p]\nprotocols = { openai-chat = {} }\ncredential = { store = false }",
+    "[accounts.p]\nprovider='custom'\nprotocols = { openai-chat = {base_url='https://gateway.example'} }\ncredential = { store = false }",
     "bee::provider::invalid"
 )]
 #[case::credential_store_of_the_wrong_type(
-    "[providers.p]\nprotocols = { openai-chat = {} }\ncredential = { store = \"yes\" }",
+    "[accounts.p]\nprovider='custom'\nprotocols = { openai-chat = {base_url='https://gateway.example'} }\ncredential = { store = \"yes\" }",
     "bee::provider::wrong_type"
 )]
 #[case::login_without_the_store(
-    "[providers.p]\nprotocols = { openai-chat = {} }\ncredential = { env = \"K\", login = \"openrouter\" }",
+    "[accounts.p]\nprovider='custom'\nprotocols = { openai-chat = {base_url='https://gateway.example'} }\ncredential = { env = \"K\", login = \"openrouter\" }",
     "bee::provider::invalid"
 )]
 #[case::login_alone(
-    "[providers.p]\nprotocols = { openai-chat = {} }\ncredential = { login = \"openrouter\" }",
+    "[accounts.p]\nprovider='custom'\nprotocols = { openai-chat = {base_url='https://gateway.example'} }\ncredential = { login = \"openrouter\" }",
     "bee::provider::invalid"
 )]
 #[case::login_that_is_unknown(
-    "[providers.p]\nprotocols = { openai-chat = {} }\ncredential = { store = true, login = \"cloudflare\" }",
+    "[accounts.p]\nprovider='custom'\nprotocols = { openai-chat = {base_url='https://gateway.example'} }\ncredential = { store = true, login = \"cloudflare\" }",
     "bee::provider::unknown_login"
 )]
 #[case::option_of_the_other_protocol(
-    "[providers.p]\nprotocols = { openai-chat = {} }\n[providers.p.options]\nmax_tokens = 5",
-    "bee::provider::unknown_key"
+    "[accounts.p]\nprovider='custom'\nprotocols = { openai-chat = {base_url='https://gateway.example'} }\n[accounts.p.options]\nmax_tokens = 5",
+    "bee::provider::invalid"
 )]
 #[case::bad_option_value(
-    "[providers.p.protocols.openai-chat.options]\nmax_tokens_field = \"x\"",
+    "[accounts.p]\nprovider='custom'\n[accounts.p.protocols.openai-chat]\nbase_url='https://gateway.example'\n[accounts.p.protocols.openai-chat.options]\nmax_tokens_field = \"x\"",
     "bee::provider::invalid"
 )]
 #[case::option_wrong_type(
-    "[providers.p.protocols.anthropic-messages.options]\nmax_tokens = \"5\"",
+    "[accounts.p]\nprovider='custom'\n[accounts.p.protocols.anthropic-messages]\nbase_url='https://gateway.example'\n[accounts.p.protocols.anthropic-messages.options]\nmax_tokens = \"5\"",
     "bee::provider::wrong_type"
 )]
 #[case::option_out_of_range(
-    "[providers.p.protocols.anthropic-messages.options]\nmax_tokens = 0",
+    "[accounts.p]\nprovider='custom'\n[accounts.p.protocols.anthropic-messages]\nbase_url='https://gateway.example'\n[accounts.p.protocols.anthropic-messages.options]\nmax_tokens = 0",
     "bee::provider::invalid"
 )]
 #[case::default_that_is_not_defined(
-    "provider = \"ghost\"\n[providers.p]\nprotocols = { openai-chat = {} }",
-    "bee::provider::unknown_default"
+    "model='ghost/model'\n[accounts.p]\nprovider='openai'",
+    "bee::profile::setting"
 )]
-#[case::default_without_any_profile("provider = \"ghost\"", "bee::provider::unknown_default")]
-#[case::default_wrong_type(
-    "provider = 1\n[providers.p]\nprotocols = { openai-chat = {} }",
-    "bee::provider::wrong_type"
-)]
-#[case::several_profiles_and_no_default(
-    "[providers.a]\nprotocols = { openai-chat = {} }\n[providers.b]\nprotocols = { openai-chat = {} }",
-    "bee::provider::no_default"
+#[case::default_without_any_account("model='ghost/model'", "bee::profile::setting")]
+#[case::default_wrong_type("model=1\n[accounts.p]\nprovider='openai'", "bee::profile::setting")]
+#[case::undeclared_default(
+    "model='p/missing'\n[accounts.p]\nprovider='openai'\ndiscovery=false\nmodels=['declared']",
+    "bee::profile::setting"
 )]
 fn an_invalid_configuration_is_refused_with_its_own_code(#[case] text: &str, #[case] code: &str) {
     let error = load(text).unwrap_err();
@@ -998,13 +1157,13 @@ fn an_invalid_value_names_its_key_and_file_so_it_can_be_found() {
     let sandbox = Sandbox::new();
     sandbox.write(
         &sandbox.project(),
-        "[providers.work]\nprotocols = { openai-chat = { base_url = \"nope\" } }",
+        "[accounts.work]\nprovider='custom'\nprotocols = { openai-chat = { base_url = \"nope\" } }",
     );
 
     let text = rendered(sandbox.providers().unwrap_err());
 
     assert!(
-        text.contains("providers.work.protocols.openai-chat.base_url"),
+        text.contains("accounts.work.protocols.openai-chat.base_url"),
         "{text}"
     );
     assert!(text.contains("bee.toml"), "{text}");
@@ -1012,7 +1171,7 @@ fn an_invalid_value_names_its_key_and_file_so_it_can_be_found() {
 
 #[test]
 fn an_unknown_protocol_lists_the_supported_ones() {
-    let error = load("[providers.p]\nprotocols = { grpc = {} }").unwrap_err();
+    let error = load("[accounts.p]\nprovider='custom'\nprotocols = { grpc = {base_url='https://gateway.example'} }").unwrap_err();
     // The help is the one place the list appears, and the renderer wraps it at
     // the terminal width, even inside a hyphenated name.
     let text = rendered(error).split_whitespace().collect::<String>();
@@ -1023,17 +1182,17 @@ fn an_unknown_protocol_lists_the_supported_ones() {
 }
 
 #[rstest]
-#[case::protocol_name(format!("[providers.p]\nprotocols = {{ \"{SECRET}\" = {{}} }}"))]
-#[case::prefer(format!("[providers.p]\nprotocols = {{ openai-chat = {{}} }}\nprefer = [\"{SECRET}\"]"))]
-#[case::base_url(format!("[providers.p]\nprotocols = {{ openai-chat = {{ base_url = \"https://u:{SECRET}@x.example\" }} }}"))]
-#[case::credential(format!("[providers.p]\nprotocols = {{ openai-chat = {{}} }}\ncredential = {{ env = \"{SECRET}\" }}"))]
-#[case::login(format!("[providers.p]\nprotocols = {{ openai-chat = {{}} }}\ncredential = {{ store = true, login = \"{SECRET}\" }}"))]
-#[case::store(format!("[providers.p]\nprotocols = {{ openai-chat = {{}} }}\ncredential = {{ store = \"{SECRET}\" }}"))]
-#[case::header(format!("[providers.p]\nprotocols = {{ openai-chat = {{}} }}\nheaders = {{ \"Bad Name\" = \"{SECRET}\" }}"))]
-#[case::header_value(format!("[providers.p]\nprotocols = {{ openai-chat = {{}} }}\nheaders = {{ \"X-A\" = \"{SECRET}\\n\" }}"))]
-#[case::wrong_type_key(format!("[providers.p]\nprotocols = {{ openai-chat = {{}} }}\nmodel = [\"{SECRET}\"]"))]
-#[case::unknown_key_value(format!("[providers.p]\nprotocols = {{ openai-chat = {{}} }}\napi_key = \"{SECRET}\""))]
-#[case::default(format!("provider = \"{SECRET}\"\n[providers.p]\nprotocols = {{ openai-chat = {{}} }}"))]
+#[case::protocol_name(format!("[accounts.p]\nprovider='custom'\nprotocols = {{ \"{SECRET}\" = {{base_url='https://gateway.example'}} }}"))]
+#[case::prefer(format!("[accounts.p]\nprovider='custom'\nprotocols = {{ openai-chat = {{base_url='https://gateway.example'}} }}\nprefer = [\"{SECRET}\"]"))]
+#[case::base_url(format!("[accounts.p]\nprovider='custom'\nprotocols = {{ openai-chat = {{ base_url = \"https://u:{SECRET}@x.example\" }} }}"))]
+#[case::credential(format!("[accounts.p]\nprovider='custom'\nprotocols = {{ openai-chat = {{base_url='https://gateway.example'}} }}\ncredential = {{ env = \"{SECRET}\" }}"))]
+#[case::login(format!("[accounts.p]\nprovider='custom'\nprotocols = {{ openai-chat = {{base_url='https://gateway.example'}} }}\ncredential = {{ store = true, login = \"{SECRET}\" }}"))]
+#[case::store(format!("[accounts.p]\nprovider='custom'\nprotocols = {{ openai-chat = {{base_url='https://gateway.example'}} }}\ncredential = {{ store = \"{SECRET}\" }}"))]
+#[case::header(format!("[accounts.p]\nprovider='custom'\nprotocols = {{ openai-chat = {{base_url='https://gateway.example'}} }}\nheaders = {{ \"Bad Name\" = \"{SECRET}\" }}"))]
+#[case::header_value(format!("[accounts.p]\nprovider='custom'\nprotocols = {{ openai-chat = {{base_url='https://gateway.example'}} }}\nheaders = {{ \"X-A\" = \"{SECRET}\\n\" }}"))]
+#[case::wrong_type_key(format!("model=[\"{SECRET}\"]\n[accounts.p]\nprovider='openai'"))]
+#[case::unknown_key_value(format!("[accounts.p]\nprovider='custom'\nprotocols = {{ openai-chat = {{base_url='https://gateway.example'}} }}\napi_key = \"{SECRET}\""))]
+#[case::default(format!("model = \"{SECRET}/model\"\n[accounts.p]\nprovider='openai'"))]
 fn no_diagnostic_repeats_a_value_from_the_file(#[case] text: String) {
     let error = load(&text).unwrap_err();
 
@@ -1046,7 +1205,7 @@ fn no_diagnostic_repeats_a_value_from_the_file(#[case] text: String) {
 #[test]
 fn direct_and_enclosing_provider_debug_output_hides_configured_strings() {
     let providers = load(&format!(
-        "[providers.{SECRET}]\nmodel='{SECRET}'\nmodels=['{SECRET}']\ncredential={{env='SECRET_ENV_SENTINEL'}}\nheaders = {{ \"{SECRET}\" = \"Bearer {SECRET}\" }}\n[providers.{SECRET}.protocols.anthropic-messages]\nbase_url='https://gateway.example/{SECRET}'\noptions.version='{SECRET}'"
+        "model='{SECRET}/{SECRET}'\n[accounts.{SECRET}]\nprovider='custom'\nmodels=['{SECRET}']\ncredential={{env='SECRET_ENV_SENTINEL'}}\nheaders = {{ \"{SECRET}\" = \"Bearer {SECRET}\" }}\n[accounts.{SECRET}.protocols.anthropic-messages]\nbase_url='https://gateway.example/{SECRET}'\noptions.version='{SECRET}'"
     ))
     .unwrap();
     let profile = providers.get(SECRET).unwrap();

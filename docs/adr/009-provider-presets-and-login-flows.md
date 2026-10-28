@@ -1,5 +1,8 @@
 # ADR-009: Describe provider presets and browser sign-ins as data
 
+The preset/configurable-flow decisions below are superseded by
+[ADR-027](027-provider-registry-and-instance-authentication.md). This document records the original rationale.
+
 ## Status
 
 Accepted. Amends [ADR-008](008-provider-authentication.md), which made OpenRouter's

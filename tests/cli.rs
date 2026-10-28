@@ -14,7 +14,11 @@ fn cloud_auth_status_is_offline_and_login_logout_leave_shared_adc_untouched() {
     let adc = dir.path().join("adc.json");
     // Invalid contents prove status and store commands never acquire or rewrite ADC.
     std::fs::write(&adc, SECRET).unwrap();
-    std::fs::write(&config, "provider='cloud'\n[providers.cloud]\npreset='google-cloud'\ngoogle_cloud={project='fixture-project'}").unwrap();
+    std::fs::write(
+        &config,
+        "[accounts.cloud]\nprovider='google-cloud'\ngoogle_cloud={project='fixture-project'}",
+    )
+    .unwrap();
     isolated(dir.path())
         .env("BEE_CONFIG", &config)
         .env("GOOGLE_APPLICATION_CREDENTIALS", &adc)
@@ -70,6 +74,9 @@ fn help_for_every_command_is_available_before_configuration_is_loaded() {
             vec!["models", "providers"],
             vec!["models", "list"],
             vec!["models", "refresh"],
+            vec!["providers"],
+            vec!["providers", "list"],
+            vec!["providers", "show"],
         ] {
             for flag in ["--help", "-h"] {
                 isolated(dir.path())
@@ -95,14 +102,9 @@ fn invalid_arguments_and_conflicting_flags_exit_before_protocol_startup() {
         vec!["auth", "login", "--with-token", "--paste-code"],
         vec!["auth", "login", "--with-token", "--no-browser"],
         vec!["auth", "login", "--paste-code", "--no-browser"],
-        vec!["models", "list", "local", "--catalog-provider", "openai"],
-        vec![
-            "models",
-            "list",
-            "--catalog-provider",
-            "openai",
-            "--endpoint",
-        ],
+        vec!["models", "list", "local", "--catalog", "openai"],
+        vec!["models", "list", "--catalog-provider", "openai"],
+        vec!["models", "list", "--catalog", "openai", "--endpoint"],
     ] {
         isolated(dir.path())
             .args(args)
@@ -141,7 +143,7 @@ fn scenario_selection_is_explicit_and_conflicts_with_human_facing_commands() {
 fn models_commands_browse_dynamic_cached_providers_and_preserve_manual_ids_offline() {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("selected.toml");
-    std::fs::write(&config, "[catalog]\nrefresh=false\n[providers.local]\nmodel='private/unknown'\ncatalog_provider='dynamic'\nprotocols={openai-chat={}}\n").unwrap();
+    std::fs::write(&config, "[catalog]\nrefresh=false\n[accounts.local]\nprovider='custom'\ndiscovery=false\nmodels=['private/unknown']\ncatalog='dynamic'\nprotocols={openai-chat={base_url='https://example.com/v1'}}\n").unwrap();
     let cache = dir.path().join("cache/bee/models.dev.json");
     std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
     std::fs::write(&cache, serde_json::to_vec(&serde_json::json!({"version":1,"fetched_at":1,"catalog":{"dynamic":{"name":"Dynamic provider","models":{"public":{"name":"Public model","tool_call":true}}}}})).unwrap()).unwrap();
@@ -162,11 +164,11 @@ fn models_commands_browse_dynamic_cached_providers_and_preserve_manual_ids_offli
         .assert()
         .success()
         .stdout(predicate::str::contains("private/unknown"))
-        .stdout(predicate::str::contains("Public model"))
+        .stdout(predicate::str::contains("Public model").not())
         .stderr(predicate::str::contains("stale"));
     isolated(dir.path())
         .env("BEE_CONFIG", &config)
-        .args(["models", "list", "--catalog-provider", "dynamic", "--json"])
+        .args(["models", "list", "--catalog", "dynamic", "--json"])
         .assert()
         .success()
         .stdout(predicate::str::contains("models.dev"));
@@ -176,7 +178,7 @@ fn models_commands_browse_dynamic_cached_providers_and_preserve_manual_ids_offli
 fn disabled_catalog_keeps_manual_model_queries_working_and_refresh_fails_actionably() {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("selected.toml");
-    std::fs::write(&config, "[catalog]\nenabled=false\n[providers.local]\nmodel='private/model'\nprotocols={openai-chat={}}\n").unwrap();
+    std::fs::write(&config, "[catalog]\nenabled=false\n[accounts.local]\nprovider='custom'\ndiscovery=false\nmodels=['private/model']\nprotocols={openai-chat={base_url='https://example.com/v1'}}\n").unwrap();
     isolated(dir.path())
         .env("BEE_CONFIG", &config)
         .args(["models", "list", "--json"])
@@ -282,6 +284,261 @@ fn isolated(dir: &std::path::Path) -> Command {
 const SECRET: &str = "sk-super-secret-token";
 
 #[test]
+fn model_listing_aggregates_active_accounts_with_qualified_ids_and_display_labels() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("accounts.toml");
+    std::fs::write(&config, "[catalog]\nenabled=false\n[accounts.work]\nprovider='openai'\ndisplay_name='Work'\ndiscovery=false\nmodels=['vendor/shared']\nmodel_metadata={'vendor/shared'={display_name='Shared name'}}\n[accounts.personal]\nprovider='anthropic'\ndiscovery=false\nmodels=['vendor/shared']\n[accounts.hidden]\nprovider='openai'\nenabled=false\ndiscovery=false\nmodels=['hidden-model']\n").unwrap();
+    let output = isolated(dir.path())
+        .env("BEE_CONFIG", &config)
+        .args(["models", "list", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let output: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    let models = output["result"]["models"].as_array().unwrap();
+    assert_eq!(models.len(), 2);
+    assert!(
+        models
+            .iter()
+            .any(|model| model["id"] == "work/vendor/shared"
+                && model["display_name"] == "Work / Shared name")
+    );
+    assert!(
+        models
+            .iter()
+            .any(|model| model["id"] == "personal/vendor/shared"
+                && model["display_name"] == "Anthropic / vendor/shared")
+    );
+    assert_eq!(output["result"]["accounts"].as_array().unwrap().len(), 2);
+    isolated(dir.path())
+        .env("BEE_CONFIG", &config)
+        .args(["models", "list", "work"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("work/vendor/shared"))
+        .stdout(predicate::str::contains("personal/vendor/shared").not());
+}
+
+#[cfg(unix)]
+#[test]
+fn ambiguous_omitted_auth_targets_never_mutate_credentials_even_with_a_configured_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("accounts.toml");
+    std::fs::write(&config, "model='one/test'\n[accounts.one]\nprovider='openai'\ndiscovery=false\nmodels=['test']\ncredential={store=true}\n[accounts.two]\nprovider='anthropic'\ncredential={store=true}\n").unwrap();
+    isolated(dir.path())
+        .env("BEE_CONFIG", &config)
+        .args(["auth", "login", "one", "--with-token"])
+        .write_stdin(SECRET)
+        .assert()
+        .success();
+    let path = dir.path().join("data/bee/credentials.json");
+    let before = std::fs::read(&path).unwrap();
+    for args in [
+        vec!["auth", "login", "--with-token"],
+        vec!["auth", "logout"],
+    ] {
+        isolated(dir.path())
+            .env("BEE_CONFIG", &config)
+            .args(args)
+            .write_stdin("replacement-secret")
+            .assert()
+            .failure()
+            // Miette may wrap the account/ID phrase at the terminal's display width.
+            .stderr(predicate::str::contains("specify an account"))
+            .stderr(predicate::str::contains("omitted login/logout requires"));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn explicit_disabled_account_authentication_preserves_configuration_and_stays_out_of_status() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("accounts.toml");
+    let original = "[accounts.active]\nprovider='openai'\ncredential={store=true}\n[accounts.disabled]\nprovider='anthropic'\nenabled=false\ncredential={store=true}\n";
+    std::fs::write(&config, original).unwrap();
+    isolated(dir.path())
+        .env("BEE_CONFIG", &config)
+        .args(["auth", "login", "disabled", "--with-token"])
+        .write_stdin(SECRET)
+        .assert()
+        .success();
+    isolated(dir.path())
+        .env("BEE_CONFIG", &config)
+        .args(["auth", "status", "disabled"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("stored credential present"));
+    isolated(dir.path())
+        .env("BEE_CONFIG", &config)
+        .args(["auth", "status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("active"))
+        .stdout(predicate::str::contains("disabled").not());
+    // The disabled account cannot make a sole-active omitted target ambiguous.
+    isolated(dir.path())
+        .env("BEE_CONFIG", &config)
+        .args(["auth", "login", "--with-token"])
+        .write_stdin("active-secret")
+        .assert()
+        .success();
+    isolated(dir.path())
+        .env("BEE_CONFIG", &config)
+        .args(["auth", "logout", "disabled"])
+        .assert()
+        .success();
+    assert_eq!(std::fs::read_to_string(config).unwrap(), original);
+}
+
+#[cfg(unix)]
+#[test]
+fn stored_instance_reauthentication_does_not_require_a_global_configuration_root_or_lock() {
+    for no_global_root in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let selected = dir.path().join("managed.toml");
+        let original = "[accounts.account]\nprovider='openai'\ncredential={store=true}";
+        std::fs::write(&selected, original).unwrap();
+        // A directory at the lock path makes accidental lock attempts fail even as root.
+        std::fs::create_dir_all(dir.path().join("xdg/bee/config.toml.lock")).unwrap();
+        let mut command = isolated(dir.path());
+        if no_global_root {
+            command
+                .env_remove("HOME")
+                .env_remove("XDG_CONFIG_HOME")
+                .env_remove("USERPROFILE");
+        }
+        command
+            .env("BEE_CONFIG", &selected)
+            .args(["auth", "login", "account", "--with-token"])
+            .write_stdin(format!("{SECRET}\n"))
+            .assert()
+            .success()
+            .stderr(predicate::str::contains(SECRET).not());
+        assert_eq!(std::fs::read_to_string(selected).unwrap(), original);
+        assert!(dir.path().join("data/bee/credentials.json").exists());
+        assert!(!dir.path().join("xdg/bee/config.toml").exists());
+    }
+}
+
+#[test]
+fn provider_registry_inspection_does_not_load_configuration_or_credentials() {
+    let dir = tempfile::tempdir().unwrap();
+    let selected = dir.path().join("broken.toml");
+    std::fs::write(&selected, format!("invalid={SECRET}")).unwrap();
+    for args in [
+        vec!["providers", "list"],
+        vec!["providers", "show", "github"],
+    ] {
+        isolated(dir.path())
+            .env("BEE_CONFIG", &selected)
+            .args(args)
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("GitHub Copilot"))
+            .stdout(predicate::str::contains(SECRET).not())
+            .stderr(predicate::str::is_empty());
+    }
+    isolated(dir.path())
+        .args(["providers", "show", SECRET])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(SECRET).not());
+    assert!(!dir.path().join("data").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn explicit_native_login_imports_environment_then_uses_instance_storage_after_environment_changes()
+{
+    let dir = tempfile::tempdir().unwrap();
+    isolated(dir.path())
+        .env("OPENAI_API_KEY", SECRET)
+        .args(["auth", "login", "openai"])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("now uses Bee's credential store"))
+        .stderr(predicate::str::contains(SECRET).not());
+    let config = std::fs::read_to_string(dir.path().join("xdg/bee/config.toml")).unwrap();
+    assert!(config.contains("[accounts.openai]"));
+    assert!(config.contains("provider = \"openai\""));
+    assert!(!config.contains("model ="));
+    assert!(config.contains("store = true"));
+    assert!(!config.contains(SECRET));
+    isolated(dir.path())
+        .env_remove("OPENAI_API_KEY")
+        .args(["auth", "status", "openai"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("stored credential present"));
+    let credentials: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join("data/bee/credentials.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(credentials["providers"]["openai"]["secret"], SECRET);
+    assert_eq!(
+        credentials["providers"]["openai"]["provider_type"],
+        "openai"
+    );
+    isolated(dir.path())
+        .env("OPENAI_API_KEY", "different-account")
+        .args(["auth", "logout", "openai"])
+        .assert()
+        .success();
+    isolated(dir.path())
+        .env("OPENAI_API_KEY", "different-account")
+        .args(["auth", "status", "openai"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("no stored credential"));
+}
+
+#[cfg(unix)]
+#[test]
+fn existing_instance_names_win_over_native_types_and_multiple_accounts_remain_independent() {
+    let dir = tempfile::tempdir().unwrap();
+    let global = dir.path().join("xdg/bee/config.toml");
+    std::fs::create_dir_all(global.parent().unwrap()).unwrap();
+    std::fs::write(&global, "[accounts.openai]\nprovider='anthropic'\ncredential={env='PERSONAL_KEY'}\n[accounts.work]\nprovider='anthropic'\ncredential={env='WORK_KEY'}\n").unwrap();
+    for (instance, variable, secret) in [
+        ("openai", "PERSONAL_KEY", "personal-secret"),
+        ("work", "WORK_KEY", "work-secret"),
+    ] {
+        isolated(dir.path())
+            .env(variable, secret)
+            .args(["auth", "login", instance])
+            .assert()
+            .success()
+            .stderr(predicate::str::contains(secret).not());
+    }
+    let credentials: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join("data/bee/credentials.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        credentials["providers"]["openai"]["provider_type"],
+        "anthropic"
+    );
+    assert_eq!(
+        credentials["providers"]["openai"]["secret"],
+        "personal-secret"
+    );
+    assert_eq!(credentials["providers"]["work"]["secret"], "work-secret");
+    isolated(dir.path())
+        .args(["auth", "logout", "work"])
+        .assert()
+        .success();
+    isolated(dir.path())
+        .args(["auth", "status", "openai"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("stored credential present"));
+}
+
+#[test]
 fn invalid_bash_policy_fails_before_protocol_output_without_echoing_values() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("selected.toml");
@@ -353,12 +610,12 @@ fn valid_layered_configuration_does_not_disturb_stdout() {
     std::fs::create_dir_all(global.parent().unwrap()).unwrap();
     std::fs::write(
         &global,
-        "[providers.gw]\nprotocols = { openai-chat = {} }\nmodel = \"x\"\n",
+        "model='gw/x'\n[accounts.gw]\nprovider='custom'\ndiscovery=false\nprotocols = { openai-chat = { base_url='https://example.com/v1' } }\nmodels = ['x','y']\n",
     )
     .unwrap();
     let project = dir.path().join(".config/bee.toml");
     std::fs::create_dir_all(project.parent().unwrap()).unwrap();
-    std::fs::write(&project, "[providers.gw]\nmodel = \"y\"\n").unwrap();
+    std::fs::write(&project, "model='gw/y'\n").unwrap();
 
     isolated(dir.path())
         .write_stdin("")
@@ -375,7 +632,7 @@ fn an_invalid_provider_profile_fails_startup_without_echoing_secrets() {
     std::fs::create_dir_all(project.parent().unwrap()).unwrap();
     std::fs::write(
         &project,
-        format!("[providers.p]\nprotocols = {{ openai-chat = {{ base_url = \"https://u:{SECRET}@x.example\" }} }}\n"),
+        format!("[accounts.p]\nprovider='custom'\nprotocols = {{ openai-chat = {{ base_url = \"https://u:{SECRET}@x.example\" }} }}\n"),
     )
     .unwrap();
 
@@ -387,7 +644,7 @@ fn an_invalid_provider_profile_fails_startup_without_echoing_secrets() {
         .stdout(predicate::str::is_empty())
         .stderr(predicate::str::contains("bee::provider::invalid"))
         .stderr(predicate::str::contains(
-            "providers.p.protocols.openai-chat.base_url",
+            "accounts.p.protocols.openai-chat.base_url",
         ))
         .stderr(predicate::str::contains(SECRET).not());
 }
@@ -403,7 +660,7 @@ fn invalid_model_mappings_fail_startup_without_echoing_model_keys_or_protocol_va
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().join(".config/bee.toml");
         std::fs::create_dir_all(project.parent().unwrap()).unwrap();
-        std::fs::write(&project, format!("[providers.p]\nprotocols={{openai-chat={{}}}}\nmodel_protocols={{'{SECRET}'={value}}}")).unwrap();
+        std::fs::write(&project, format!("[accounts.p]\nprovider='custom'\nprotocols={{openai-chat={{base_url='https://example.com/v1'}}}}\nmodel_protocols={{'{SECRET}'={value}}}")).unwrap();
         isolated(dir.path())
             .write_stdin("")
             .assert()
@@ -415,21 +672,27 @@ fn invalid_model_mappings_fail_startup_without_echoing_model_keys_or_protocol_va
 }
 
 const AUTH_CONFIG: &str = r#"
-provider = "stored"
+model = "stored/test"
 
-[providers.stored]
-protocols = { openai-chat = {} }
+[accounts.stored]
+provider = "custom"
+discovery = false
+models = ["test"]
+protocols = { openai-chat = { base_url = "https://api.openai.com/v1" } }
 credential = { store = true }
 
-[providers.browser]
-protocols = { openai-chat = {} }
+[accounts.browser]
+provider = "openrouter"
+protocols = { openai-chat = { base_url = "https://openrouter.ai/api/v1" } }
 credential = { store = true, login = "openrouter" }
 
-[providers.env]
-protocols = { anthropic-messages = {} }
+[accounts.env]
+provider = "custom"
+protocols = { anthropic-messages = { base_url = "https://api.anthropic.com" } }
 credential = { env = "BEE_TEST_KEY" }
 
-[providers.local]
+[accounts.local]
+provider = "custom"
 protocols = { openai-chat = { base_url = "http://localhost:11434/v1" } }
 "#;
 
@@ -449,7 +712,7 @@ fn named_profiles_scope_auth_and_models_without_changing_connection_credential_k
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path().join(".config/bee.toml");
     std::fs::create_dir_all(project.parent().unwrap()).unwrap();
-    std::fs::write(&project, "[catalog]\nenabled=false\n[providers.work-api]\npreset='openai'\ncredential={store=true}\nmodel='base-work'\n[providers.personal-api]\npreset='openai'\ncredential={store=true}\nmodel='base-personal'\n[profiles.work]\nconnections=['work-api']\n[profiles.work.models.work-api]\nmodel='profile-work'\n[profiles.personal]\nconnections=['personal-api']\n").unwrap();
+    std::fs::write(&project, "[catalog]\nenabled=false\n[accounts.work-api]\nprovider='openai'\ncredential={store=true}\ndiscovery=false\nmodels=['profile-work']\n[accounts.personal-api]\nprovider='openai'\ncredential={store=true}\ndiscovery=false\nmodels=['base-personal']\n[profiles.work]\naccounts=['work-api']\nmodel='work-api/profile-work'\n[profiles.personal]\naccounts=['personal-api']\n").unwrap();
     for (profile, token) in [("work", "work-secret"), ("personal", "personal-secret")] {
         isolated(dir.path())
             .env("BEE_PROFILE", profile)
@@ -474,17 +737,16 @@ fn named_profiles_scope_auth_and_models_without_changing_connection_credential_k
         .success()
         .stdout(predicate::str::contains("work-api"))
         .stdout(predicate::str::contains("personal-api").not());
-    for args in [
-        vec!["auth", "status", "personal-api"],
-        vec!["auth", "logout", "personal-api"],
-        vec!["models", "list", "personal-api"],
-    ] {
-        isolated(dir.path())
-            .env("BEE_PROFILE", "work")
-            .args(args)
-            .assert()
-            .failure();
-    }
+    isolated(dir.path())
+        .env("BEE_PROFILE", "work")
+        .args(["auth", "status", "personal-api"])
+        .assert()
+        .success();
+    isolated(dir.path())
+        .env("BEE_PROFILE", "work")
+        .args(["models", "list", "personal-api"])
+        .assert()
+        .failure();
     isolated(dir.path())
         .env("BEE_PROFILE", "work")
         .args(["models", "list", "--json"])
@@ -519,7 +781,7 @@ fn a_token_can_be_stored_checked_and_forgotten_without_it_ever_being_printed() {
     let file = dir.path().join("data/bee/credentials.json");
 
     isolated(dir.path())
-        .args(["auth", "login", "--with-token"])
+        .args(["auth", "login", "stored", "--with-token"])
         .write_stdin(format!("{SECRET}\n"))
         .assert()
         .success()
@@ -545,7 +807,7 @@ fn a_token_can_be_stored_checked_and_forgotten_without_it_ever_being_printed() {
         .stderr(predicate::str::is_empty());
 
     isolated(dir.path())
-        .args(["auth", "logout"])
+        .args(["auth", "logout", "stored"])
         .assert()
         .success()
         .stdout(predicate::str::is_empty())
@@ -599,7 +861,7 @@ fn environment_credential_status_needs_no_file_store() {
     // Exclude stored profiles: status checks every configured profile's source.
     std::fs::write(
         project,
-        "[providers.env]\nprotocols = { openai-chat = {} }\ncredential = { env = \"BEE_TEST_KEY\" }\n",
+        "[accounts.env]\nprovider='custom'\nprotocols = { openai-chat = { base_url='https://example.com/v1' } }\ncredential = { env = \"BEE_TEST_KEY\" }\n",
     )
     .unwrap();
 
@@ -670,14 +932,14 @@ fn opencode_failed_token_onboarding_never_persists_a_connection_or_opens_a_brows
             .assert()
             .failure()
             .stdout(predicate::str::is_empty())
-            .stderr(predicate::str::contains("bee::auth::no_login_flow"));
+            .stderr(predicate::str::contains("bee::auth::missing_env"));
         assert!(!dir.path().join("data/bee/credentials.json").exists());
         assert!(!dir.path().join("config/bee/config.toml").exists());
     }
 }
 
 #[test]
-fn a_profile_that_does_not_use_the_store_cannot_be_logged_in() {
+fn project_environment_authority_must_be_removed_before_switching_to_the_store() {
     let dir = configured();
 
     isolated(dir.path())
@@ -685,7 +947,7 @@ fn a_profile_that_does_not_use_the_store_cannot_be_logged_in() {
         .write_stdin(format!("{SECRET}\n"))
         .assert()
         .failure()
-        .stderr(predicate::str::contains("bee::auth::not_stored"))
+        .stderr(predicate::str::contains("bee::config::write"))
         .stderr(predicate::str::contains(SECRET).not());
 }
 
@@ -705,7 +967,7 @@ fn chatgpt_profiles_reject_api_token_and_paste_code_login_without_echoing_input(
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path().join(".config/bee.toml");
     std::fs::create_dir_all(project.parent().unwrap()).unwrap();
-    std::fs::write(project, "[providers.subscription]\npreset='chatgpt'").unwrap();
+    std::fs::write(project, "[accounts.subscription]\nprovider='chatgpt'").unwrap();
     for flag in ["--with-token", "--paste-code"] {
         isolated(dir.path())
             .args(["auth", "login", "subscription", flag])
@@ -750,7 +1012,7 @@ fn a_credential_file_others_can_read_stops_every_auth_command() {
 
     let dir = configured();
     isolated(dir.path())
-        .args(["auth", "login", "--with-token"])
+        .args(["auth", "login", "stored", "--with-token"])
         .write_stdin(format!("{SECRET}\n"))
         .assert()
         .success();
@@ -775,6 +1037,6 @@ fn auth_with_no_configured_profile_says_so_instead_of_failing() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "No provider profiles are configured",
+            "No active accounts are configured",
         ));
 }

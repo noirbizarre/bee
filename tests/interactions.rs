@@ -517,7 +517,7 @@ async fn form_tools_are_advertised_only_for_negotiated_form_support(
     tokio::time::timeout(
         Duration::from_secs(10),
         client.connect_with(
-            bee::acp::agent_with_providers(support::providers("openai-chat", &server.url, "")),
+            bee::acp::agent_with_accounts(support::providers("openai-chat", &server.url, "")),
             async |connection| {
                 initialize(&connection, capabilities).await?;
                 let session = connection
@@ -607,12 +607,12 @@ fn login_fixture(
     root: &std::path::Path,
     url: &str,
     extra: &str,
-) -> (bee::provider::Providers, bee::config::Environment) {
+) -> (bee::account::Accounts, bee::config::Environment) {
     let path = root.join("config.toml");
-    std::fs::write(&path, format!("[providers.test]\nmodel='test'\ncredential={{store=true,login='openrouter'}}\n{extra}\n[providers.test.protocols.openai-chat]\nbase_url='{url}'")).unwrap();
+    std::fs::write(&path, format!("model='test/test'\n[accounts.test]\nprovider='custom'\nmodels=['test']\ncredential={{store=true,login='openrouter'}}\n{extra}\n[accounts.test.protocols.openai-chat]\nbase_url='{url}'")).unwrap();
     let env = bee::config::Environment::new(None, Some(root.into()), Some(path));
     let config = bee::config::Config::load(&env, &root.join("no-project")).unwrap();
-    (bee::provider::Providers::from_config(&config).unwrap(), env)
+    (bee::account::Accounts::from_config(&config).unwrap(), env)
 }
 
 #[cfg(unix)]
@@ -779,13 +779,10 @@ async fn concurrent_url_logins_keep_unique_ids_and_isolated_credential_commits(
     ]);
     let (_, env) = login_fixture(root.path(), &server.url, "");
     let config_path = root.path().join("config.toml");
-    let mut config = format!(
-        "provider='test'\n{}",
-        std::fs::read_to_string(&config_path).unwrap()
-    );
-    config.push_str(&format!("\n[providers.second]\nmodel='test'\ncredential={{store=true,login='openrouter'}}\nprotocols={{openai-chat={{base_url='{}'}}}}", server.url));
+    let mut config = std::fs::read_to_string(&config_path).unwrap();
+    config.push_str(&format!("\n[accounts.second]\nprovider='custom'\nmodels=['test']\ncredential={{store=true,login='openrouter'}}\nprotocols={{openai-chat={{base_url='{}'}}}}", server.url));
     std::fs::write(&config_path, config).unwrap();
-    let profiles = bee::provider::Providers::from_config(
+    let profiles = bee::account::Accounts::from_config(
         &bee::config::Config::load(&env, &root.path().join("none")).unwrap(),
     )
     .unwrap();
@@ -858,8 +855,8 @@ async fn concurrent_url_logins_keep_unique_ids_and_isolated_credential_commits(
                     connection
                         .send_request(v2::SetSessionConfigOptionRequest::new(
                             session.clone(),
-                            "provider",
-                            provider,
+                            "model",
+                            format!("{provider}/test").as_str(),
                         ))
                         .block_task()
                         .await?;
@@ -1327,7 +1324,9 @@ async fn stopping_browser_login_drops_pending_work_before_terminal_idle(
     let root = tempfile::tempdir().unwrap();
     let (profiles, env) = login_fixture(root.path(), "http://127.0.0.1:1", "");
     let profiles = if chatgpt {
-        support::configured_providers("[providers.test]\npreset='chatgpt'\nmodel='account-model'")
+        support::configured_providers(
+            "model='test/account-model'\n[accounts.test]\nprovider='chatgpt'\nmodels=['account-model']\ndiscovery=false",
+        )
     } else {
         profiles
     };
@@ -1547,10 +1546,10 @@ async fn unsupported_or_misconfigured_login_never_invokes_url_elicitation(
         "no-flow" => "{store=true}",
         _ => "{store=true,login='openrouter'}",
     };
-    std::fs::write(&path, format!("[providers.test]\nmodel='test'\ncredential={credential}\nprotocols={{openai-chat={{base_url='http://127.0.0.1:1'}}}}")).unwrap();
+    std::fs::write(&path, format!("model='test/test'\n[accounts.test]\nprovider='custom'\nmodels=['test']\ncredential={credential}\nprotocols={{openai-chat={{base_url='http://127.0.0.1:1'}}}}")).unwrap();
     let env = bee::config::Environment::new(None, Some(root.path().into()), Some(path));
     let config = bee::config::Config::load(&env, &root.path().join("none")).unwrap();
-    let profiles = bee::provider::Providers::from_config(&config).unwrap();
+    let profiles = bee::account::Accounts::from_config(&config).unwrap();
     if kind == "malformed-store" {
         let store = env.credentials_path().unwrap();
         std::fs::create_dir_all(store.parent().unwrap()).unwrap();

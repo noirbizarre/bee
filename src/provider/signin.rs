@@ -1,24 +1,28 @@
-//! Provider presets and login flows, as data and free of the ACPv2 SDK.
-//!
-//! Presets describe protocol endpoints and connection defaults in the embedded
-//! `data/presets.toml`, extended or overridden through user `presets` tables.
-//! Configurable `pkce-key` login flows also describe URLs, parameter names and
-//! credential response fields as data in `login_flows` (ADR-009). ChatGPT and
-//! GitHub use separate native mechanisms with fixed trusted authentication
-//! endpoints: their registration, identity or device-authorization contracts
-//! cannot be replaced with configurable API-key exchanges.
-//!
-//! Like `provider`, the validation is written by hand over the generic TOML
-//! value, and every diagnostic names a key and a file, never a value.
+//! Internal authorization mechanisms with compiled-in trusted contracts.
 
 use toml::{Table, Value};
 
-use crate::config::Config;
-use crate::error::{Error, Result};
 use crate::provider::normalize_base_url;
 
 /// The catalogue Bee ships.
-const BUILTIN: &str = include_str!("../data/presets.toml");
+const OPENROUTER_LOGIN: &str = r#"
+kind = "pkce-key"
+authorize_url = "https://openrouter.ai/auth"
+exchange_url = "https://openrouter.ai/api/v1/auth/keys"
+headless = true
+help = "OpenRouter's authorization codes expire after 10 minutes and are single use."
+[authorize]
+callback = "callback_url"
+challenge = "code_challenge"
+challenge_method = "code_challenge_method"
+state = "state"
+extra = { key_label = "Bee" }
+[exchange]
+code = "code"
+verifier = "code_verifier"
+challenge_method = "code_challenge_method"
+response_key = "key"
+"#;
 
 /// Configurable authorization-code/PKCE exchange returning an API key. ChatGPT
 /// has a dedicated mechanism because registration, identity and renewal differ.
@@ -99,7 +103,7 @@ pub(crate) struct ExchangeNames {
 /// code, and what the provider calls each field.
 ///
 /// Built from a `login_flows.<name>` table. Running it is `login`'s.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct LoginSpec {
     pub(crate) kind: LoginKind,
     pub(crate) name: String,
@@ -109,6 +113,16 @@ pub struct LoginSpec {
     pub(crate) help: Option<String>,
     pub(crate) authorize: AuthorizeNames,
     pub(crate) exchange: ExchangeNames,
+}
+
+impl std::fmt::Debug for LoginSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Test/injected flow specifications may contain sensitive URLs or parameters too.
+        f.debug_struct("LoginSpec")
+            .field("kind", &self.kind)
+            .field("headless", &self.headless)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Implemented authorization mechanisms, independent of credential sources.
@@ -374,119 +388,14 @@ pub(crate) fn deep_merge(base: &mut Table, over: &Table) {
     }
 }
 
-/// Every preset and login flow available: the shipped ones, then the user's.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Catalog {
-    presets: Table,
-    login_flows: Table,
-}
-
-impl Catalog {
-    /// What ships in the binary, and nothing else.
-    ///
-    /// # Panics
-    ///
-    /// Never in a released build: a unit test parses the embedded file.
-    #[must_use]
-    pub fn builtin() -> Self {
-        let table: Table = BUILTIN
-            .parse()
-            .expect("the embedded `data/presets.toml` is valid TOML");
-        let section = |name: &str| match table.get(name) {
-            Some(Value::Table(section)) => section.clone(),
-            _ => Table::new(),
-        };
-        Self {
-            presets: section("presets"),
-            login_flows: section("login_flows"),
-        }
-    }
-
-    /// The shipped catalogue with the `presets` and `login_flows` of `config`
-    /// merged over it, by name.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::ProviderType`] for a section or entry that is not a table, and
-    /// [`Error::ProviderUntrustedLayer`] for a login flow set in the project
-    /// file.
-    pub fn from_config(config: &Config) -> Result<Self> {
-        let mut catalog = Self::builtin();
-
-        // A login flow names the URLs that receive the authorization code and
-        // the PKCE verifier. The project file can come from a repository the
-        // user merely cloned, so it may not choose them; the user's own files
-        // can. A preset is only shorthand for a profile, and a project could
-        // already write that profile out.
-        if let Some(key) = config.set_by_project("login_flows") {
-            return Err(Error::ProviderUntrustedLayer {
-                path: config
-                    .origin(&key)
-                    .map_or_else(|| "<unknown>".to_owned(), |path| path.display().to_string()),
-                key,
-            });
-        }
-
-        for (section, target) in [
-            ("presets", &mut catalog.presets),
-            ("login_flows", &mut catalog.login_flows),
-        ] {
-            let path_of = |key: &str| {
-                config
-                    .origin(key)
-                    .map_or_else(|| "<unknown>".to_owned(), |path| path.display().to_string())
-            };
-            let wrong_type = |key: String, expected, found: &Value| Error::ProviderType {
-                path: path_of(&key),
-                key,
-                expected,
-                found: found.type_str(),
-            };
-            match config.get(section) {
-                None => {}
-                Some(Value::Table(user)) => {
-                    for (name, value) in user {
-                        let Value::Table(entry) = value else {
-                            return Err(wrong_type(format!("{section}.{name}"), "a table", value));
-                        };
-                        match target.get_mut(name) {
-                            Some(Value::Table(existing)) => deep_merge(existing, entry),
-                            _ => {
-                                target.insert(name.clone(), value.clone());
-                            }
-                        }
-                    }
-                }
-                Some(other) => return Err(wrong_type(section.to_owned(), "a table", other)),
-            }
-        }
-        Ok(catalog)
-    }
-
-    /// The preset `name`, as the table a profile overlays.
-    pub(crate) fn preset(&self, name: &str) -> Option<&Table> {
-        self.presets.get(name)?.as_table()
-    }
-
-    /// The preset names, sorted.
-    #[must_use]
-    pub fn preset_names(&self) -> Vec<&str> {
-        self.presets.keys().map(String::as_str).collect()
-    }
-
-    /// The login flow names, sorted.
-    #[must_use]
-    pub fn login_names(&self) -> Vec<&str> {
-        self.login_flows.keys().map(String::as_str).collect()
-    }
-
-    /// The login flow `name`. `None` if there is no such flow; `Some(Err(..))`
-    /// if there is and its definition is unusable.
-    #[must_use]
-    pub fn login_spec(&self, name: &str) -> Option<SpecResult<LoginSpec>> {
-        let table = self.login_flows.get(name)?.as_table()?;
-        Some(LoginSpec::from_table(name, table))
-    }
+/// Resolve a compiled-in acquisition contract. User configuration cannot choose auth URLs.
+pub fn builtin(name: &str) -> Option<SpecResult<LoginSpec>> {
+    let table = match name {
+        "openrouter" => OPENROUTER_LOGIN.parse().expect("compiled-in PKCE contract"),
+        "chatgpt" | "github" => Table::from_iter([("kind".into(), Value::String(name.into()))]),
+        _ => return None,
+    };
+    Some(LoginSpec::from_table(name, &table))
 }
 
 #[cfg(test)]
@@ -495,35 +404,28 @@ mod tests {
 
     #[test]
     fn every_shipped_login_flow_is_a_valid_definition() {
-        let catalog = Catalog::builtin();
-
-        assert!(!catalog.login_names().is_empty());
-        for name in catalog.login_names() {
-            let spec = catalog.login_spec(name).unwrap();
+        for name in ["openrouter", "chatgpt", "github"] {
+            let spec = builtin(name).unwrap();
             assert!(spec.is_ok(), "{name}: {spec:?}");
         }
     }
 
     #[test]
-    fn every_shipped_preset_that_names_a_login_flow_names_one_that_exists() {
-        let catalog = Catalog::builtin();
-
-        for name in catalog.preset_names() {
-            let login = catalog
-                .preset(name)
-                .and_then(|preset| preset.get("credential")?.get("login")?.as_str());
+    fn every_registered_acquisition_flow_exists() {
+        for definition in crate::provider::registry::definitions() {
+            let defaults = definition.defaults();
+            let login = defaults
+                .get("credential")
+                .and_then(|credential| credential.get("login")?.as_str());
             if let Some(login) = login {
-                assert!(catalog.login_names().contains(&login), "{name} -> {login}");
+                assert!(builtin(login).is_some(), "{} -> {login}", definition.id);
             }
         }
     }
 
     #[test]
     fn the_shipped_openrouter_flow_matches_its_documentation() {
-        let spec = Catalog::builtin()
-            .login_spec("openrouter")
-            .unwrap()
-            .unwrap();
+        let spec = builtin("openrouter").unwrap().unwrap();
 
         assert_eq!(spec.authorize_url(), "https://openrouter.ai/auth");
         assert_eq!(
@@ -561,6 +463,88 @@ response_key = "api_key"
 
         assert!(!spec.headless());
         assert!(spec.authorize.extra.is_empty());
+    }
+
+    #[test]
+    fn malformed_flow_fields_report_their_path_without_echoing_values() {
+        for (path, value) in [
+            ("kind", Value::Integer(7)),
+            ("headless", Value::String("private-setting".into())),
+            ("help", Value::String("private-setting\n".into())),
+            ("help", Value::Integer(7)),
+            ("authorize", Value::String("private-setting".into())),
+            ("exchange", Value::Integer(7)),
+            ("authorize.extra", Value::String("private-setting".into())),
+            ("authorize.extra.label", Value::Integer(7)),
+            (
+                "authorize.extra.label",
+                Value::String("private-setting\n".into()),
+            ),
+            (
+                "exchange.verifier",
+                Value::String("private-setting!".into()),
+            ),
+        ] {
+            let mut table = flow(VALID);
+            let mut target = &mut table;
+            let parts: Vec<_> = path.split('.').collect();
+            for part in &parts[..parts.len() - 1] {
+                target = target
+                    .entry((*part).to_owned())
+                    .or_insert_with(|| Value::Table(Table::new()))
+                    .as_table_mut()
+                    .unwrap();
+            }
+            target.insert(parts.last().unwrap().to_string(), value);
+            let error = LoginSpec::from_table("private-flow-name", &table).unwrap_err();
+            assert!(matches!(&error, SpecError::Invalid { key, .. } if key == path));
+            assert!(!format!("{error:?}").contains("private-setting"));
+        }
+        for section in ["authorize", "exchange"] {
+            let mut table = flow(VALID);
+            table.remove(section);
+            assert!(
+                matches!(LoginSpec::from_table("x", &table), Err(SpecError::Invalid { key, reason: "is required" }) if key == section)
+            );
+        }
+    }
+
+    #[test]
+    fn trusted_native_flows_refuse_endpoint_overrides() {
+        for kind in ["chatgpt", "github"] {
+            let mut table = flow(&format!("kind='{kind}'"));
+            table.insert(
+                "authorize_url".into(),
+                Value::String("https://private-setting.example".into()),
+            );
+            let error = LoginSpec::from_table("x", &table).unwrap_err();
+            assert!(
+                matches!(&error, SpecError::Unknown { key, allowed } if key == "authorize_url" && allowed == "kind")
+            );
+            assert!(!format!("{error:?}").contains("private-setting"));
+        }
+    }
+
+    #[test]
+    fn flow_debug_redacts_urls_help_names_and_extra_parameters() {
+        let mut table = flow(VALID);
+        table.insert("help".into(), Value::String("private-help".into()));
+        table["authorize_url"] = Value::String("https://private-host.example/auth".into());
+        table["authorize"].as_table_mut().unwrap().insert(
+            "extra".into(),
+            Value::Table(Table::from_iter([(
+                "label".into(),
+                Value::String("private-extra".into()),
+            )])),
+        );
+        let spec = LoginSpec::from_table("private-name", &table).unwrap();
+        assert_eq!(
+            spec.authorize.extra,
+            [("label".into(), "private-extra".into())]
+        );
+        let debug = format!("{spec:?}");
+        assert!(debug.contains("PkceKey"));
+        assert!(!debug.contains("private-"));
     }
 
     #[test]

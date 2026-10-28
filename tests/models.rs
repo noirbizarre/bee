@@ -9,9 +9,10 @@ use std::time::Duration;
 
 use agent_client_protocol::schema::{ProtocolVersion, v2};
 use agent_client_protocol::{Client, Error as AcpError};
+use bee::account::Account as Profile;
 use bee::config::{Config, Environment};
 use bee::models::{self, Cache, Clock, Error, Http, Service, Settings};
-use bee::provider::{Profile, Protocol};
+use bee::provider::Protocol;
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
 
@@ -94,11 +95,11 @@ fn service(
 }
 fn profile(extra: &str) -> Profile {
     support::configured_providers(&format!(r#"
-        [providers.test]
-        model = "known"
-        catalog_provider = "new-provider"
+        [accounts.test]
+        provider = "custom"
+        catalog = "new-provider"
         prefer = ["openai-chat"]
-        protocols = {{ openai-chat = {{base_url="http://configured.example/gateway/v1"}}, openai-responses = {{}}, anthropic-messages = {{}} }}
+        protocols = {{ openai-chat = {{base_url="http://configured.example/gateway/v1"}}, openai-responses = {{base_url="https://api.openai.com/v1"}}, anthropic-messages = {{base_url="https://api.anthropic.com"}} }}
         {extra}
     "#)).get("test").unwrap().clone()
 }
@@ -109,10 +110,80 @@ fn defaults() -> (Arc<MemoryCache>, Arc<Time>) {
     )
 }
 
+#[rstest::rstest]
+#[case(false, "", vec![])]
+#[case(false, "models=[]", vec![])]
+#[case(false, "models=['declared','declared','listed']", vec!["declared", "listed"])]
+#[case(true, "", vec!["listed", "other"])]
+#[case(true, "models=[]", vec![])]
+#[case(true, "models=['declared','listed']", vec!["listed"])]
+fn availability_is_exact_declarations_or_filtered_selectable_discovery(
+    #[case] discovery: bool,
+    #[case] filter: &str,
+    #[case] expected: Vec<&str>,
+) {
+    let accounts = support::configured_providers(&format!(
+        "[accounts.a]\nprovider='custom'\ndiscovery={discovery}\n{filter}\nprotocols={{openai-chat={{base_url='https://example.test/v1'}}}}\nmodel_metadata={{hidden={{display_name='Metadata cannot grant access'}}}}\nmodel_context_windows={{hidden=9999}}"
+    ));
+    let account = accounts.get("a").unwrap();
+    let mut snapshot = models::Snapshot::default();
+    snapshot.endpoints.insert(
+        "a".into(),
+        models::EndpointListing {
+            fetched_at: Some(1000),
+            models: vec!["listed".into(), "other".into(), "listed".into()],
+            ..Default::default()
+        },
+    );
+    assert_eq!(snapshot.available_ids(account), expected);
+    assert_eq!(
+        snapshot
+            .suggestions(account, Some("selected/hidden"))
+            .iter()
+            .map(|info| info.id.as_str())
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert!(snapshot.check_available(account, "hidden").is_err());
+    for id in expected {
+        assert!(snapshot.check_available(account, id).is_ok());
+    }
+}
+
+#[test]
+fn pending_and_failed_discovery_deny_membership_while_same_account_stale_success_remains_usable() {
+    let accounts = support::configured_providers(
+        "[accounts.a]\nprovider='custom'\ndiscovery=true\nmodels=['listed']\nprotocols={openai-chat={base_url='https://example.test/v1'}}",
+    );
+    let account = accounts.get("a").unwrap();
+    let mut snapshot = models::Snapshot::default();
+    assert!(snapshot.check_available(account, "listed").is_err());
+    snapshot.endpoints.insert(
+        "a".into(),
+        models::EndpointListing {
+            error: Some(Error::Transport),
+            models: vec!["listed".into()],
+            ..Default::default()
+        },
+    );
+    assert!(snapshot.available_ids(account).is_empty());
+    let listing = snapshot.endpoints.get_mut("a").unwrap();
+    listing.fetched_at = Some(1000);
+    listing.stale = true;
+    assert!(snapshot.check_available(account, "listed").is_ok());
+    snapshot.endpoints.get_mut("a").unwrap().error = Some(Error::Unauthorized);
+    assert!(snapshot.available_ids(account).is_empty());
+    let listing = snapshot.endpoints.get_mut("a").unwrap();
+    listing.error = None;
+    listing.models.clear();
+    assert!(snapshot.available_ids(account).is_empty());
+    assert!(snapshot.check_available(account, "listed").is_err());
+}
+
 #[tokio::test]
 async fn opencode_offerings_use_separate_catalogues_without_claiming_access_or_choosing_models() {
     let profiles = support::configured_providers(
-        "provider='zen'\n[providers.zen]\npreset='opencode'\n[providers.go]\npreset='opencode-go'",
+        "[accounts.zen]\nprovider='opencode'\n[accounts.go]\nprovider='opencode-go'",
     );
     let env = Environment::default()
         .with_variable("OPENCODE_API_KEY", "zen-key")
@@ -132,7 +203,6 @@ async fn opencode_offerings_use_separate_catalogues_without_claiming_access_or_c
         let listing = service.list_endpoint(profile, &env).await.unwrap();
         assert_eq!(listing.provenance, "native_api");
         assert_eq!(listing.scope, "connection_visible");
-        assert!(service.snapshot().native_default(profile).is_none());
         assert!(
             !service
                 .snapshot()
@@ -169,7 +239,7 @@ async fn opencode_offerings_use_separate_catalogues_without_claiming_access_or_c
 #[tokio::test]
 async fn opencode_custom_targets_do_not_send_proxy_credentials_to_official_discovery() {
     let profiles = support::configured_providers(
-        "[providers.test]\npreset='opencode-go'\nprotocols.openai-chat.base_url='https://proxy.example/v1'",
+        "[accounts.test]\nprovider='opencode-go'\nprotocols.openai-chat.base_url='https://proxy.example/v1'",
     );
     let (cache, clock) = defaults();
     let http = Arc::new(FakeHttp::new(vec![]));
@@ -212,7 +282,7 @@ impl bee::http::LoginHttp for CopilotAccount {
 #[tokio::test]
 async fn copilot_native_discovery_binds_routes_and_limits_to_the_selected_account() {
     let profile =
-        support::configured_providers("[providers.work]\npreset='github'\ncredential={env='KEY'}")
+        support::configured_providers("[accounts.work]\nprovider='github'\ncredential={env='KEY'}")
             .get("work")
             .unwrap()
             .clone();
@@ -282,7 +352,7 @@ async fn copilot_native_discovery_binds_routes_and_limits_to_the_selected_accoun
 #[tokio::test]
 async fn copilot_entitlement_rejection_clears_a_previous_private_listing() {
     let profile =
-        support::configured_providers("[providers.work]\npreset='github'\ncredential={env='KEY'}")
+        support::configured_providers("[accounts.work]\nprovider='github'\ncredential={env='KEY'}")
             .get("work")
             .unwrap()
             .clone();
@@ -306,7 +376,7 @@ async fn copilot_entitlement_rejection_clears_a_previous_private_listing() {
 #[tokio::test]
 async fn openrouter_native_pages_preserve_metadata_and_last_good_account_catalogue() {
     let profile = support::configured_providers(
-        "[providers.test]\npreset='openrouter'\ncredential={env='KEY'}",
+        "[accounts.test]\nprovider='openrouter'\ncredential={env='KEY'}",
     )
     .get("test")
     .unwrap()
@@ -334,7 +404,10 @@ async fn openrouter_native_pages_preserve_metadata_and_last_good_account_catalog
     assert_eq!(listing.scope, "user_preferences_filtered");
     assert!(listing.inference_succeeded_at.is_empty());
     let snapshot = service.snapshot();
-    assert_eq!(snapshot.native_default(&profile), Some("z-model"));
+    assert_eq!(
+        snapshot.available_ids(&profile).first().map(String::as_str),
+        Some("z-model")
+    );
     let info = snapshot.info(&profile, "z-model");
     assert_eq!(info.facts["tool_call"].value, true);
     assert_eq!(info.facts["structured_output"].value, false);
@@ -391,7 +464,7 @@ async fn provider_pagination_cannot_send_credentials_to_another_origin_or_path()
         "https://user@openrouter.ai/api/v1/models/user",
     ] {
         let profile = support::configured_providers(
-            "[providers.test]\npreset='openrouter'\ncredential={env='KEY'}",
+            "[accounts.test]\nprovider='openrouter'\ncredential={env='KEY'}",
         )
         .get("test")
         .unwrap()
@@ -680,7 +753,7 @@ async fn only_documented_npm_signals_can_hint_a_configured_protocol(
     let single = support::profile(
         "openai-chat",
         "http://local.example",
-        "catalog_provider='new-provider'\ncatalog_protocol_hints=true",
+        "catalog='new-provider'\ncatalog_protocol_hints=true",
     );
     assert_eq!(
         snapshot.resolve(&single, "known").protocol,
@@ -704,7 +777,7 @@ fn malformed_optional_limits_are_unknown_without_losing_other_model_facts() {
 #[tokio::test]
 async fn google_ai_studio_discovers_exact_models_without_public_cache_or_implicit_selection() {
     let profiles = support::configured_providers(
-        "provider='studio'\n[providers.studio]\npreset='google-aistudio'\n[providers.other]\npreset='google-aistudio'",
+        "[accounts.studio]\nprovider='google-aistudio'\n[accounts.other]\nprovider='google-aistudio'",
     );
     let profile = profiles.get("studio").unwrap();
     let (cache, clock) = defaults();
@@ -717,7 +790,6 @@ async fn google_ai_studio_discovers_exact_models_without_public_cache_or_implici
     let listing = service.list_endpoint(profile, &env).await.unwrap();
     assert_eq!(listing.models, ["gemini-a", "gemini-z"]);
     assert!(!listing.native);
-    assert!(profile.default_model().is_none());
     let snapshot = service.snapshot();
     assert!(
         snapshot
@@ -800,7 +872,7 @@ async fn chatgpt_models_keep_visible_server_order_and_names_out_of_the_public_ca
         )
         .unwrap();
     std::fs::write(store.path(),json!({"version":2,"providers":{"test":{"secret":"account-access-secret","expires_at":bee::auth::unix_now()+3600,"oauth":{"issuer":"https://auth.openai.com","client_id":"issued-client","subject":"account","refresh_token":"refresh-secret","id_token":"id-secret","scopes":["chatgpt.tokens.use.direct"]}}}}).to_string()).unwrap();
-    let profile = support::configured_providers("[providers.test]\npreset='chatgpt'")
+    let profile = support::configured_providers("[accounts.test]\nprovider='chatgpt'")
         .get("test")
         .unwrap()
         .clone();
@@ -862,7 +934,7 @@ async fn failed_renewal_retains_only_the_same_stored_accounts_catalogue() {
             .unwrap();
         let mut document = json!({"version":2,"providers":{"test":{"secret":"access-secret","expires_at":bee::auth::unix_now()+3600,"oauth":{"issuer":"https://auth.openai.com","client_id":"client","subject":"first-account","refresh_token":"refresh-secret","id_token":"id-secret","scopes":["chatgpt.tokens.use.direct"]}}}});
         std::fs::write(store.path(), document.to_string()).unwrap();
-        let profile = support::configured_providers("[providers.test]\npreset='chatgpt'")
+        let profile = support::configured_providers("[accounts.test]\nprovider='chatgpt'")
             .get("test")
             .unwrap()
             .clone();
@@ -884,7 +956,7 @@ async fn failed_renewal_retains_only_the_same_stored_accounts_catalogue() {
             snapshot.endpoints["test"].display_names.is_empty(),
             replacement
         );
-        assert_eq!(snapshot.native_default(&profile).is_none(), replacement);
+        assert_eq!(snapshot.available_ids(&profile).is_empty(), replacement);
     }
 }
 
@@ -909,7 +981,7 @@ fn account_display_names_override_public_labels_but_not_explicit_configuration()
     assert_eq!(info.facts["display_name"].value, "Account label");
     assert_eq!(info.facts["display_name"].source, "endpoint");
     assert_eq!(info.facts["display_name"].fetched_at, Some(123));
-    let explicit = support::configured_providers("[providers.test]\nprotocols={openai-chat={}}\ncatalog_provider='new-provider'\nmodel_metadata={known={display_name='Configured label'}}").get("test").unwrap().clone();
+    let explicit = support::configured_providers("[accounts.test]\nprovider='custom'\nprotocols={openai-chat={base_url='https://example.test/v1'}}\ncatalog='new-provider'\nmodel_metadata={known={display_name='Configured label'}}").get("test").unwrap().clone();
     assert_eq!(
         snapshot.info(&explicit, "known").facts["display_name"].value,
         "Configured label"
@@ -929,13 +1001,55 @@ async fn endpoint_model_ids_do_not_enter_another_profiles_suggestions_or_the_pub
         .await
         .unwrap();
     let second = support::configured_providers(
-        "[providers.other]\nprotocols={openai-chat={base_url='http://same.example/v1'}}",
+        "[accounts.other]\nprovider='custom'\nprotocols={openai-chat={base_url='http://same.example/v1'}}",
     )
     .get("other")
     .unwrap()
     .clone();
     assert!(service.snapshot().suggestions(&second, None).is_empty());
     assert!(cache.bytes.lock().unwrap().is_none());
+}
+
+#[tokio::test]
+async fn an_account_projection_never_carries_other_accounts_private_listings() {
+    let accounts = support::configured_providers(
+        "[accounts.a]\nprovider='custom'\ndiscovery=true\nprotocols.openai-chat.base_url='https://a.example/v1'\n[accounts.b]\nprovider='custom'\ndiscovery=true\nprotocols.openai-chat.base_url='https://b.example/v1'",
+    );
+    let (cache, clock) = defaults();
+    let service = service(
+        Settings::default(),
+        Arc::new(FakeHttp::new(vec![
+            Ok(br#"{"data":[{"id":"a-private"}]}"#.to_vec()),
+            Ok(br#"{"data":[{"id":"b-private"}]}"#.to_vec()),
+        ])),
+        cache,
+        clock,
+    );
+    let a = accounts.get("a").unwrap();
+    let b = accounts.get("b").unwrap();
+    service
+        .list_endpoint(a, &Environment::default())
+        .await
+        .unwrap();
+    service
+        .list_endpoint(b, &Environment::default())
+        .await
+        .unwrap();
+    let projected = service.account_snapshot(a, None);
+    assert_eq!(projected.endpoints.len(), 1);
+    assert_eq!(projected.available_ids(a), ["a-private"]);
+    assert!(projected.available_ids(b).is_empty());
+    let replaced = bee::auth::Credential::new(bee::auth::Secret::new("replacement"));
+    assert!(
+        service
+            .account_snapshot(a, Some(&replaced))
+            .endpoints
+            .is_empty()
+    );
+    assert_eq!(
+        service.account_snapshot(b, None).available_ids(b),
+        ["b-private"]
+    );
 }
 
 #[tokio::test]
@@ -1000,7 +1114,7 @@ fn file_cache_publication_is_complete_and_missing_cache_is_ordinary() {
 #[tokio::test]
 async fn maximum_endpoint_listings_project_without_quadratic_membership_scans() {
     let projection = tokio::task::spawn_blocking(|| {
-        let profile = support::profile("openai-chat", "http://local.example", "");
+        let profile = support::configured_providers("[accounts.test]\nprovider='custom'\ndiscovery=true\nprotocols.openai-chat.base_url='http://local.example'").get("test").unwrap().clone();
         let mut snapshot = models::Snapshot::default();
         snapshot.endpoints.insert(
             profile.name().to_owned(),
@@ -1015,8 +1129,8 @@ async fn maximum_endpoint_listings_project_without_quadratic_membership_scans() 
             },
         );
         let infos = snapshot.suggestions(&profile, Some("selected/custom"));
-        assert_eq!(infos.len(), 100_002);
-        assert_eq!(infos[1].id, "selected/custom");
+        assert_eq!(infos.len(), 100_000);
+        assert_eq!(infos[0].id, "account/model-000000");
         assert_eq!(
             infos
                 .iter()
@@ -1110,8 +1224,8 @@ fn catalog_settings_validate_types_and_merge_independently() {
     let project = bee::config::project_config_path(root.path());
     std::fs::create_dir_all(global.parent().unwrap()).unwrap();
     std::fs::create_dir_all(project.parent().unwrap()).unwrap();
-    std::fs::write(&global, "[catalog]\nrefresh=false\nrefresh_interval_secs=30\n[providers.test]\npreset='openai'\nmetadata={tool_call=true}\nmodel_metadata={known={output_limit=300}}\n").unwrap();
-    std::fs::write(&project, "[catalog]\nenabled=true\n[providers.test]\nmodel_metadata={known={tool_call=false},other={structured_output=true}}\n").unwrap();
+    std::fs::write(&global, "[catalog]\nrefresh=false\nrefresh_interval_secs=30\n[accounts.test]\nprovider='openai'\nmetadata={tool_call=true}\nmodel_metadata={known={output_limit=300}}\n").unwrap();
+    std::fs::write(&project, "[catalog]\nenabled=true\n[accounts.test]\nmodel_metadata={known={tool_call=false},other={structured_output=true}}\n").unwrap();
     let config = Config::load(
         &Environment::new(Some(root.path().join("xdg")), None, None),
         root.path(),
@@ -1121,9 +1235,9 @@ fn catalog_settings_validate_types_and_merge_independently() {
     assert!(settings.enabled);
     assert!(!settings.refresh);
     assert_eq!(settings.refresh_interval, Duration::from_secs(30));
-    let providers = bee::provider::Providers::from_config(&config).unwrap();
+    let providers = bee::account::Accounts::from_config(&config).unwrap();
     let profile = providers.get("test").unwrap();
-    assert_eq!(profile.catalog_provider(), Some("openai"));
+    assert_eq!(profile.catalog(), Some("openai"));
     assert_eq!(
         profile.model_metadata("known").unwrap().tool_call,
         Some(false)
@@ -1138,12 +1252,12 @@ fn catalog_settings_validate_types_and_merge_independently() {
     );
     std::fs::write(
         &project,
-        "[providers.test]\nmodel_metadata={'sk-private-value'={tool_call='wrong'}}\n",
+        "[accounts.test]\nprovider='custom'\nmodel_metadata={'sk-private-value'={tool_call='wrong'}}\n",
     )
     .unwrap();
     std::fs::write(
         &global,
-        "[providers.test]\nmodel_metadata={'sk-private-value'={tool_call=true}}\n",
+        "[accounts.test]\nprovider='custom'\nmodel_metadata={'sk-private-value'={tool_call=true}}\n",
     )
     .unwrap();
     let error = Config::load(
@@ -1251,7 +1365,7 @@ async fn concurrent_native_refreshes_share_only_the_same_accounts_request() {
         let (cache, clock) = defaults();
         let service = service(Settings::default(), http.clone(), cache, clock);
         let profile = support::configured_providers(
-            "[providers.test]\npreset='openrouter'\ncredential={env='KEY'}",
+            "[accounts.test]\nprovider='openrouter'\ncredential={env='KEY'}",
         )
         .get("test")
         .unwrap()
@@ -1343,7 +1457,7 @@ async fn background_options_preserve_the_current_custom_id_and_never_update_clos
     );
     service.refresh().await.unwrap();
     let profiles = support::configured_providers(
-        "[providers.test]\nmodel='known'\ncatalog_provider='new-provider'\nprotocols={openai-chat={}}\n",
+        "model='test/known'\n[accounts.test]\nprovider='custom'\nmodels=['known','custom/private']\ncatalog='new-provider'\nprotocols={openai-chat={base_url='https://example.test/v1'}}\n",
     );
     let runtime = bee::acp::Runtime::new(
         bee::agent::Limits::default(),
@@ -1383,7 +1497,7 @@ async fn background_options_preserve_the_current_custom_id_and_never_update_clos
                     .send_request(v2::SetSessionConfigOptionRequest::new(
                         open.clone(),
                         "model",
-                        "custom/private",
+                        "test/custom/private",
                     ))
                     .block_task()
                     .await?;
@@ -1411,7 +1525,7 @@ async fn background_options_preserve_the_current_custom_id_and_never_update_clos
                         let v2::SessionConfigKind::Select(select) = &model.kind else {
                             panic!("model selector")
                         };
-                        assert_eq!(select.current_value.to_string(), "custom/private");
+                        assert_eq!(select.current_value.to_string(), "test/custom/private");
                         assert!(
                             serde_json::to_string(&options)
                                 .unwrap()
@@ -1443,11 +1557,11 @@ async fn catalog_models_never_become_a_profiles_implicit_default() {
     );
     service.refresh().await.unwrap();
     let profiles = support::configured_providers(
-        "[providers.test]\ncatalog_provider='new-provider'\nprotocols={openai-chat={}}\n",
+        "[accounts.test]\nprovider='custom'\ncatalog='new-provider'\nprotocols={openai-chat={base_url='https://example.test/v1'}}\n",
     );
-    assert!(profiles.get("test").unwrap().default_model().is_none());
+    assert!(profiles.configured_model().is_none());
     assert!(
-        !service
+        service
             .snapshot()
             .suggestions(profiles.get("test").unwrap(), None)
             .is_empty()
@@ -1477,7 +1591,7 @@ async fn catalog_models_never_become_a_profiles_implicit_default() {
                     session
                         .config_options
                         .iter()
-                        .all(|option| option.config_id.to_string() != "model")
+                        .any(|option| option.config_id.to_string() == "model")
                 );
                 Ok(())
             },
@@ -1489,12 +1603,12 @@ async fn catalog_models_never_become_a_profiles_implicit_default() {
 }
 
 #[tokio::test]
-async fn native_initial_selection_is_sticky_and_survives_a_durable_restart() {
+async fn endpoint_order_never_creates_a_selection_including_after_durable_restart() {
     let root = tempfile::tempdir().unwrap();
     let env = Environment::default().with_variable("KEY", "fixture-key");
     // Explicit refreshes make the ordering change deterministic without a background request.
     let profiles = support::configured_providers(
-        "[providers.test]\npreset='openrouter'\ncredential={env='KEY'}\ndiscover_models=false",
+        "[accounts.test]\nprovider='openrouter'\ncredential={env='KEY'}\ndiscovery=false",
     );
     let (cache, clock) = defaults();
     let service = service(
@@ -1560,14 +1674,14 @@ async fn native_initial_selection_is_sticky_and_survives_a_durable_restart() {
                     let v2::SessionConfigKind::Select(select) = &selected.kind else {
                         panic!("model selector");
                     };
-                    assert_eq!(select.current_value.to_string(), "z-native");
+                    assert_eq!(select.current_value.to_string(), "");
                     if !restart {
                         service
                             .list_endpoint(profiles_for_request.get("test").unwrap(), &env)
                             .await
                             .unwrap();
                     }
-                    // Resume after refresh/restart must retain the selected opaque ID even when absent.
+                    // A refresh and restart must keep an unselected session unselected.
                     connection
                         .send_request(v2::CloseSessionRequest::new(id))
                         .block_task()
@@ -1592,9 +1706,9 @@ fn metadata_validation_and_merge_conflicts_never_echo_model_key_values() {
         "{output_limit=0}",
         "{secret='value'}",
     ] {
-        std::fs::write(&file, format!("[providers.test]\nprotocols={{openai-chat={{}}}}\nmodel_metadata={{'sk-private-value'={metadata}}}")).unwrap();
+        std::fs::write(&file, format!("[accounts.test]\nprovider='custom'\nprotocols={{openai-chat={{base_url='https://example.test/v1'}}}}\nmodel_metadata={{'sk-private-value'={metadata}}}")).unwrap();
         let config = Config::load(&Environment::default(), root.path()).unwrap();
-        let error = bee::provider::Providers::from_config(&config).unwrap_err();
+        let error = bee::account::Accounts::from_config(&config).unwrap_err();
         assert!(!format!("{error:?} {error}").contains("sk-private-value"));
         assert!(!format!("{error:?} {error}").contains("secret"));
     }
@@ -1640,7 +1754,7 @@ async fn pending_discovery_does_not_block_inference_and_disconnect_drops_its_req
     let profiles = support::providers(
         "openai-chat",
         &server.url,
-        "catalog_provider='new-provider'\ncatalog_protocol_hints=true\ncatalog_context_window=true",
+        "catalog='new-provider'\ncatalog_protocol_hints=true\ncatalog_context_window=true",
     );
     let runtime = bee::acp::Runtime::new(
         bee::agent::Limits::default(),
@@ -1732,9 +1846,11 @@ async fn refreshed_protocol_hints_change_only_the_next_turn_and_make_native_hist
         ),
     ]);
     let profiles = support::configured_providers(&format!(
-        r#"[providers.test]
-        model="known"
-        catalog_provider="new-provider"
+        r#"model="test/known"
+        [accounts.test]
+        provider="custom"
+        models=["known"]
+        catalog="new-provider"
         catalog_protocol_hints=true
         catalog_context_window=true
         prefer=["openai-chat"]
@@ -1849,9 +1965,11 @@ async fn refresh_during_a_tool_loop_cannot_change_its_route_budget_or_output_res
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("file.txt"), "tool result").unwrap();
     let profiles = support::configured_providers(&format!(
-        r#"[providers.test]
-        model="known"
-        catalog_provider="new-provider"
+        r#"model="test/known"
+        [accounts.test]
+        provider="custom"
+        models=["known"]
+        catalog="new-provider"
         catalog_protocol_hints=true
         catalog_context_window=true
         max_output_tokens=123
@@ -1995,9 +2113,11 @@ async fn unsuccessful_protocol_changes_leave_committed_native_history_and_route_
         ),
     ]);
     let profiles = support::configured_providers(&format!(
-        r#"[providers.test]
-        model="known"
-        catalog_provider="new-provider"
+        r#"model="test/known"
+        [accounts.test]
+        provider="custom"
+        models=["known"]
+        catalog="new-provider"
         catalog_protocol_hints=true
         prefer=["openai-responses"]
         protocols={{openai-responses={{base_url="{url}"}},anthropic-messages={{base_url="{url}"}}}}

@@ -8,8 +8,8 @@ use std::net::TcpListener;
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
+use bee::account::{Account as Profile, Accounts as Providers};
 use bee::config::{Config, Environment, project_config_path};
-use bee::provider::{Profile, Providers};
 use serde_json::{Value, json};
 
 /// Select native Git Bash explicitly on Windows, where PATH may prefer WSL.
@@ -229,8 +229,24 @@ impl Server {
 }
 
 pub fn providers(protocol: &str, url: &str, settings: &str) -> Providers {
+    let fields: toml::Table = settings.parse().unwrap();
+    let provider = if fields.contains_key("provider") {
+        ""
+    } else {
+        "provider='custom'\n"
+    };
+    let models = if fields.contains_key("models") {
+        ""
+    } else {
+        "models=['private-model']\n"
+    };
+    let discovery = if fields.contains_key("discovery") {
+        ""
+    } else {
+        "discovery=false\n"
+    };
     configured_providers(&format!(
-        "[providers.test]\nmodel = 'private-model'\n{settings}\n[providers.test.protocols.{protocol}]\nbase_url = '{url}'\n"
+        "model='test/private-model'\n[accounts.test]\n{provider}{models}{discovery}{settings}\n[accounts.test.protocols.{protocol}]\nbase_url = '{url}'\n"
     ))
 }
 

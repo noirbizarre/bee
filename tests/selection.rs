@@ -13,23 +13,26 @@ use std::time::Duration;
 
 use agent_client_protocol::schema::{ProtocolVersion, v2};
 use agent_client_protocol::{Agent, Client, Error, ErrorCode, V2ConnectionTo};
+use bee::account::Accounts as Providers;
 use bee::config::{Config, Environment};
-use bee::provider::Providers;
 
 // Every wait is bounded: a hung agent must fail the test, not stall CI.
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 const TWO_PROFILES: &str = r#"
-provider = "work"
+model = "work/corp/ft-2026"
 
-[providers.work]
+[accounts.work]
+provider = "custom"
+discovery = false
 protocols = { openai-chat = { base_url = "https://gateway.corp.example/v1" } }
-model = "corp/ft-2026"
-models = ["corp/base"]
+models = ["corp/ft-2026", "corp/base"]
 
-[providers.local]
+[accounts.local]
+provider = "custom"
+discovery = false
 protocols = { openai-chat = { base_url = "http://localhost:11434/v1" } }
-model = "llama3:8b"
+models = ["llama3:8b"]
 "#;
 
 fn providers(toml: &str) -> Providers {
@@ -119,13 +122,16 @@ fn invalid_params(error: &Error) -> bool {
 
 #[test]
 fn session_settings_debug_never_discloses_configured_display_names() {
-    let mut sessions = bee::session::Sessions::with_providers(providers(
-        "[providers.test]\npreset='openai'\ndisplay_name='label-secret-sentinel'",
+    let mut sessions = bee::session::Sessions::with_accounts(providers(
+        "[accounts.test]\nprovider='openai'\ndisplay_name='label-secret-sentinel'",
     ));
     let id = sessions.create(cwd());
     let settings = sessions.settings(&id).unwrap().unwrap();
+    assert_eq!(settings.account, None);
+    assert_eq!(settings.model, None);
+    assert_eq!(settings.accounts, ["test"]);
     assert_eq!(
-        settings.provider_display_names["test"],
+        settings.account_display_names["test"],
         "label-secret-sentinel"
     );
     assert!(!format!("{settings:?}").contains("label-secret-sentinel"));
@@ -133,13 +139,13 @@ fn session_settings_debug_never_discloses_configured_display_names() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn provider_labels_disambiguate_connections_while_selection_and_resume_keep_ids() {
-    let config = "provider='personal'\n[providers.personal]\npreset='google-aistudio'\nmodel='gemini-test'\n[providers.work]\npreset='google-aistudio'\nmodel='gemini-test'\n[providers.local]\nprotocols={openai-chat={}}";
+    let config = "model='personal/gemini-test'\n[accounts.personal]\nprovider='google-aistudio'\ndiscovery=false\nmodels=['gemini-test']\n[accounts.work]\nprovider='google-aistudio'\ndiscovery=false\nmodels=['gemini-test']\n[accounts.local]\nprovider='custom'\nprotocols={openai-chat={base_url='http://localhost:11434/v1'}}";
     run(providers(config), async |connection| {
         let session = new_session(&connection).await?;
         let labels = |options: &[v2::SessionConfigOption]| {
             let option = options
                 .iter()
-                .find(|o| o.config_id.to_string() == "provider")
+                .find(|o| o.config_id.to_string() == "model")
                 .unwrap();
             let v2::SessionConfigKind::Select(select) = &option.kind else {
                 panic!("selector")
@@ -153,12 +159,20 @@ async fn provider_labels_disambiguate_connections_while_selection_and_resume_kee
                 .collect::<Vec<_>>()
         };
         let expected = vec![
-            ("local".into(), "local".into()),
-            ("personal".into(), "Google AI Studio (personal)".into()),
-            ("work".into(), "Google AI Studio (work)".into()),
+            (
+                "personal/gemini-test".into(),
+                "Google AI Studio / gemini-test (personal/gemini-test)".into(),
+            ),
+            (
+                "work/gemini-test".into(),
+                "Google AI Studio / gemini-test (work/gemini-test)".into(),
+            ),
         ];
         assert_eq!(labels(&session.config_options), expected);
-        assert_eq!(selector(&session.config_options, "provider").0, "personal");
+        assert_eq!(
+            selector(&session.config_options, "model").0,
+            "personal/gemini-test"
+        );
         assert!(invalid_params(
             &set(
                 &connection,
@@ -169,8 +183,14 @@ async fn provider_labels_disambiguate_connections_while_selection_and_resume_kee
             .await
             .unwrap_err()
         ));
-        let options = set(&connection, &session.session_id, "provider", "work").await?;
-        assert_eq!(selector(&options, "provider").0, "work");
+        let options = set(
+            &connection,
+            &session.session_id,
+            "model",
+            "work/gemini-test",
+        )
+        .await?;
+        assert_eq!(selector(&options, "model").0, "work/gemini-test");
         assert_eq!(labels(&options), expected);
         connection
             .send_request(v2::CloseSessionRequest::new(session.session_id.clone()))
@@ -181,7 +201,10 @@ async fn provider_labels_disambiguate_connections_while_selection_and_resume_kee
             .block_task()
             .await?;
         assert_eq!(labels(&resumed.config_options), expected);
-        assert_eq!(selector(&resumed.config_options, "provider").0, "work");
+        assert_eq!(
+            selector(&resumed.config_options, "model").0,
+            "work/gemini-test"
+        );
         Ok(())
     })
     .await;
@@ -215,7 +238,10 @@ async fn only_committed_successful_inference_changes_recency_across_new_sessions
         support::Response::json(support::chat_text("first answer")),
         second,
     ]);
-    let profiles = support::providers("openai-chat", &server.url, "");
+    let profiles = providers(&format!(
+        "model='test/private-model'\n[accounts.test]\nprovider='custom'\ndiscovery=false\nmodels=['private-model','recent','candidate']\nprotocols.openai-chat.base_url='{}'",
+        server.url
+    ));
     for phase in 0..3 {
         let history = bee::history::Store::open(root.path().join("state")).unwrap();
         let preferences = bee::selection::Store::open(&history).unwrap();
@@ -249,16 +275,22 @@ async fn only_committed_successful_inference_changes_recency_across_new_sessions
                         .block_task()
                         .await?;
                     let expected = if phase == 0 {
-                        "private-model"
+                        "test/private-model"
                     } else if phase == 2 && outcome == "max_tokens" {
-                        "candidate"
+                        "test/candidate"
                     } else {
-                        "recent"
+                        "test/recent"
                     };
                     assert_eq!(selector(&session.config_options, "model").0, expected);
                     if phase < 2 {
                         let model = if phase == 0 { "recent" } else { "candidate" };
-                        set(&connection, &session.session_id, "model", model).await?;
+                        set(
+                            &connection,
+                            &session.session_id,
+                            "model",
+                            &format!("test/{model}"),
+                        )
+                        .await?;
                         // A selector change alone must not seed the next session.
                         let sibling = connection
                             .send_request(v2::NewSessionRequest::new(cwd.clone()))
@@ -356,7 +388,10 @@ async fn only_committed_successful_inference_changes_recency_across_new_sessions
                                 .send_request(v2::NewSessionRequest::new(cwd.clone()))
                                 .block_task()
                                 .await?;
-                            assert_eq!(selector(&fresh.config_options, "model").0, "candidate");
+                            assert_eq!(
+                                selector(&fresh.config_options, "model").0,
+                                "test/candidate"
+                            );
                             connection
                                 .send_request(v2::CloseSessionRequest::new(fresh.session_id))
                                 .block_task()
@@ -398,17 +433,16 @@ async fn only_committed_successful_inference_changes_recency_across_new_sessions
 #[tokio::test(flavor = "current_thread")]
 async fn an_active_profile_exposes_only_its_connections_and_model_preferences() {
     let config = format!(
-        "profile='work-context'\n{TWO_PROFILES}\n[profiles.work-context]\nconnections=['work']\n[profiles.work-context.models.work]\nmodel='profile-model'\nmodels=[]\n"
+        "profile='work-context'\n{TWO_PROFILES}\n[profiles.work-context]\naccounts=['work']\nmodel='work/corp/base'\n"
     );
     run(providers(&config), async |connection| {
         let session = new_session(&connection).await?;
         assert_eq!(
-            selector(&session.config_options, "provider"),
-            ("work".into(), vec!["work".into()])
-        );
-        assert_eq!(
             selector(&session.config_options, "model"),
-            ("profile-model".into(), vec!["profile-model".into()])
+            (
+                "work/corp/base".into(),
+                vec!["work/corp/ft-2026".into(), "work/corp/base".into()]
+            )
         );
         assert!(invalid_params(
             &set(&connection, &session.session_id, "provider", "local")
@@ -438,18 +472,16 @@ async fn a_new_session_is_offered_the_configured_defaults() {
     run(providers(TWO_PROFILES), async |connection| {
         let options = new_session(&connection).await?.config_options;
 
-        assert_eq!(
-            selector(&options, "provider"),
-            (
-                "work".to_owned(),
-                vec!["local".to_owned(), "work".to_owned()]
-            )
-        );
+        assert_eq!(options.len(), 1);
         assert_eq!(
             selector(&options, "model"),
             (
-                "corp/ft-2026".to_owned(),
-                vec!["corp/ft-2026".to_owned(), "corp/base".to_owned()]
+                "work/corp/ft-2026".to_owned(),
+                vec![
+                    "local/llama3:8b".to_owned(),
+                    "work/corp/ft-2026".to_owned(),
+                    "work/corp/base".to_owned()
+                ]
             )
         );
         let model = options
@@ -463,30 +495,167 @@ async fn a_new_session_is_offered_the_configured_defaults() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn a_sole_available_model_does_not_become_an_implicit_selection() {
+    run(providers("[accounts.only]\nprovider='custom'\ndiscovery=false\nmodels=['vendor/model']\nprotocols.openai-chat.base_url='http://localhost:11434/v1'"), async |connection| {
+        let session = new_session(&connection).await?;
+        assert_eq!(selector(&session.config_options, "model"), (String::new(), vec![String::new(), "only/vendor/model".into()]));
+        assert!(invalid_params(&set(&connection, &session.session_id, "model", "").await.unwrap_err()));
+        let options = set(&connection, &session.session_id, "model", "only/vendor/model").await?;
+        assert_eq!(selector(&options, "model"), ("only/vendor/model".into(), vec!["only/vendor/model".into()]));
+        Ok(())
+    }).await;
+}
+
+#[tokio::test]
+async fn refreshed_account_exclusion_gates_both_explicit_selection_and_an_already_selected_prompt()
+{
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    struct Listing(Arc<AtomicBool>);
+    impl bee::models::Http for Listing {
+        fn get<'a>(
+            &'a self,
+            _: &'a str,
+            _: reqwest::header::HeaderMap,
+            _: usize,
+        ) -> futures::future::BoxFuture<'a, Result<Vec<u8>, bee::models::Error>> {
+            let visible = self.0.load(Ordering::SeqCst);
+            Box::pin(async move {
+                Ok(if visible {
+                    br#"{"data":[{"id":"vendor/model"}]}"#.to_vec()
+                } else {
+                    br#"{"data":[]}"#.to_vec()
+                })
+            })
+        }
+    }
+    let endpoint =
+        support::Server::start(vec![support::Response::json(support::chat_text("done"))]);
+    let accounts = providers(&format!(
+        "[accounts.a]\nprovider='custom'\ndiscovery=true\nprotocols.openai-chat.base_url='{}'",
+        endpoint.url
+    ));
+    let visible = Arc::new(AtomicBool::new(true));
+    let discovery = Arc::new(bee::models::Service::new(
+        bee::models::Settings {
+            enabled: false,
+            ..Default::default()
+        },
+        Arc::new(Listing(visible.clone())),
+        Arc::new(bee::models::FileCache(None)),
+        Arc::new(bee::models::SystemClock),
+    ));
+    let account = accounts.get("a").unwrap().clone();
+    discovery
+        .list_endpoint(&account, &Environment::default())
+        .await
+        .unwrap();
+    let runtime = bee::acp::Runtime::new(Default::default(), Default::default())
+        .with_discovery(discovery.clone());
+    let (tx, mut updates) = tokio::sync::mpsc::unbounded_channel();
+    let client = Client.v2().on_receive_notification(
+        async move |update: v2::UpdateSessionNotification, _| {
+            tx.send(update).map_err(Error::into_internal_error)
+        },
+        agent_client_protocol::on_receive_notification!(),
+    );
+    tokio::time::timeout(
+        TIMEOUT,
+        client.connect_with(
+            bee::acp::agent_with_runtime(accounts, runtime),
+            async move |connection| {
+                connection
+                    .send_request(v2::InitializeRequest::new(
+                        ProtocolVersion::V2,
+                        v2::Implementation::new("test", "0"),
+                    ))
+                    .block_task()
+                    .await?;
+                let session = new_session(&connection).await?;
+                set(&connection, &session.session_id, "model", "a/vendor/model").await?;
+                connection
+                    .send_request(v2::PromptRequest::new(
+                        session.session_id.clone(),
+                        vec!["hello".into()],
+                    ))
+                    .block_task()
+                    .await?;
+                loop {
+                    if let v2::SessionUpdate::StateUpdate(v2::StateUpdate::Idle(idle)) =
+                        updates.recv().await.unwrap().update
+                    {
+                        assert_eq!(idle.stop_reason, Some(v2::StopReason::EndTurn));
+                        break;
+                    }
+                }
+                assert_eq!(endpoint.request_async().await.body["model"], "vendor/model");
+                visible.store(false, Ordering::SeqCst);
+                discovery
+                    .list_endpoint(&account, &Environment::default())
+                    .await
+                    .unwrap();
+                assert!(invalid_params(
+                    &set(&connection, &session.session_id, "model", "a/vendor/model")
+                        .await
+                        .unwrap_err()
+                ));
+                connection
+                    .send_request(v2::PromptRequest::new(
+                        session.session_id.clone(),
+                        vec!["try again".into()],
+                    ))
+                    .block_task()
+                    .await?;
+                loop {
+                    if let v2::SessionUpdate::StateUpdate(v2::StateUpdate::Idle(idle)) =
+                        updates.recv().await.unwrap().update
+                    {
+                        assert!(matches!(idle.stop_reason, Some(v2::StopReason::Error(_))));
+                        break;
+                    }
+                }
+                Ok::<_, Error>(())
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn the_client_can_choose_another_provider_for_its_session() {
     run(providers(TWO_PROFILES), async |connection| {
         let session = new_session(&connection).await?.session_id;
 
-        let options = set(&connection, &session, "provider", "local").await?;
+        let options = set(&connection, &session, "model", "local/llama3:8b").await?;
 
-        assert_eq!(selector(&options, "provider").0, "local");
         // The model follows the provider: ids belong to one.
-        assert_eq!(selector(&options, "model").0, "llama3:8b");
+        assert_eq!(selector(&options, "model").0, "local/llama3:8b");
         Ok(())
     })
     .await;
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn a_model_absent_from_every_list_can_be_selected_and_is_then_offered() {
+async fn a_model_absent_from_account_availability_is_rejected_without_changing_selection() {
     run(providers(TWO_PROFILES), async |connection| {
         let session = new_session(&connection).await?.session_id;
 
-        let options = set(&connection, &session, "model", "me/private-finetune:v7").await?;
-
-        let (current, offered) = selector(&options, "model");
-        assert_eq!(current, "me/private-finetune:v7");
-        assert!(offered.contains(&"me/private-finetune:v7".to_owned()));
+        assert!(invalid_params(
+            &set(
+                &connection,
+                &session,
+                "model",
+                "work/me/private-finetune:v7"
+            )
+            .await
+            .unwrap_err()
+        ));
+        let options = set(&connection, &session, "model", "work/corp/base").await?;
+        assert_eq!(selector(&options, "model").0, "work/corp/base");
         Ok(())
     })
     .await;
@@ -498,10 +667,10 @@ async fn a_selection_is_per_session() {
         let first = new_session(&connection).await?.session_id;
         let second = new_session(&connection).await?.session_id;
 
-        set(&connection, &first, "provider", "local").await?;
+        set(&connection, &first, "model", "local/llama3:8b").await?;
 
-        let untouched = set(&connection, &second, "model", "corp/base").await?;
-        assert_eq!(selector(&untouched, "provider").0, "work");
+        let untouched = set(&connection, &second, "model", "work/corp/base").await?;
+        assert_eq!(selector(&untouched, "model").0, "work/corp/base");
         Ok(())
     })
     .await;
@@ -511,7 +680,7 @@ async fn a_selection_is_per_session() {
 async fn a_resumed_session_reports_what_the_client_chose() {
     run(providers(TWO_PROFILES), async |connection| {
         let session = new_session(&connection).await?.session_id;
-        set(&connection, &session, "provider", "local").await?;
+        set(&connection, &session, "model", "local/llama3:8b").await?;
         connection
             .send_request(v2::CloseSessionRequest::new(session.clone()))
             .block_task()
@@ -522,7 +691,10 @@ async fn a_resumed_session_reports_what_the_client_chose() {
             .block_task()
             .await?;
 
-        assert_eq!(selector(&resumed.config_options, "provider").0, "local");
+        assert_eq!(
+            selector(&resumed.config_options, "model").0,
+            "local/llama3:8b"
+        );
         Ok(())
     })
     .await;
@@ -538,8 +710,8 @@ async fn a_bad_selection_is_invalid_params() {
             assert!(invalid_params(&error), "{option}={value}: {error:?}");
         }
         // The refusals left the session as it was.
-        let options = set(&connection, &session, "model", "corp/base").await?;
-        assert_eq!(selector(&options, "provider").0, "work");
+        let options = set(&connection, &session, "model", "work/corp/base").await?;
+        assert_eq!(selector(&options, "model").0, "work/corp/base");
         Ok(())
     })
     .await;
@@ -575,7 +747,7 @@ async fn the_selection_cannot_change_while_a_turn_runs() {
             .block_task()
             .await?;
 
-        let error = set(&connection, &session, "model", "corp/base")
+        let error = set(&connection, &session, "model", "work/corp/base")
             .await
             .unwrap_err();
 
@@ -583,4 +755,95 @@ async fn the_selection_cannot_change_while_a_turn_runs() {
         Ok(())
     })
     .await;
+}
+
+#[rstest::rstest]
+#[case::cancel(false)]
+#[case::close(true)]
+#[tokio::test]
+async fn pending_selection_releases_the_registry_and_cancel_or_close_revokes_its_gate(
+    #[case] close: bool,
+) {
+    use std::sync::Arc;
+    struct Pending;
+    impl bee::models::Http for Pending {
+        fn get<'a>(
+            &'a self,
+            _: &'a str,
+            _: reqwest::header::HeaderMap,
+            _: usize,
+        ) -> futures::future::BoxFuture<'a, Result<Vec<u8>, bee::models::Error>> {
+            Box::pin(future::pending())
+        }
+    }
+    let accounts = providers(
+        "[accounts.pending]\nprovider='custom'\ndiscovery=true\nprotocols.openai-chat.base_url='https://pending.example/v1'\n[accounts.ready]\nprovider='custom'\nmodels=['vendor/model']\nprotocols.openai-chat.base_url='https://ready.example/v1'",
+    );
+    let discovery = Arc::new(bee::models::Service::new(
+        bee::models::Settings {
+            enabled: false,
+            ..Default::default()
+        },
+        Arc::new(Pending),
+        Arc::new(bee::models::FileCache(None)),
+        Arc::new(bee::models::SystemClock),
+    ));
+    let runtime =
+        bee::acp::Runtime::new(Default::default(), Default::default()).with_discovery(discovery);
+    tokio::time::timeout(
+        TIMEOUT,
+        Client.v2().connect_with(
+            bee::acp::agent_with_runtime(accounts, runtime),
+            async move |connection| {
+                connection
+                    .send_request(v2::InitializeRequest::new(
+                        ProtocolVersion::V2,
+                        v2::Implementation::new("test", "0"),
+                    ))
+                    .block_task()
+                    .await?;
+                let pending = new_session(&connection).await?.session_id;
+                let independent = new_session(&connection).await?.session_id;
+                let waiting =
+                    async { set(&connection, &pending, "model", "pending/vendor/model").await };
+                let revoke = async {
+                    // Ordered requests prove the pending operation owns its gate, without relying on sleeps.
+                    let busy = set(&connection, &pending, "model", "ready/vendor/model")
+                        .await
+                        .unwrap_err();
+                    assert_eq!(busy.code, ErrorCode::InvalidRequest);
+                    let options =
+                        set(&connection, &independent, "model", "ready/vendor/model").await?;
+                    assert_eq!(selector(&options, "model").0, "ready/vendor/model");
+                    if close {
+                        connection
+                            .send_request(v2::CloseSessionRequest::new(pending.clone()))
+                            .block_task()
+                            .await?;
+                    } else {
+                        connection.send_notification(v2::CancelSessionNotification::new(
+                            pending.clone(),
+                        ))?;
+                    }
+                    Ok::<_, Error>(())
+                };
+                let (cancelled, revoked) = futures::join!(waiting, revoke);
+                assert!(invalid_params(&cancelled.unwrap_err()));
+                revoked?;
+                if close {
+                    let resumed = connection
+                        .send_request(v2::ResumeSessionRequest::new(pending.clone(), cwd()))
+                        .block_task()
+                        .await?;
+                    assert_eq!(selector(&resumed.config_options, "model").0, "");
+                }
+                let options = set(&connection, &pending, "model", "ready/vendor/model").await?;
+                assert_eq!(selector(&options, "model").0, "ready/vendor/model");
+                Ok::<_, Error>(())
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
 }

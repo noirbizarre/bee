@@ -13,8 +13,9 @@ use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::account::Account as Profile;
 use crate::config::{Config, Environment};
-use crate::provider::{Profile, Protocol};
+use crate::provider::Protocol;
 
 mod native;
 pub use native::Integration;
@@ -308,7 +309,7 @@ pub struct EndpointListing {
     pub scope: &'static str,
     /// Documented facts only; absent values remain unknown.
     pub entries: BTreeMap<String, Entry>,
-    /// Only native results may supply an initial model.
+    /// Native listings preserve useful server ordering without establishing a default.
     pub native: bool,
     /// Actual successful inference observations, not lasting entitlement guarantees.
     pub inference_succeeded_at: BTreeMap<String, u64>,
@@ -444,26 +445,9 @@ pub struct ModelInfo {
 }
 
 impl Snapshot {
-    /// Native ordering may initialize a selection, but never replaces an existing one.
-    pub fn native_default(&self, profile: &Profile) -> Option<&str> {
-        // OpenCode's unranked public list includes restricted and non-text models.
-        if profile
-            .discovery()
-            .and_then(Integration::opencode_root)
-            .is_some()
-        {
-            return None;
-        }
-        self.endpoints
-            .get(profile.name())
-            .filter(|listing| listing.native)?
-            .models
-            .first()
-            .map(String::as_str)
-    }
     /// Exact profile association only; catalog absence is ordinary.
     pub fn entry(&self, profile: &Profile, model: &str) -> Option<(&Provider, &Entry)> {
-        let provider = self.providers.get(profile.catalog_provider()?)?;
+        let provider = self.providers.get(profile.catalog()?)?;
         Some((provider, provider.models.get(model)?))
     }
 
@@ -594,7 +578,7 @@ impl Snapshot {
     pub fn info(&self, profile: &Profile, model: &str) -> ModelInfo {
         let mut facts = BTreeMap::new();
         let mut sources = Vec::new();
-        if profile.suggested_models().contains(&model) {
+        if profile.models().iter().any(|id| id == model) {
             sources.push("configuration");
         }
         if self.endpoints.get(profile.name()).is_some_and(|listing| {
@@ -711,37 +695,80 @@ impl Snapshot {
         }
     }
 
-    /// Deterministic suggestions never become configured defaults.
-    pub fn suggestions(&self, profile: &Profile, selected: Option<&str>) -> Vec<ModelInfo> {
-        let mut ids: Vec<String> = profile
-            .suggested_models()
-            .into_iter()
-            .map(str::to_owned)
-            .collect();
-        // Large public catalogs must not make selector deduplication quadratic.
-        let mut seen: BTreeSet<String> = ids.iter().cloned().collect();
-        let endpoints = self.endpoints.get(profile.name());
-        let catalog = profile
-            .catalog_provider()
-            .and_then(|id| self.providers.get(id));
-        for id in selected
-            .into_iter()
-            .chain(
-                endpoints
-                    .into_iter()
-                    .flat_map(|listing| listing.models.iter().map(String::as_str)),
-            )
-            .chain(
-                catalog
-                    .into_iter()
-                    .flat_map(|provider| provider.models.keys().map(String::as_str)),
-            )
-        {
-            if seen.insert(id.to_owned()) {
-                ids.push(id.to_owned());
-            }
+    /// One membership policy for listing, explicit selection, recency and inference.
+    pub fn available_ids(&self, account: &Profile) -> Vec<String> {
+        let declared: BTreeSet<_> = account.models().iter().map(String::as_str).collect();
+        let ids = if account.discovery() {
+            let Some(listing) = self.endpoints.get(account.name()).filter(|listing| {
+                listing.fetched_at.is_some() && listing.error != Some(Error::Unauthorized)
+            }) else {
+                return Vec::new();
+            };
+            listing
+                .models
+                .iter()
+                .filter(|id| account.model_filter().is_none() || declared.contains(id.as_str()))
+                .cloned()
+                .collect::<Vec<_>>()
+        } else {
+            account.models().to_vec()
+        };
+        let mut seen = BTreeSet::new();
+        ids.into_iter()
+            .filter(|id| seen.insert(id.clone()))
+            .collect()
+    }
+
+    /// Account discovery state is independent from whether its available set is empty.
+    pub fn availability_status(&self, account: &Profile) -> &'static str {
+        if !account.discovery() {
+            return "declared";
         }
-        ids.iter().map(|id| self.info(profile, id)).collect()
+        let Some(listing) = self.endpoints.get(account.name()) else {
+            return "pending";
+        };
+        if listing.error == Some(Error::Unauthorized) {
+            return "unauthorized";
+        }
+        if listing.fetched_at.is_none() {
+            return if listing.error.is_some() {
+                "failed"
+            } else {
+                "pending"
+            };
+        }
+        if listing.stale || listing.error.is_some() {
+            "stale"
+        } else {
+            "ready"
+        }
+    }
+
+    /// A selected or configured ID cannot expand the account's available models.
+    pub fn suggestions(&self, account: &Profile, _selected: Option<&str>) -> Vec<ModelInfo> {
+        self.available_ids(account)
+            .iter()
+            .map(|id| self.info(account, id))
+            .collect()
+    }
+
+    /// Pending/first-failed discovery is distinct from authoritative exclusion.
+    pub fn check_available(&self, account: &Profile, model: &str) -> Result<(), &'static str> {
+        if account.discovery()
+            && !self.endpoints.get(account.name()).is_some_and(|listing| {
+                listing.fetched_at.is_some() && listing.error != Some(Error::Unauthorized)
+            })
+        {
+            return Err(
+                "account model discovery is unavailable; authenticate or refresh this account before selecting a model",
+            );
+        }
+        if !self.available_ids(account).iter().any(|id| id == model) {
+            return Err(
+                "model is not available in this account's declarations or discovery filter",
+            );
+        }
+        Ok(())
     }
 }
 
@@ -858,11 +885,20 @@ impl Service {
         }
         // Keep identity comparison and epoch/state mutation atomic with account replacement.
         self.invalidate_endpoint(profile.name());
+        let mut listing = native::empty_listing(profile);
+        listing.error = Some(Error::Unauthorized);
+        listing.attempted_at = self.clock.now();
+        self.state
+            .lock()
+            .expect("model state lock")
+            .endpoints
+            .insert(profile.name().into(), listing);
+        self.notify();
         true
     }
 
-    /// Only matching account evidence may constrain an automatically remembered model.
-    pub(crate) fn account_snapshot(
+    /// Project public metadata plus only the requested account's matching private evidence.
+    pub fn account_snapshot(
         &self,
         profile: &Profile,
         credential: Option<&crate::auth::Credential>,
@@ -873,11 +909,15 @@ impl Service {
             .lock()
             .expect("endpoint identities");
         let mut snapshot = self.snapshot();
-        if identities.get(profile.name()).is_none_or(|(old, account)| {
-            old != profile || !native::same_account(account.as_ref(), credential)
-        }) {
-            snapshot.endpoints.remove(profile.name());
-        }
+        let matches = identities
+            .get(profile.name())
+            .is_some_and(|(old, account)| {
+                old == profile && native::same_account(account.as_ref(), credential)
+            });
+        // Aggregate callers must independently guard every account, rather than inheriting neighbours' private data.
+        snapshot
+            .endpoints
+            .retain(|name, _| matches && name == profile.name());
         snapshot
     }
 
@@ -1266,7 +1306,7 @@ mod account_tests {
     #[test]
     fn a_late_old_account_failure_preserves_the_replacement_listing_and_refresh_epoch() {
         let profile = crate::test_support::configured_providers(
-            "[providers.work]\npreset='github'\ncredential={env='TOKEN'}",
+            "[accounts.work]\nprovider='github'\ncredential={env='TOKEN'}",
         )
         .get("work")
         .unwrap()
@@ -1303,7 +1343,11 @@ mod account_tests {
         assert_eq!(service.endpoint_epochs.lock().unwrap()["work"], epoch);
         // The current account's own failure must still clear both visibility and pending refresh authority.
         assert!(service.invalidate_account(&profile, Some(&replacement)));
-        assert!(!service.snapshot().endpoints.contains_key("work"));
+        assert!(service.snapshot().endpoints["work"].models.is_empty());
+        assert_eq!(
+            service.snapshot().availability_status(&profile),
+            "unauthorized"
+        );
         assert_ne!(service.endpoint_epochs.lock().unwrap()["work"], epoch);
     }
 }

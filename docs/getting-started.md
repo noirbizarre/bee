@@ -10,21 +10,24 @@ every ACP client or a particular Hive release.
 Follow [installation](installation.md), then check `bee --version` and `bee --help` on the machine running the agent.
 The client must be able to find that executable; use its absolute path if the client's PATH differs from your shell's.
 
-## 2. Configure a provider and model
+## 2. Configure an account and model
 
 Create `.config/bee.toml` inside the directory from which the client will launch Bee:
 
 ```toml
-provider = "openai"
+model = "openai/YOUR_RESPONSES_MODEL_ID"
 
-[providers.openai]
-preset = "openai"
-model = "YOUR_RESPONSES_MODEL_ID"
+[accounts.openai]
+provider = "openai"
+discovery = false
+models = ["YOUR_RESPONSES_MODEL_ID"]
 credential = { env = "OPENAI_API_KEY" }
 ```
 
-Replace the model placeholder with an exact Responses-capable model ID available to your API account. The OpenAI
-preset prefers Responses. This route uses OpenAI API billing, not a ChatGPT subscription. For other providers,
+Replace both model placeholders with the same exact Responses-capable model ID available to your API account. The root
+default is account-qualified; the account's availability list uses raw wire IDs. With discovery off, only declared models
+are available. Without a default or usable recency, choose a model through ACP, even for a sole account/model. The OpenAI
+provider prefers Responses. This route uses OpenAI API billing, not a ChatGPT subscription. For other providers,
 protocols or local endpoints, see [configuration](index.md#providers-and-models) and [inference](inference.md).
 
 Alternatively, save the file globally at `~/.config/bee/config.toml`, or set `BEE_CONFIG` to its absolute path.

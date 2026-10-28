@@ -26,7 +26,7 @@ async fn account_changes_and_inference_authentication_rejection_durably_block_au
     };
     let server = crate::test_support::Server::start(responses);
     let profiles = crate::test_support::configured_providers(&format!(
-        "[providers.account]\ncredential={{store=true}}\nmodel='default-model'\nprotocols={{openai-chat={{base_url='{}'}}}}",
+        "model='account/default-model'\n[accounts.account]\nprovider='custom'\ncredential={{store=true}}\nmodels=['default-model','recent']\nprotocols={{openai-chat={{base_url='{}'}}}}",
         server.url
     ));
     let preferences = Store::default();

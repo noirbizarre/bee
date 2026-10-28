@@ -196,13 +196,13 @@ async fn copilot_streams_native_tools_with_account_routes_and_correct_initiator_
         String::new()
     } else {
         format!(
-            "discover_models={discover}\nmodel='native-model'\nmodel_protocols={{native-model='{}'}}",
+            "discovery=false\nmodels=['native-model']\nmodel_protocols={{native-model='{}'}}",
             protocol.name()
         )
     };
     std::fs::write(
         &path,
-        format!("[providers.account]\npreset='github'\n{credential}\n{explicit}"),
+        format!("model='account/native-model'\n[accounts.account]\nprovider='github'\n{credential}\n{explicit}"),
     )
     .unwrap();
     let env = crate::config::Environment::new(None, Some(root.path().into()), Some(path))
@@ -354,7 +354,7 @@ async fn cancelling_or_closing_a_copilot_device_login_stops_polling_before_compl
     let path = root.path().join("config.toml");
     std::fs::write(
         &path,
-        "[providers.account]\npreset='github'\nmodel='explicit-model'",
+        "model='account/explicit-model'\n[accounts.account]\nprovider='github'\nmodels=['explicit-model']\ndiscovery=false",
     )
     .unwrap();
     let env = crate::config::Environment::new(None, Some(root.path().into()), Some(path));

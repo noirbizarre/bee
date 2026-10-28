@@ -12,9 +12,10 @@ use tokio::sync::Mutex;
 
 use super::{Credential, Secret, unix_now};
 use crate::{
+    account::Account as Profile,
     config::Environment,
     error::{Error, Result},
-    provider::{GoogleCloud, Profile},
+    provider::GoogleCloud,
 };
 
 pub(crate) const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
@@ -209,6 +210,10 @@ fn fingerprint(source: &Source, principal: Option<&str>, target: &GoogleCloud) -
 
 fn bound(secret: Secret, identity: Secret, expires_at: Option<u64>) -> Credential {
     Credential {
+        material: super::Material::OAuth {
+            refresh_token: None,
+        },
+        provider_type: Some("google-cloud".into()),
         secret,
         cloud_identity: Some(identity),
         expires_at,

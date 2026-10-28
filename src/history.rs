@@ -914,17 +914,17 @@ impl Handle {
         .inspect_err(|failure| self.fail(failure.clone()))
     }
 
-    /// First-use discovery may fill an absent model under the accepted turn's authority.
+    /// Produce a historical event only for reader/recovery compatibility fixtures.
+    #[cfg(test)]
     pub(crate) async fn initialize_model(&self, turn: u64, snapshot: Snapshot) -> Result<()> {
         self.healthy()?;
         self.run(move |journal, path| {
-            // Reuse context-integrity checks; ordinary settings changes remain idle-only.
             journal.projection.settings(&snapshot, path)?;
             journal.append(Event::InitialModelSelected {
                 turn,
                 provider: snapshot
                     .provider
-                    .ok_or_else(|| error(path, "initial selection needs a connection"))?,
+                    .ok_or_else(|| error(path, "initial selection needs an account"))?,
                 model: snapshot
                     .model
                     .ok_or_else(|| error(path, "initial selection needs a model"))?,

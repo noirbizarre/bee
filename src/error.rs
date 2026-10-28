@@ -350,9 +350,7 @@ pub enum Error {
     #[error("provider setting `{key}` in `{path}` names a preset that does not exist")]
     #[diagnostic(
         code(bee::provider::unknown_preset),
-        help(
-            "use one of: {available}; or define it under `[presets.<name>]` in your configuration"
-        )
+        help("replace preset with a registered provider type ({available}), or use type = custom")
     )]
     ProviderUnknownPreset {
         /// The dotted key.
@@ -368,8 +366,7 @@ pub enum Error {
     #[diagnostic(
         code(bee::provider::unknown_login),
         help(
-            "use one of: {available}; or define it under `[login_flows.<name>]` in your global \
-             configuration"
+            "use one of the compiled-in mechanisms: {available}; configurable login_flows are no longer supported"
         )
     )]
     ProviderUnknownLogin {
@@ -388,8 +385,7 @@ pub enum Error {
         code(bee::provider::untrusted_layer),
         help(
             "a login flow decides where the authorization code and key are sent, and a project \
-             file can come from a repository you only cloned; define it in your global \
-             configuration or in the file `BEE_CONFIG` names"
+             file can come from a repository you only cloned; use a registered provider type"
         )
     )]
     ProviderUntrustedLayer {
@@ -422,6 +418,16 @@ pub enum Error {
         /// The defined profiles, comma separated.
         available: String,
     },
+
+    /// Another login/logout superseded an interactive credential acquisition.
+    #[error("credentials changed while authentication was pending")]
+    #[diagnostic(
+        code(bee::auth::changed),
+        help(
+            "review this instance's account and repeat login; the newer credential was preserved"
+        )
+    )]
+    AuthCredentialsChanged,
 
     // Authentication (ADR-008). None of these carries a credential, an
     // authorization code, a verifier or a response body: they name a profile,

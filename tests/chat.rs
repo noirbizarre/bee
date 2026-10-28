@@ -500,7 +500,7 @@ async fn a_custom_endpoint_receives_the_selected_model_limits_and_safe_headers()
         profile(
             "openai-chat",
             &server.url,
-            "max_output_tokens=123\n[providers.test.headers]\nx-custom='private'",
+            "max_output_tokens=123\n[accounts.test.headers]\nx-custom='private'",
         ),
         "unlisted-model".into(),
         Some(bee::auth::Secret::new("secret")),
@@ -747,7 +747,7 @@ async fn a_failure_on_the_preferred_protocol_does_not_fall_back_to_chat() {
     let profiles = support::providers(
         "anthropic-messages",
         &server.url,
-        "prefer=['anthropic-messages','openai-chat']\n[providers.test.protocols.openai-chat]\nbase_url='http://127.0.0.1:1'",
+        "prefer=['anthropic-messages','openai-chat']\n[accounts.test.protocols.openai-chat]\nbase_url='http://127.0.0.1:1'",
     );
     let model = Model::new(profiles.get("test").unwrap().clone(), "opaque".into(), None).unwrap();
     assert_eq!(

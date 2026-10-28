@@ -6,10 +6,10 @@ discover an existing native session ID and restore its conversation without keep
 ## Storage and retention
 
 Each session belongs to the [profile](profiles.md) selected when it was created. Listing returns only that profile's
-sessions. Resume under another profile fails before recovery or replay, even if both reference the same connection.
-An explicitly selected connection that has since been removed from the owning profile also prevents resume, rather
-than silently choosing a different account. Legacy sessions belong to `default`. Select that profile and include the
-original connections to resume them; Bee does not migrate session ownership between profiles.
+sessions. Resume under another profile fails before recovery or replay, even if both reference the same account.
+An explicitly selected account that has since been removed from the owning profile also prevents resume, rather
+than silently choosing a different identity. Session ownership is immutable. Restored choices still pass current
+account availability and authority checks before inference; a saved model cannot bypass those checks.
 
 Sessions live under `$XDG_STATE_HOME/bee/sessions`, falling back to `~/.local/state/bee/sessions`.
 An empty or relative `XDG_STATE_HOME` is ignored. On Windows, USERPROFILE supplies home when HOME is unset.
@@ -47,7 +47,7 @@ with the format version and sequence; it does not depend on reserializing values
 The version 1 event types are:
 
 - `session_created`: original identity, cwd, creation time and initial state.
-- `settings_changed`: explicit provider/model choices and any removal of native continuation from future context.
+- `settings_changed`: explicit account/model choices and any removal of native continuation from future context.
 - `turn_accepted`: allocated turn number and original user content blocks.
 - `assistant_delta`: ordered visible answer text.
 - `turn_finished`: terminal outcome and, only on success, new context messages, oldest-whole-turn eviction,
@@ -65,7 +65,7 @@ copied into the journal after every turn. Full visible history remains available
 
 The owner appends and synchronizes acceptance before acknowledging the prompt, text batches before emitting chunks,
 and terminal commits before idle. On reopening, Bee reconstructs state by streaming complete records. Only an incomplete
-final line may be truncated, after profile, connection-membership, exclusive ownership and cwd validation.
+final line may be truncated, after profile, account-membership, exclusive ownership and cwd validation.
 Invalid complete records, checksum failures, sequence
 gaps and unsupported versions fail explicitly; Bee never skips them to fabricate an empty session.
 After validation, Bee synchronizes the accepted prefix before publishing restored state, even when the last
@@ -225,7 +225,7 @@ never advance successful context.
 
 Unknown, removed, unreadable, corrupt or unsupported-version history is not treated as an empty session.
 Check the state root, file permissions, free space and Bee version. Sessions from an older memory-only Bee
-process cannot be recovered after that process exits. An explicitly selected saved connection must remain configured
+process cannot be recovered after that process exits. An explicitly selected saved account must remain configured
 and a member of the owning profile: restore its declaration and membership before resume or transcript replay can
 succeed. Unselected defaults resolve from current configuration. Automatically remembered selections retain their
 account-continuity guards and can require explicit confirmation before inference; see

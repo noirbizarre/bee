@@ -1,135 +1,131 @@
-//! Named, runtime-fixed scopes over authenticated connections.
+//! Profile scopes select accounts and one optional qualified model preference.
 
-use std::collections::{BTreeMap, BTreeSet};
-
-use serde::Deserialize;
-
+use crate::account::{Account, Accounts, ModelRef};
 use crate::config::Config;
-use crate::provider::{Profile, Providers, check_model_id};
 use crate::{Error, Result};
+use serde::Deserialize;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Group {
-    #[serde(default)]
-    connections: Vec<String>,
-    provider: Option<String>,
-    #[serde(default)]
-    models: BTreeMap<String, Preferences>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Preferences {
+    accounts: Option<Vec<String>>,
     model: Option<String>,
-    models: Option<Vec<String>>,
 }
 
-pub(crate) fn resolve(
-    config: &Config,
-    connections: BTreeMap<String, Profile>,
-) -> Result<Providers> {
+pub(crate) fn resolve(config: &Config, accounts: BTreeMap<String, Account>) -> Result<Accounts> {
     let invalid = |key: &str, reason| Error::ProfileSetting {
-        path: config
-            .origin(key)
-            .map_or_else(|| "<default>".into(), |p| p.display().to_string()),
+        path: config.origin(key).map_or_else(
+            || "<configuration>".into(),
+            |path| path.display().to_string(),
+        ),
         reason,
     };
-    let selected = match config.get("profile") {
-        None => "default",
-        Some(value) => value
-            .as_str()
-            .ok_or_else(|| invalid("profile", "requires a string selector"))?,
-    };
-    let mut groups: BTreeMap<String, Group> = match config.get("profiles") {
-        None => BTreeMap::new(),
-        Some(value) => value.clone().try_into().map_err(|_| {
-            invalid(
-                "profiles",
-                "contains an invalid declaration; check field names and types",
-            )
-        })?,
-    };
-    if groups.is_empty() {
-        if selected != "default" {
+    if config.get("provider").is_some() || config.get("providers").is_some() {
+        return Err(invalid(
+            "provider",
+            "unsupported setting; configure accounts and an optional account-qualified model",
+        ));
+    }
+    let selected = config
+        .get("profile")
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or_else(|| invalid("profile", "requires a string selector"))
+        })
+        .transpose()?
+        .unwrap_or("default");
+    let root_model = config
+        .get("model")
+        .map(|value| {
+            let text = value
+                .as_str()
+                .ok_or_else(|| invalid("model", "requires an account-qualified model string"))?;
+            ModelRef::parse(text).map_err(|reason| invalid("model", reason))
+        })
+        .transpose()?;
+    let validate = |reference: &ModelRef, key: &str| -> Result<()> {
+        let account = accounts
+            .get(&reference.account)
+            .ok_or_else(|| invalid(key, "model references an unknown account"))?;
+        if account
+            .model_filter()
+            .is_some_and(|models| !models.contains(&reference.model))
+            || (!account.discovery() && !account.models().contains(&reference.model))
+        {
             return Err(invalid(
-                "profile",
-                "selects an unknown profile; only the implicit default exists",
+                key,
+                "default model is not declared available by its account",
             ));
         }
-        return Providers::legacy(config, connections);
+        Ok(())
+    };
+    if let Some(reference) = &root_model {
+        validate(reference, "model")?;
     }
-    // Once explicit groups exist, implicit membership would expose accounts
-    // the user never opted into. The guaranteed default is therefore empty.
+    let mut groups: BTreeMap<String, Group> = config
+        .get("profiles")
+        .map(|value| {
+            value.clone().try_into().map_err(|_| {
+                invalid(
+                    "profiles",
+                    "contains invalid fields or types; profiles accept accounts and model",
+                )
+            })
+        })
+        .transpose()?
+        .unwrap_or_default();
     groups.entry("default".into()).or_default();
+    let baseline: Vec<_> = accounts
+        .values()
+        .filter(|account| account.enabled())
+        .map(|account| account.name().to_owned())
+        .collect();
     let mut resolved = BTreeMap::new();
     for (name, group) in groups {
         let key = format!("profiles.{name}");
         if name.trim().is_empty() || name.trim() != name || name.chars().any(char::is_control) {
-            return Err(invalid(
-                &key,
-                "requires nonempty profile names without surrounding whitespace or control characters",
-            ));
+            return Err(invalid(&key, "invalid profile name"));
         }
-        let mut members = BTreeSet::new();
+        let mut seen = BTreeSet::new();
         let mut scoped = BTreeMap::new();
-        for member in group.connections {
-            if !members.insert(member.clone()) {
-                return Err(invalid(&key, "contains a duplicate connection reference"));
+        for id in group.accounts.as_ref().unwrap_or(&baseline) {
+            if !seen.insert(id) {
+                return Err(invalid(&key, "contains duplicate account references"));
             }
-            let connection = connections
-                .get(&member)
-                .ok_or_else(|| invalid(&key, "references an unknown connection"))?;
-            scoped.insert(member, connection.clone());
+            let account = accounts
+                .get(id)
+                .ok_or_else(|| invalid(&key, "references an unknown account"))?;
+            scoped.insert(id.clone(), account.clone());
         }
-        for (member, preferences) in group.models {
-            let connection = scoped.remove(&member).ok_or_else(|| {
-                invalid(
-                    &key,
-                    "has model preferences for a connection outside its membership",
-                )
-            })?;
-            for model in preferences
-                .model
-                .iter()
-                .chain(preferences.models.iter().flatten())
-            {
-                check_model_id(model).map_err(|_| invalid(&key, "contains an invalid model ID"))?;
-            }
-            scoped.insert(
-                member,
-                connection.with_model_preferences(preferences.model, preferences.models),
-            );
-        }
-        let default = match group.provider {
-            Some(provider) if scoped.contains_key(&provider) => Some(provider),
-            Some(_) => {
+        let configured_model = if let Some(model) = group.model {
+            let reference = ModelRef::parse(&model).map_err(|reason| invalid(&key, reason))?;
+            validate(&reference, &key)?;
+            if !scoped.contains_key(&reference.account) {
                 return Err(invalid(
                     &key,
-                    "selects a default connection outside its membership",
+                    "default model references an account outside this profile",
                 ));
             }
-            None if scoped.len() > 1 => {
-                return Err(invalid(
-                    &key,
-                    "requires provider to choose among multiple connections",
-                ));
-            }
-            None => scoped.keys().next().cloned(),
+            Some(reference)
+        } else {
+            // A root preference is dormant when its account is excluded; it cannot enable an account.
+            root_model
+                .as_ref()
+                .filter(|reference| scoped.contains_key(&reference.account))
+                .cloned()
         };
         resolved.insert(
             name.clone(),
-            Providers {
-                profiles: scoped,
-                default,
+            Accounts {
+                accounts: scoped,
+                configured_model,
                 profile_name: name,
             },
         );
     }
-    resolved.remove(selected).ok_or_else(|| {
-        invalid(
-            "profile",
-            "selects an unknown profile; define it under [profiles]",
-        )
-    })
+    resolved
+        .remove(selected)
+        .ok_or_else(|| invalid("profile", "selects an unknown profile"))
 }

@@ -6,9 +6,10 @@ use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::{Value, json};
 
 use super::{Audience, Credential, FileStore, Secret};
+use crate::account::Account as Profile;
 use crate::error::{Error, Result};
 use crate::http::LoginHttp;
-use crate::provider::{CredentialSource, Profile};
+use crate::provider::CredentialSource;
 
 /// Existing public client used by OpenCode, not a Bee-owned app registration.
 pub const CLIENT_ID: &str = "Ov23li8tweQw6odWQebz";
@@ -246,7 +247,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let store = FileStore::new(root.path().join("credentials.json"));
         let profile =
-            crate::test_support::configured_providers("[providers.copilot]\npreset='github'")
+            crate::test_support::configured_providers("[accounts.copilot]\nprovider='github'")
                 .get("copilot")
                 .unwrap()
                 .clone();
@@ -275,7 +276,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let store = FileStore::new(root.path().join("unused-credentials.json"));
         let profile = crate::test_support::configured_providers(
-            "[providers.github]\npreset='github'\ncredential={env='TOKEN'}",
+            "[accounts.github]\nprovider='github'\ncredential={env='TOKEN'}",
         )
         .get("github")
         .unwrap()
@@ -513,7 +514,7 @@ impl SignIn {
                     if value["token_type"].as_str().is_some_and(|kind| !kind.eq_ignore_ascii_case("bearer")) {
                         return Err(failure("unsupported device token type; retry login"));
                     }
-                    let credential = Credential::new(Secret::new(token));
+                    let credential = Credential::new(Secret::new(token)).oauth_token(None).for_provider("github");
                     target(credential.secret(), http).await?;
                     return Ok(credential);
                 }

@@ -48,7 +48,7 @@ async fn opencode_failures_give_console_advice_without_replaying_requests_or_ech
     let mut response = Response::json(json!({"error":{"message":"private-upstream-secret"}}));
     response.status = status;
     let server = Server::start(vec![response]);
-    let profile = support::profile("openai-chat", &server.url, "discovery='opencode-go'");
+    let profile = support::profile("openai-chat", &server.url, "provider='opencode-go'");
     let model = bee::llm::Model::new(
         profile,
         "text-model".into(),
@@ -81,7 +81,7 @@ async fn opencode_rejects_invalid_conversation_headers_and_configured_collisions
         let profile = support::profile(
             "openai-chat",
             "http://127.0.0.1:1",
-            &format!("discovery='opencode'\n{extra}"),
+            &format!("provider='opencode'\n{extra}"),
         );
         let model = bee::llm::Model::new(profile, "text-model".into(), None)
             .unwrap()
@@ -108,7 +108,7 @@ async fn opencode_durable_resume_preserves_the_wire_conversation_identity() {
         Response::json(chat_text("resumed")),
     ]);
     let profiles = support::configured_providers(&format!(
-        "[providers.test]\npreset='opencode-go'\nmodel='text-model'\ndiscover_models=false\nprotocols.openai-chat.base_url='{}'",
+        "model='test/text-model'\n[accounts.test]\nprovider='opencode-go'\nmodels=['text-model']\ndiscovery=false\nprotocols.openai-chat.base_url='{}'",
         server.url
     ));
     let saved = Arc::new(Mutex::new(None));
@@ -228,7 +228,7 @@ async fn opencode_conversation_headers_survive_tool_steps_and_later_prompts(
         Response::json(answer(protocol, "other")),
     ]);
     let profiles = support::configured_providers(&format!(
-        "[providers.test]\npreset='{preset}'\nmodel='text-model'\ndiscover_models=false\nprefer=['{protocol}']\nprotocols.{protocol}.base_url='{}'",
+        "model='test/text-model'\n[accounts.test]\nprovider='{preset}'\nmodels=['text-model']\ndiscovery=false\nprefer=['{protocol}']\nprotocols.{protocol}.base_url='{}'",
         server.url
     ));
     let mut registry = bee::tool::Registry::default();
@@ -441,7 +441,7 @@ async fn google_ai_studio_signed_calls_reach_native_tools_and_remain_private_acr
         Response::json(answer("openai-chat", "second")),
     ]);
     let profiles = support::configured_providers(&format!(
-        "[providers.studio]\npreset='google-aistudio'\nmodel='gemini-test'\ndiscover_models=false\nprotocols.openai-chat.base_url='{}'",
+        "model='studio/gemini-test'\n[accounts.studio]\nprovider='google-aistudio'\nmodels=['gemini-test']\ndiscovery=false\nprotocols.openai-chat.base_url='{}'",
         server.url
     ));
     let mut registry = bee::tool::Registry::default();
@@ -792,7 +792,7 @@ async fn search_defers_for_root_guidance_without_activating_matched_skills(#[cas
 
 /// Drive ordinary ACP prompts, retaining each session's history between prompts.
 async fn native_turns(
-    profiles: bee::provider::Providers,
+    profiles: bee::account::Accounts,
     runtime: bee::acp::Runtime,
     sessions: Vec<(std::path::PathBuf, Vec<bool>)>,
 ) -> Vec<String> {
@@ -1066,7 +1066,14 @@ async fn resume_and_model_changes_retain_only_committed_skill_activations(#[case
     tokio::time::timeout(
         Duration::from_secs(10),
         client.connect_with(
-            bee::acp::agent_with_runtime(providers("openai-chat", &server.url, ""), runtime),
+            bee::acp::agent_with_runtime(
+                providers(
+                    "openai-chat",
+                    &server.url,
+                    "models=['private-model','replacement-model']",
+                ),
+                runtime,
+            ),
             async move |connection| {
                 connection
                     .send_request(v2::InitializeRequest::new(
@@ -1135,7 +1142,7 @@ async fn resume_and_model_changes_retain_only_committed_skill_activations(#[case
                     .send_request(v2::SetSessionConfigOptionRequest::new(
                         session.clone(),
                         "model",
-                        "replacement-model",
+                        "test/replacement-model",
                     ))
                     .block_task()
                     .await?;
@@ -1641,23 +1648,25 @@ async fn acp_cancellation_drops_native_work_and_allows_a_clean_replacement(
     server.assert_no_more_requests();
 }
 
-fn mixed_profiles(url: &str, preferred: &str) -> bee::provider::Providers {
+fn mixed_profiles(url: &str, preferred: &str) -> bee::account::Accounts {
     support::configured_providers(&format!(
         r#"
-[providers.test]
-model = "vendor/responses.v2"
+model = "test/vendor/responses.v2"
+[accounts.test]
+provider = "custom"
+models = ["vendor/responses.v2", "vendor/chat.v2", "vendor/messages.v2", "unknown/private.v3"]
 prefer = ["{preferred}"]
 max_output_tokens = 123
 context_window = 100000
 model_context_windows = {{ "vendor/messages.v2" = 20000 }}
 headers = {{ x-team = "shared" }}
 model_protocols = {{ "vendor/chat.v2" = "openai-chat", "vendor/responses.v2" = "openai-responses", "vendor/messages.v2" = "anthropic-messages" }}
-[providers.test.protocols.openai-chat]
+[accounts.test.protocols.openai-chat]
 base_url = "{url}/chat"
 options = {{ max_tokens_field = "max_completion_tokens" }}
-[providers.test.protocols.openai-responses]
+[accounts.test.protocols.openai-responses]
 base_url = "{url}/responses"
-[providers.test.protocols.anthropic-messages]
+[accounts.test.protocols.anthropic-messages]
 base_url = "{url}/anthropic"
 options = {{ version = "2023-06-01", max_tokens = 456 }}
 "#
@@ -1784,7 +1793,7 @@ async fn session_model_changes_resolve_protocols_again_and_drop_native_continuat
     tokio::time::timeout(
         Duration::from_secs(10),
         client.connect_with(
-            bee::acp::agent_with_providers(profiles),
+            bee::acp::agent_with_accounts(profiles),
             async move |connection| {
                 connection
                     .send_request(v2::InitializeRequest::new(
@@ -1807,7 +1816,7 @@ async fn session_model_changes_resolve_protocols_again_and_drop_native_continuat
                             .send_request(v2::SetSessionConfigOptionRequest::new(
                                 session.clone(),
                                 "model",
-                                model,
+                                format!("test/{model}").as_str(),
                             ))
                             .block_task()
                             .await?;
@@ -1889,7 +1898,7 @@ async fn successful_turns_reach_the_model_and_supply_context_to_the_next_prompt(
     tokio::time::timeout(
         Duration::from_secs(10),
         client.connect_with(
-            bee::acp::agent_with_providers(profiles),
+            bee::acp::agent_with_accounts(profiles),
             async move |connection| {
                 connection
                     .send_request(v2::InitializeRequest::new(
@@ -1971,7 +1980,7 @@ async fn cancelling_a_pending_http_request_leaves_no_context_or_late_output(
     tokio::time::timeout(
         Duration::from_secs(10),
         client.connect_with(
-            bee::acp::agent_with_providers(profiles),
+            bee::acp::agent_with_accounts(profiles),
             async move |connection| {
                 connection
                     .send_request(v2::InitializeRequest::new(

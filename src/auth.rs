@@ -29,16 +29,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value};
 
+use crate::account::{Account as Profile, Accounts as Providers};
 use crate::config::Environment;
 use crate::error::{Error, Result};
-use crate::provider::{CredentialSource, Profile, Protocol, Providers};
+use crate::provider::{CredentialSource, Protocol};
 
 pub mod chatgpt;
 pub mod copilot;
 pub mod google_cloud;
 
 /// The version of the credential file's layout.
-const STORE_VERSION: u64 = 1;
 // Publication and bounded reads must agree, or one successful login can disable every account.
 const MAX_STORE_BYTES: usize = 4 * 1024 * 1024;
 
@@ -71,8 +71,11 @@ impl fmt::Debug for Secret {
 }
 
 /// A resolved secret and when it stops working.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Credential {
+    material: Material,
+    // Native authority is not interchangeable with an arbitrary compatible endpoint.
+    provider_type: Option<String>,
     pub(crate) cloud_identity: Option<Secret>,
     secret: Secret,
     /// Seconds since the Unix epoch, for credentials that expire.
@@ -80,7 +83,129 @@ pub struct Credential {
     pub(crate) oauth: Option<chatgpt::Registration>,
 }
 
+/// Generic credential material; native registration remains separately typed.
+#[derive(Clone, PartialEq, Eq)]
+pub enum Material {
+    /// The primary key is `Credential::secret`; additional declared secret fields are bounded by the store.
+    ApiKey {
+        /// Additional provider-declared secret fields, stored as one generation.
+        fields: BTreeMap<String, Secret>,
+    },
+    /// The primary secret is an access token. Some grants have no refresh token.
+    OAuth {
+        /// Optional renewable grant, never displayed or sent as ordinary metadata.
+        refresh_token: Option<Secret>,
+    },
+}
+
+impl fmt::Debug for Material {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ApiKey { fields } => f
+                .debug_struct("ApiKey")
+                .field("field_count", &fields.len())
+                .finish(),
+            Self::OAuth { refresh_token } => f
+                .debug_struct("OAuth")
+                .field("has_refresh_token", &refresh_token.is_some())
+                .finish(),
+        }
+    }
+}
+
+impl fmt::Debug for Credential {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Credential")
+            .field("material", &self.material)
+            .field("expires_at", &self.expires_at)
+            .field("has_registration", &self.oauth.is_some())
+            .field("has_provider_type", &self.provider_type.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Default for Material {
+    fn default() -> Self {
+        Self::ApiKey {
+            fields: BTreeMap::new(),
+        }
+    }
+}
+
 impl Credential {
+    /// Construct a complete static-secret generation before any store mutation.
+    pub fn api_key_fields(secret: Secret, fields: BTreeMap<String, Secret>) -> Self {
+        let mut credential = Self::new(secret);
+        credential.material = Material::ApiKey { fields };
+        credential
+    }
+
+    /// Provider-declared field validation never formats secrets or metadata into errors.
+    pub fn validate_for(&self, profile: &Profile) -> Result<()> {
+        if self
+            .provider_type
+            .as_deref()
+            .is_some_and(|kind| kind != profile.provider())
+        {
+            return Err(Error::ProviderInvalid {
+                path: "<credential store>".into(),
+                key: "provider type".into(),
+                reason: "stored credential belongs to a different provider type; explicitly authenticate this instance again",
+            });
+        }
+        let definition = crate::provider::registry::definition(profile.provider())
+            .expect("validated provider type");
+        if !definition.methods.contains(&self.method()) {
+            return Err(Error::ProviderInvalid {
+                path: "<credential store>".into(),
+                key: "authentication method".into(),
+                reason: "credential method is incompatible with this provider type; authenticate this instance again",
+            });
+        }
+        if let Material::ApiKey { fields } = &self.material {
+            let mut values = toml::Table::from_iter([(
+                "key".into(),
+                toml::Value::String(self.secret.expose().into()),
+            )]);
+            values.extend(
+                fields
+                    .iter()
+                    .map(|(key, value)| (key.clone(), toml::Value::String(value.expose().into()))),
+            );
+            definition
+                .validate_fields(crate::provider::registry::FieldOwner::Credential, &values)
+                .map_err(|reason| Error::ProviderInvalid {
+                    path: "<credential source>".into(),
+                    key: "credential fields".into(),
+                    reason,
+                })?;
+        }
+        Ok(())
+    }
+    /// Generic authentication method, never a provider-specific variant.
+    pub fn method(&self) -> crate::provider::AuthMethod {
+        match self.material {
+            Material::ApiKey { .. } => crate::provider::AuthMethod::ApiKey,
+            Material::OAuth { .. } => crate::provider::AuthMethod::OAuth,
+        }
+    }
+
+    /// The typed secondary credential material. Secrets retain redacted Debug.
+    pub fn material(&self) -> &Material {
+        &self.material
+    }
+
+    /// Mark a provider-acquired OAuth token without assuming a refresh grant exists.
+    pub fn oauth_token(mut self, refresh_token: Option<Secret>) -> Self {
+        self.material = Material::OAuth { refresh_token };
+        self
+    }
+
+    /// Bind newly acquired credentials to the integration that validated them.
+    pub fn for_provider(mut self, provider_type: &str) -> Self {
+        self.provider_type = Some(provider_type.into());
+        self
+    }
     pub(crate) fn selection_oauth_usable(&self) -> bool {
         // An expired renewable token is usable, but logout preserves registration identity without authority.
         self.oauth.is_some()
@@ -96,13 +221,25 @@ impl Credential {
         // This value is immediately hashed by selection; never expose it through Debug.
         match &self.oauth {
             Some(registration) => registration.selection_identity(),
-            None => serde_json::json!(["key", self.secret.expose()]),
+            None => match &self.material {
+                Material::ApiKey { fields } if !fields.is_empty() => serde_json::json!([
+                    "key-fields",
+                    self.secret.expose(),
+                    fields
+                        .iter()
+                        .map(|(key, value)| (key, value.expose()))
+                        .collect::<BTreeMap<_, _>>()
+                ]),
+                _ => serde_json::json!(["key", self.secret.expose()]),
+            },
         }
     }
     /// A credential that does not expire.
     #[must_use]
     pub fn new(secret: Secret) -> Self {
         Self {
+            material: Material::default(),
+            provider_type: None,
             cloud_identity: None,
             secret,
             expires_at: None,
@@ -140,7 +277,7 @@ impl Credential {
         }
         match (&self.oauth, &other.oauth) {
             (Some(a), Some(b)) => a.same_discovery_account(b),
-            (None, None) => self.secret == other.secret,
+            (None, None) => self.selection_identity() == other.selection_identity(),
             _ => false,
         }
     }
@@ -181,6 +318,20 @@ impl Audience<'_> {
 /// A trait so an OS keyring can be added beside the file without touching the
 /// callers (ADR-008).
 pub trait CredentialStore {
+    /// Snapshot a provider generation before interaction; unsupported stores return no generation.
+    fn generation(&self, _audience: Audience<'_>) -> Result<Option<u64>> {
+        Ok(None)
+    }
+
+    /// Publish the authenticated generation. Concurrent stores override this atomically.
+    fn put_guarded(
+        &self,
+        audience: Audience<'_>,
+        credential: &Credential,
+        _generation: Option<u64>,
+    ) -> Result<()> {
+        self.put(audience, credential)
+    }
     /// File-backed OAuth transactions require a stable OS lock across processes.
     fn file_store(&self) -> Option<&FileStore> {
         None
@@ -330,7 +481,7 @@ impl FileStore {
         }) {
             return Err(self.parse_error("it has a key Bee does not write"));
         }
-        if !matches!(root.get("version").and_then(Value::as_u64), Some(1 | 2)) {
+        if !matches!(root.get("version").and_then(Value::as_u64), Some(1..=3)) {
             return Err(self.parse_error("its `version` is missing or not one Bee understands"));
         }
         Ok(Document {
@@ -377,10 +528,12 @@ impl FileStore {
             let Value::Object(entry) = entry else {
                 return Err(self.parse_error(format!("every entry of `{table}` must be an object")));
             };
-            if entry
-                .keys()
-                .any(|key| !matches!(key.as_str(), "secret" | "expires_at" | "oauth"))
-            {
+            if entry.keys().any(|key| {
+                !matches!(
+                    key.as_str(),
+                    "secret" | "expires_at" | "oauth" | "material" | "provider_type"
+                )
+            }) {
                 return Err(self.parse_error(format!(
                     "an entry of `{table}` has a key Bee does not write"
                 )));
@@ -407,9 +560,83 @@ impl FileStore {
                     ))
                 })?),
             };
+            let provider_type = entry
+                .get("provider_type")
+                .map(|v| {
+                    v.as_str()
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                        .ok_or_else(|| self.parse_error("provider type must be nonempty text"))
+                })
+                .transpose()?;
+            // Older files carry no method discriminator; only native registration proves OAuth.
+            let material = match entry.get("material") {
+                None if oauth.is_some() => Material::OAuth {
+                    refresh_token: None,
+                },
+                None => Material::default(),
+                Some(value) => {
+                    let object = value
+                        .as_object()
+                        .ok_or_else(|| self.parse_error("credential material must be an object"))?;
+                    match object.get("method").and_then(Value::as_str) {
+                        Some("api-key")
+                            if object
+                                .keys()
+                                .all(|k| matches!(k.as_str(), "method" | "fields"))
+                                && oauth.is_none() =>
+                        {
+                            let fields =
+                                object.get("fields").and_then(Value::as_object).ok_or_else(
+                                    || self.parse_error("API key fields must be an object"),
+                                )?;
+                            let fields = fields
+                                .iter()
+                                .map(|(key, value)| {
+                                    value
+                                        .as_str()
+                                        .filter(|v| !v.trim().is_empty())
+                                        .map(|v| (key.clone(), Secret::new(v)))
+                                        .ok_or_else(|| {
+                                            self.parse_error(
+                                                "credential fields must be nonempty text",
+                                            )
+                                        })
+                                })
+                                .collect::<Result<_>>()?;
+                            Material::ApiKey { fields }
+                        }
+                        Some("oauth")
+                            if object
+                                .keys()
+                                .all(|k| matches!(k.as_str(), "method" | "refresh_token")) =>
+                        {
+                            let refresh_token = object
+                                .get("refresh_token")
+                                .map(|v| {
+                                    v.as_str()
+                                        .filter(|v| !v.is_empty())
+                                        .map(Secret::new)
+                                        .ok_or_else(|| {
+                                            self.parse_error("refresh token must be nonempty text")
+                                        })
+                                })
+                                .transpose()?;
+                            Material::OAuth { refresh_token }
+                        }
+                        _ => {
+                            return Err(
+                                self.parse_error("unsupported or inconsistent credential material")
+                            );
+                        }
+                    }
+                }
+            };
             credentials.insert(
                 name.clone(),
                 Credential {
+                    material,
+                    provider_type,
                     cloud_identity: None,
                     secret,
                     expires_at,
@@ -442,24 +669,26 @@ impl FileStore {
                         if let Some(oauth) = &credential.oauth {
                             entry.insert("oauth".into(), oauth.json());
                         }
+                        if let Some(provider_type) = &credential.provider_type {
+                            entry.insert("provider_type".into(), Value::String(provider_type.clone()));
+                        }
+                        // Only the private store serializer may unwrap secret-bearing fields.
+                        let material = match &credential.material {
+                            Material::ApiKey { fields } => serde_json::json!({"method": "api-key", "fields": fields.iter().map(|(k,v)| (k, v.expose())).collect::<BTreeMap<_,_>>() }),
+                            Material::OAuth { refresh_token } => {
+                                let mut material = serde_json::json!({"method": "oauth"});
+                                if let Some(token) = refresh_token { material["refresh_token"] = token.expose().into(); }
+                                material
+                            }
+                        };
+                        entry.insert("material".into(), material);
                         (name.clone(), Value::Object(entry))
                     })
                     .collect(),
             )
         };
         let mut root = Map::new();
-        root.insert(
-            "version".to_owned(),
-            Value::from(
-                if document.host_id.is_some()
-                    || document.providers.values().any(|c| c.oauth.is_some())
-                {
-                    2
-                } else {
-                    STORE_VERSION
-                },
-            ),
-        );
+        root.insert("version".to_owned(), Value::from(3));
         if let Some(host) = &document.host_id {
             root.insert("host_id".into(), host.clone().into());
         }
@@ -485,6 +714,41 @@ impl FileStore {
 }
 
 impl CredentialStore for FileStore {
+    fn generation(&self, audience: Audience<'_>) -> Result<Option<u64>> {
+        #[cfg(unix)]
+        {
+            match audience {
+                Audience::Provider(name) => Ok(Some(self.load()?.revision(name))),
+                Audience::McpServer(_) => Ok(None),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            // A generation is only available with private storage. Defer unsupported-platform
+            // errors until publication so input/flow validation keeps its actionable diagnostic.
+            let _ = audience;
+            Ok(None)
+        }
+    }
+    fn put_guarded(
+        &self,
+        audience: Audience<'_>,
+        credential: &Credential,
+        generation: Option<u64>,
+    ) -> Result<()> {
+        let _guard = self.lock()?;
+        let mut document = self.load()?;
+        if let Audience::Provider(name) = audience
+            && generation != Some(document.revision(name))
+        {
+            return Err(Error::AuthCredentialsChanged);
+        }
+        document
+            .table_mut(audience)
+            .insert(audience.name(), credential.clone());
+        document.changed(audience);
+        self.save(&document)
+    }
     fn file_store(&self) -> Option<&FileStore> {
         Some(self)
     }
@@ -756,23 +1020,36 @@ pub fn resolve(
     match profile.credential() {
         Some(CredentialSource::ApplicationDefault) => google_cloud::identity(profile, env),
         None => Ok(None),
-        Some(CredentialSource::Env(variable)) => env
-            .variable(variable)
-            .map(|value| Some(Credential::new(Secret::new(value))))
-            .ok_or_else(|| Error::AuthMissingEnv {
+        Some(CredentialSource::Env(variable)) => {
+            let missing = |variable: &str| Error::AuthMissingEnv {
                 profile: profile.name().to_owned(),
-                variable: variable.clone(),
-            }),
+                variable: variable.into(),
+            };
+            let secret = env.variable(variable).ok_or_else(|| missing(variable))?;
+            let fields = profile
+                .credential_env_fields()
+                .iter()
+                .map(|(field, variable)| {
+                    env.variable(variable)
+                        .map(|value| (field.clone(), Secret::new(value)))
+                        .ok_or_else(|| missing(variable))
+                })
+                .collect::<Result<_>>()?;
+            let credential = Credential::api_key_fields(Secret::new(secret), fields);
+            credential.validate_for(profile)?;
+            Ok(Some(credential))
+        }
         Some(CredentialSource::Store { .. }) => {
             let credential = store
                 .get(Audience::Provider(profile.name()))?
                 .ok_or_else(|| Error::AuthNotLoggedIn {
                     profile: profile.name().to_owned(),
                 })?;
+            credential.validate_for(profile)?;
             if let Some(registration) = &credential.oauth {
                 if !profile
                     .login_spec()
-                    .is_some_and(crate::preset::LoginSpec::is_chatgpt)
+                    .is_some_and(crate::provider::signin::LoginSpec::is_chatgpt)
                 {
                     return Err(chatgpt::failure(
                         "OAuth credentials require a ChatGPT profile",
@@ -781,7 +1058,7 @@ pub fn resolve(
                 registration.check(&credential)?;
             } else if profile
                 .login_spec()
-                .is_some_and(crate::preset::LoginSpec::is_chatgpt)
+                .is_some_and(crate::provider::signin::LoginSpec::is_chatgpt)
             {
                 return Err(chatgpt::failure(
                     "stored API keys cannot authenticate a ChatGPT profile",
@@ -900,11 +1177,25 @@ pub fn status(
         };
         statuses.push(ProfileStatus {
             profile: name.to_owned(),
-            default: providers.default_name() == Some(name),
+            default: providers
+                .configured_model()
+                .is_some_and(|model| model.account == name),
             status,
         });
     }
     Ok(statuses)
+}
+
+/// Authentication can address configured accounts outside active profile membership.
+///
+/// # Errors
+///
+/// Returns configuration/profile validation errors before exposing an auth target.
+pub fn configured_accounts(config: &crate::config::Config) -> Result<Providers> {
+    let mut accounts = Providers::from_config(config)?;
+    // Validate the ordinary scoped view first; auth must not bypass invalid profile configuration.
+    accounts.accounts = Providers::connections(config)?;
+    Ok(accounts)
 }
 
 /// The profile `bee auth` was asked about.
@@ -953,9 +1244,24 @@ pub fn require_store(profile: &Profile) -> Result<()> {
 /// [`Error::AuthEmptyToken`] if `secret` is blank, or a store error.
 pub fn store_secret(profile: &Profile, secret: &str, store: &dyn CredentialStore) -> Result<()> {
     require_store(profile)?;
+    let generation = store.generation(Audience::Provider(profile.name()))?;
+    store_secret_guarded(profile, secret, store, generation)
+}
+
+/// Publish an imported key only if login/logout has not superseded its acquisition.
+///
+/// # Errors
+/// Returns the validation/store errors of [`store_secret`], or a changed-generation error.
+pub fn store_secret_guarded(
+    profile: &Profile,
+    secret: &str,
+    store: &dyn CredentialStore,
+    generation: Option<u64>,
+) -> Result<()> {
+    require_store(profile)?;
     if profile
         .login_spec()
-        .is_some_and(crate::preset::LoginSpec::is_chatgpt)
+        .is_some_and(crate::provider::signin::LoginSpec::is_chatgpt)
     {
         return Err(chatgpt::failure("use browser sign-in for this profile"));
     }
@@ -963,10 +1269,9 @@ pub fn store_secret(profile: &Profile, secret: &str, store: &dyn CredentialStore
     if secret.is_empty() {
         return Err(Error::AuthEmptyToken);
     }
-    store.put(
-        Audience::Provider(profile.name()),
-        &Credential::new(Secret::new(secret)),
-    )
+    let credential = Credential::new(Secret::new(secret)).for_provider(profile.provider());
+    credential.validate_for(profile)?;
+    store.put_guarded(Audience::Provider(profile.name()), &credential, generation)
 }
 
 /// Forget `profile`'s stored credential. `false` if there was none.
