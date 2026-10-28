@@ -1,7 +1,7 @@
 # Installation
 
-Bee is not published to crates.io: `bee` there is an unrelated project. Release binaries and package-manager installs
-become available after the first release is published. Until then, build from source.
+Bee is not published to crates.io: `bee` there is an unrelated project. Install a release binary, use a package manager,
+or build from source.
 
 ## Release binaries
 
@@ -16,9 +16,10 @@ Tags have no `v` prefix; for version `0.1.0` the configured assets are:
 | Linux, musl | ARM64 | `bee_0.1.0_linux-arm64-musl` |
 | macOS | Intel | `bee_0.1.0_darwin-amd64` |
 | macOS | Apple Silicon | `bee_0.1.0_darwin-arm64` |
+| Windows | x86-64 | `bee_0.1.0_windows-amd64.exe` |
 
-Use GNU assets on compatible glibc systems and musl assets on musl systems such as Alpine. No Windows release asset is
-configured, although CI tests Windows source builds. The target list does not establish minimum OS or libc versions.
+Use GNU assets on compatible glibc systems and musl assets on musl systems such as Alpine. Windows binaries statically
+link the MSVC runtime. The target list does not establish minimum OS or libc versions; older releases may have fewer assets.
 
 Download the selected asset and `SHA256SUMS` from the **same release** into an empty directory. On Linux, for example:
 
@@ -58,6 +59,39 @@ paru -S bee-agent
 The `bee-agent` AUR package installs the `bee` command and supports x86-64 and ARM64 Linux using GNU assets.
 Use your preferred AUR helper or review/build the
 PKGBUILD manually. Package publication follows the core GitHub release, so availability can lag that release.
+Automatic package updates follow stable `released` events; manual reruns are available to maintainers.
+
+## Development builds
+
+The [development prerelease](https://github.com/noirbizarre/bee/releases/tag/development) contains binaries from successful
+main release builds or an explicit manual rebuild. It becomes available after the first publishing run. Filenames use
+`development` instead of a version:
+
+```text
+https://github.com/noirbizarre/bee/releases/download/development/bee_development_linux-amd64
+https://github.com/noirbizarre/bee/releases/download/development/bee_development_windows-amd64.exe
+https://github.com/noirbizarre/bee/releases/download/development/SHA256SUMS
+```
+
+These links use the default prerelease name. A maintainer can set the repository variable `PRERELEASE_NAME` to a safe
+single tag/filename component; substitute that name in both the tag URL and the filename if configured.
+
+The same platform suffixes apply to the other binaries. Download the selected executable and `SHA256SUMS`,
+verify their checksums, then install as above (rename the Windows executable to `bee.exe` and put it on PATH).
+On Windows, use `Get-FileHash -Algorithm SHA256 <filename>` to compare against `SHA256SUMS`.
+
+This is a moving development channel: downloads are replaced in place, and replacement is not atomic. Retry if
+checksums mismatch during an update. After all uploads succeed, the rolling `development` tag moves to the binaries'
+source commit, also recorded in release notes. `bee --version` reports the Cargo manifest version, which
+can be shared by several builds. Use a stable release URL when consumers require immutable inputs.
+The development prerelease does not replace the latest stable release or update Homebrew/AUR.
+
+## Windows runtime requirements
+
+Native Windows supports environment-backed API credentials and explicit Copilot tokens. Stored browser credentials,
+token imports and ChatGPT-plan login require Unix; durable sessions do support Windows.
+Install Bash for the native Bash tool and configure its executable explicitly when needed, for example Git for Windows'
+`C:/Program Files/Git/usr/bin/bash.exe`. See [native tools](tools.md) for Bash configuration and cancellation behavior.
 
 ## From source
 
@@ -78,5 +112,5 @@ The repository selects the stable Rust channel; the minimum supported Rust versi
 `Cargo.toml`. Cargo normally installs into `~/.cargo/bin`; make that directory visible to your client. Contributors
 should use the [development setup](https://github.com/noirbizarre/bee/blob/main/CONTRIBUTING.md).
 
-Bash must be installed for Bee's native Bash tool, including on source-built Windows installations. Continue with
+Bash must be installed for Bee's native Bash tool, including on Windows installations. Continue with
 [getting started](getting-started.md) to configure inference and your ACPv2 client.

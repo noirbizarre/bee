@@ -5,6 +5,7 @@
 
 [template]
 source = "https://github.com/noirbizarre/rust.tpl"
+ref = "da031b929b8e6e50bc276cc16f5b9ef642e6987e"
 
 [answers]
 archive = false
@@ -28,6 +29,7 @@ msrv = true
 msrv_version = "1.88"
 owner = "noirbizarre"
 publish = false
+rolling_prerelease = true
 service = false
 targets = [
     "x86_64-unknown-linux-gnu",
@@ -36,4 +38,5 @@ targets = [
     "aarch64-unknown-linux-musl",
     "x86_64-apple-darwin",
     "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
 ]
