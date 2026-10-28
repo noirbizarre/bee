@@ -714,9 +714,19 @@ impl FileStore {
 
 impl CredentialStore for FileStore {
     fn generation(&self, audience: Audience<'_>) -> Result<Option<u64>> {
-        match audience {
-            Audience::Provider(name) => Ok(Some(self.load()?.revision(name))),
-            Audience::McpServer(_) => Ok(None),
+        #[cfg(unix)]
+        {
+            match audience {
+                Audience::Provider(name) => Ok(Some(self.load()?.revision(name))),
+                Audience::McpServer(_) => Ok(None),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            // A generation is only available with private storage. Defer unsupported-platform
+            // errors until publication so input/flow validation keeps its actionable diagnostic.
+            let _ = audience;
+            Ok(None)
         }
     }
     fn put_guarded(
