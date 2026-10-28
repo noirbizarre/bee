@@ -235,5 +235,7 @@ jobs:
     name: 🚀 Development prerelease
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'noirbizarre/bee' }}
     uses: ./.github/workflows/publish-release.yaml
+    # Environment secrets also require forwarding across workflow_call.
+    secrets: inherit
     with:
       ref: ${{ github.sha }}
