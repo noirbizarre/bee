@@ -38,7 +38,7 @@ publish = false
 # target, so this list never drifts from the publish matrix.
 #
 # `pkg-fmt = "bin"`: the publish workflow uploads the raw executable, not an
-# archive — see publish-release.yaml's "Stage the asset" step.
+# archive — see publish-release.yaml's "Build and stage the asset" step.
 [package.metadata.binstall]
 pkg-fmt = "bin"
 
@@ -59,6 +59,9 @@ pkg-url = "{ repo }/releases/download/{ version }/bee_{ version }_darwin-amd64"
 
 [package.metadata.binstall.overrides.aarch64-apple-darwin]
 pkg-url = "{ repo }/releases/download/{ version }/bee_{ version }_darwin-arm64"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-url = "{ repo }/releases/download/{ version }/bee_{ version }_windows-amd64.exe"
 
 [profile.release]
 # Release binaries are cross-compiled once per tag and downloaded many times, so
