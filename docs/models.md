@@ -45,6 +45,11 @@ availability rule. `--endpoint` may observe metadata with automatic discovery of
 availability or expose an alternative unfiltered selectable list. Native hidden-model routing/context facts do not grant
 picker membership. No selected candidate means a choose-model error without authenticating an arbitrary account.
 
+Cloudflare AI Gateway uses explicit raw `models` with discovery disabled. Third-party IDs retain their `author/model`
+prefix and Workers AI models retain `@cf/author/model`. Native routing keys do not grant availability, and model support
+depends on the selected protocol. See [Cloudflare setup](providers.md#cloudflare-ai-gateway) and
+[request restrictions](inference.md#cloudflare-ai-gateway-requests).
+
 ## ACP and CLI
 
 The ACP picker combines available models across **all active accounts**. Machine values are qualified

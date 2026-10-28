@@ -18,6 +18,8 @@ use bee::login;
 use crate::cli::{AuthCommand, LoginArgs};
 
 pub mod models;
+#[cfg(unix)]
+mod terminal;
 
 /// Prompts must remain live, while success cannot precede configuration publication.
 struct LoginOutput<'a> {
@@ -104,6 +106,14 @@ fn acquire_environment(
     if plan.import_env().is_none() {
         return Ok(None);
     }
+    if instance.provider() == "cloudflare"
+        && plan
+            .import_env()
+            .is_some_and(|variable| env.variable(variable).is_none())
+    {
+        // A missing optional acquisition source leaves interactive manual login available.
+        return Ok(None);
+    }
     // Snapshot before reading credentials; a later login/logout must supersede this acquisition.
     let generation = store.generation(auth::Audience::Provider(instance.name()))?;
     Ok(plan
@@ -140,31 +150,30 @@ pub fn run_auth(mut command: AuthCommand) -> Result<()> {
         source,
     })?;
     let config = Config::load(&env, &project_dir)?;
-    let active = Providers::from_config(&config)?;
-    if let AuthCommand::Login(args) = &mut command
-        && args.profile.is_none()
-    {
-        // Freeze the sole active target before onboarding exposes all configured accounts.
-        args.profile = Some(chosen(&active, None)?.name().to_owned());
-    }
+    let stdin = io::stdin();
+    let interactive = stdin.is_terminal();
+    let mut input = stdin.lock();
+    let mut out = io::stdout().lock();
+    let mut err = io::stderr().lock();
+    let onboarding = if let AuthCommand::Login(args) = &mut command {
+        let draft = bee::config::persist::begin_login(&env, &project_dir, args.profile.as_deref())?;
+        args.profile = Some(draft.name().to_owned());
+        let additions = collect_instance_fields(&draft, interactive, &mut input, &mut err)?;
+        Some(draft.complete(&env, &project_dir, additions)?)
+    } else {
+        None
+    };
     let explicit = match &command {
         AuthCommand::Login(args) => args.profile.as_deref(),
         AuthCommand::Logout { profile } | AuthCommand::Status { profile } => profile.as_deref(),
     };
     // Only explicit IDs may address disabled or out-of-profile accounts.
-    let configured = if explicit.is_some() {
+    let configured = if let Some(plan) = &onboarding {
+        plan.accounts().clone()
+    } else if explicit.is_some() {
         auth::configured_accounts(&config)?
     } else {
-        active
-    };
-    let onboarding = match &command {
-        AuthCommand::Login(args) => args
-            .profile
-            .as_deref()
-            .or_else(|| configured.only_name())
-            .map(|name| bee::config::persist::prepare(&env, &project_dir, name))
-            .transpose()?,
-        _ => None,
+        Providers::from_config(&config)?
     };
     let providers = onboarding
         .as_ref()
@@ -173,9 +182,6 @@ pub fn run_auth(mut command: AuthCommand) -> Result<()> {
         bee::models::Service::production(bee::models::Settings::from_config(&config)?, &env);
     let store = FileStore::from_environment(&env)?;
     let http = UreqHttp::new(HTTP_TIMEOUT);
-    let stdin = io::stdin();
-    let interactive = stdin.is_terminal();
-    let mut input = stdin.lock();
     let mut imported = None;
     if let (Some(plan), AuthCommand::Login(args)) = (&onboarding, &command)
         && !args.with_token
@@ -185,8 +191,6 @@ pub fn run_auth(mut command: AuthCommand) -> Result<()> {
         let instance = chosen(providers, args.profile.as_deref())?;
         imported = acquire_environment(plan, &env, instance, &store)?;
     }
-    let mut out = io::stdout().lock();
-    let mut err = io::stderr().lock();
     let mut pending_output = Vec::new();
     let mut login_output = LoginOutput {
         terminal: &mut err,
@@ -233,6 +237,33 @@ pub fn run_auth(mut command: AuthCommand) -> Result<()> {
     }
     err.write_all(&pending_output).map_err(write_error)?;
     Ok(())
+}
+
+fn collect_instance_fields(
+    draft: &bee::config::persist::LoginDraft,
+    interactive: bool,
+    input: &mut dyn BufRead,
+    err: &mut dyn Write,
+) -> Result<toml::Table> {
+    let mut additions = toml::Table::new();
+    for field in draft.missing_fields() {
+        if !interactive {
+            // Piped stdin belongs to --with-token, not an undocumented multi-line form.
+            return Err(Error::ConfigWrite {
+                path: "<login>".into(),
+                reason: "required provider settings are missing; configure account settings (Cloudflare: account_id and gateway_id), or run login in a terminal",
+            });
+        }
+        let label = field.prompt_label();
+        writeln!(err, "{label}:").map_err(write_error)?;
+        err.flush().map_err(write_error)?;
+        let mut line = String::new();
+        input.read_line(&mut line).map_err(write_error)?;
+        let value = line.trim_end_matches(['\r', '\n']);
+        draft.validate_input(field.name, value)?;
+        additions.insert(field.name.into(), toml::Value::String(value.into()));
+    }
+    Ok(additions)
 }
 
 /// Run one `bee auth` command.
@@ -367,13 +398,21 @@ fn login(args: &LoginArgs, context: &mut Context<'_>) -> Result<()> {
     }
 
     let generation = context.store.generation(auth::Audience::Provider(name))?;
-    if args.with_token {
+    if args.with_token || (profile.provider() == "cloudflare" && context.interactive) {
+        #[cfg(unix)]
+        let echo = if context.interactive && io::stdin().is_terminal() {
+            // Suppress driver echo before displaying the prompt, not after a token could be pasted.
+            Some(terminal::EchoGuard::hide(io::stdin()).map_err(write_error)?)
+        } else {
+            None
+        };
         if context.interactive {
             writeln!(
                 context.err,
                 "Paste the API token for `{name}`, then press Enter:"
             )
             .map_err(write_error)?;
+            context.err.flush().map_err(write_error)?;
         }
         let mut line = String::new();
         context
@@ -383,6 +422,11 @@ fn login(args: &LoginArgs, context: &mut Context<'_>) -> Result<()> {
                 path: "<stdin>".to_owned(),
                 source,
             })?;
+        #[cfg(unix)]
+        if let Some(echo) = echo {
+            echo.restore().map_err(write_error)?;
+            writeln!(context.err).map_err(write_error)?;
+        }
         auth::store_secret_guarded(profile, &line, context.store, generation)?;
         writeln!(context.err, "Stored the API token for `{name}`.").map_err(write_error)?;
         return Ok(());
@@ -582,6 +626,85 @@ mod tests {
     use super::*;
 
     const KEY: &str = "sk-or-test-key";
+
+    #[test]
+    fn cloudflare_interactive_login_collects_missing_ids_before_the_token_without_echoing_inputs() {
+        let root = tempfile::tempdir().unwrap();
+        let env = Environment::new(Some(root.path().join("config")), None, None);
+        let draft =
+            bee::config::persist::begin_login(&env, root.path(), Some("cloudflare")).unwrap();
+        let mut input: &[u8] = b"private-account\nprivate-gateway\nprivate-token\n";
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let additions = collect_instance_fields(&draft, true, &mut input, &mut err).unwrap();
+        assert_eq!(input, b"private-token\n");
+        let plan = draft.complete(&env, root.path(), additions).unwrap();
+        let store = MemoryStore::default();
+        assert!(
+            acquire_environment(
+                &plan,
+                &env,
+                plan.accounts().get("cloudflare").unwrap(),
+                &store
+            )
+            .unwrap()
+            .is_none()
+        );
+        execute(
+            AuthCommand::Login(args(false, false, false)),
+            &mut Context {
+                env: &env,
+                providers: plan.accounts(),
+                store: &store,
+                http: &KeyGiver,
+                login_http: &bee::http::AsyncLoginHttp,
+                discovery: None,
+                timeout: Duration::from_secs(1),
+                open: &|_| panic!("static tokens have no browser login"),
+                interactive: true,
+                out: &mut out,
+                err: &mut err,
+                input: &mut input,
+            },
+        )
+        .unwrap();
+        plan.commit(&env, root.path()).unwrap();
+        assert_eq!(
+            store
+                .get(Audience::Provider("cloudflare"))
+                .unwrap()
+                .unwrap()
+                .secret()
+                .expose(),
+            "private-token"
+        );
+        assert!(out.is_empty());
+        let err = String::from_utf8(err).unwrap();
+        assert!(err.contains("Cloudflare Account ID"));
+        assert!(err.contains("Cloudflare Gateway ID"));
+        assert!(err.contains("Paste the API token"));
+        for value in ["private-account", "private-gateway", "private-token"] {
+            assert!(!err.contains(value));
+        }
+    }
+
+    #[test]
+    fn missing_routing_settings_never_consume_piped_tokens_or_publish_on_eof() {
+        let root = tempfile::tempdir().unwrap();
+        let env = Environment::new(Some(root.path().join("config")), None, None);
+        let draft =
+            bee::config::persist::begin_login(&env, root.path(), Some("cloudflare")).unwrap();
+        let mut token: &[u8] = b"private-token\n";
+        assert!(collect_instance_fields(&draft, false, &mut token, &mut Vec::new()).is_err());
+        assert_eq!(token, b"private-token\n");
+        for mut input in [
+            b"".as_slice(),
+            b"private-account\n".as_slice(),
+            b"bad/account\n".as_slice(),
+        ] {
+            assert!(collect_instance_fields(&draft, true, &mut input, &mut Vec::new()).is_err());
+        }
+        assert!(!env.global_config_path().unwrap().exists());
+    }
 
     #[cfg(unix)]
     #[test]

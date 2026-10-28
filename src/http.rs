@@ -197,19 +197,25 @@ impl InferenceHttp {
         let url = if let Some(route) = &self.test_route {
             // Preserve official endpoint identity for capability checks while exercising
             // the real adapter against a credential-free local test server.
-            let suffix = match url {
-                "https://api.openai.com/v1/responses" => "/responses",
-                "https://api.openai.com/v1/chat/completions" => "/chat/completions",
-                "https://api.anthropic.com/v1/messages" => "/v1/messages",
-                _ => ["/responses", "/chat/completions", "/v1/messages"]
-                    .into_iter()
-                    .find(|suffix| {
-                        url.strip_suffix(suffix).is_some_and(|base| {
-                            crate::auth::copilot::validate_target(base).is_ok()
-                                || test_cloud_target(base)
+            let suffix = if url.starts_with("https://api.cloudflare.com/client/v4/accounts/") {
+                // Preserve the account path so integration tests can prove routing isolation.
+                url.strip_prefix("https://api.cloudflare.com")
+                    .expect("official Cloudflare target")
+            } else {
+                match url {
+                    "https://api.openai.com/v1/responses" => "/responses",
+                    "https://api.openai.com/v1/chat/completions" => "/chat/completions",
+                    "https://api.anthropic.com/v1/messages" => "/v1/messages",
+                    _ => ["/responses", "/chat/completions", "/v1/messages"]
+                        .into_iter()
+                        .find(|suffix| {
+                            url.strip_suffix(suffix).is_some_and(|base| {
+                                crate::auth::copilot::validate_target(base).is_ok()
+                                    || test_cloud_target(base)
+                            })
                         })
-                    })
-                    .expect("test route requires a known official endpoint"),
+                        .expect("test route requires a known official endpoint"),
+                }
             };
             routed = format!("{route}{suffix}");
             routed.as_str()

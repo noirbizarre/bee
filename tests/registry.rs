@@ -15,6 +15,74 @@ fn load(text: &str) -> bee::Result<Providers> {
 }
 
 #[test]
+fn cloudflare_accounts_derive_private_protocol_targets_without_discovery_or_defaults() {
+    let providers = load("[accounts.work]\nprovider='cloudflare'\nsettings={account_id='work-account',gateway_id='work-gateway'}\nmodels=['anthropic/model']\n[accounts.personal]\nprovider='cloudflare'\nsettings={account_id='personal-account',gateway_id='personal-gateway'}\ncredential={env='PERSONAL_CLOUDFLARE_TOKEN'}").unwrap();
+    let work = providers.get("work").unwrap();
+    let personal = providers.get("personal").unwrap();
+    assert_eq!(work.protocol(), Protocol::OpenAiChat);
+    assert!(!work.discovery());
+    assert!(providers.configured_model().is_none());
+    assert_eq!(
+        work.credential(),
+        Some(&CredentialSource::Env("CLOUDFLARE_API_TOKEN".into()))
+    );
+    assert_ne!(work.credential(), personal.credential());
+    for protocol in [
+        Protocol::OpenAiChat,
+        Protocol::OpenAiResponses,
+        Protocol::AnthropicMessages,
+    ] {
+        let suffix = if protocol == Protocol::AnthropicMessages {
+            "ai"
+        } else {
+            "ai/v1"
+        };
+        assert_eq!(
+            work.endpoint(protocol).unwrap().base_url(),
+            format!("https://api.cloudflare.com/client/v4/accounts/work-account/{suffix}")
+        );
+        assert_eq!(
+            personal.endpoint(protocol).unwrap().base_url(),
+            format!("https://api.cloudflare.com/client/v4/accounts/personal-account/{suffix}")
+        );
+    }
+    let debug = format!("{providers:?}");
+    assert!(!debug.contains("work-account"));
+    assert!(!debug.contains("work-gateway"));
+}
+
+#[test]
+fn cloudflare_rejects_missing_malformed_and_rerouted_private_settings_without_echoing_values() {
+    let valid = "[accounts.work]\nprovider='cloudflare'\nsettings={account_id='private-account',gateway_id='private-gateway'}\n";
+    for invalid in [
+        "[accounts.work]\nprovider='cloudflare'".into(),
+        valid.replace("gateway_id='private-gateway'", "gateway_id=123"),
+        valid.replace("private-account", "private-account/path"),
+        valid.replace("private-account", ".."),
+        valid.replace("private-gateway", "private-gateway?query"),
+        valid.replace("private-gateway", &"x".repeat(65)),
+        valid.replace("private-account", &"x".repeat(65)),
+        valid.replace("private-gateway", ""),
+        format!("{valid}discovery=true"),
+        format!("{valid}protocol='openai-chat'\nbase_url='https://other.example/v1'"),
+        format!("{valid}headers={{'CF-AIG-Gateway-ID'='private-override'}}"),
+        format!("{valid}headers={{'X-API-Key'='private-override'}}"),
+        format!("{valid}settings_extra='private-override'"),
+        format!("{valid}model_protocols={{'@cf/meta/llama'='anthropic-messages'}}"),
+        format!("{valid}model_protocols={{'@cf/meta/llama'='openai-responses'}}"),
+    ] {
+        let error = load(&invalid).unwrap_err();
+        let diagnostic = format!("{error:?} {error}");
+        for private in ["private-account", "private-gateway", "private-override"] {
+            assert!(!diagnostic.contains(private), "{diagnostic}");
+        }
+    }
+    for gateway in ["x".to_owned(), "x".repeat(64)] {
+        load(&valid.replace("private-gateway", &gateway)).unwrap();
+    }
+}
+
+#[test]
 fn every_registered_type_has_unique_identity_and_resolves_its_native_defaults() {
     let mut ids = std::collections::BTreeSet::new();
     for definition in registry::definitions() {
@@ -22,7 +90,16 @@ fn every_registered_type_has_unique_identity_and_resolves_its_native_defaults() 
         if definition.id == "custom" {
             continue;
         }
-        let providers = load(&format!("[accounts.account]\nprovider='{}'", definition.id)).unwrap();
+        let settings = if definition.id == "cloudflare" {
+            "\nsettings={account_id='fixture-account',gateway_id='fixture-gateway'}"
+        } else {
+            ""
+        };
+        let providers = load(&format!(
+            "[accounts.account]\nprovider='{}'{settings}",
+            definition.id
+        ))
+        .unwrap();
         let instance = providers.get("account").unwrap();
         assert_eq!(instance.provider(), definition.id);
         assert_eq!(instance.name(), "account");
@@ -34,6 +111,7 @@ fn every_registered_type_has_unique_identity_and_resolves_its_native_defaults() 
         [
             "anthropic",
             "chatgpt",
+            "cloudflare",
             "custom",
             "deepseek",
             "github",

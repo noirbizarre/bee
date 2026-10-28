@@ -257,6 +257,7 @@ Shipped providers, with the variable each reads its key from:
 
 | Provider | Display name | Protocols, preferred first | Credential |
 | --- | --- | --- | --- |
+| `cloudflare` | Cloudflare AI Gateway | `openai-chat`, `openai-responses`, `anthropic-messages` | `CLOUDFLARE_API_TOKEN` |
 | `openai` | OpenAI | `openai-responses`, `openai-chat` | `OPENAI_API_KEY` |
 | `chatgpt` | ChatGPT | `openai-responses` | stored ChatGPT OAuth tokens |
 | `github` | GitHub Copilot | `openai-responses`, `anthropic-messages`, `openai-chat` | stored GitHub device OAuth; explicit env override supported |
@@ -286,6 +287,15 @@ Chat, Responses and Messages, including Gemini text models. Exact `model_protoco
 OpenCode Go uses separate endpoints (`/inference/go`) and needs an account of its own. Definitions contain no model
 lists: declare raw `models` with discovery off, or select from successful filtered discovery. Optional defaults belong
 only at root/profile `model` and are qualified.
+
+### Use Cloudflare AI Gateway
+
+Run `bee auth login cloudflare` in a terminal to collect missing Account ID, Gateway ID and an API token, or configure
+the identifiers in account `settings` and use an environment token or `--with-token`. The native provider derives
+account-specific REST endpoints for all three protocols and sends the selected gateway header. It requires a token
+with **Account → Workers AI → Read** and explicit model declarations with discovery disabled. See
+[complete setup, multiple accounts and permissions](providers.md#cloudflare-ai-gateway) and
+[protocol restrictions](inference.md#cloudflare-ai-gateway-requests).
 
 ### Use OpenCode Zen or Go
 
@@ -636,14 +646,9 @@ These are different things and Bee keeps them apart:
   returns renewable OAuth tokens tied to a verified account/workspace registration.
 - **API tokens** are pasted (`--with-token`) or read from a variable. API-key accounts support them, and they are the
   only option for providers with no browser flow.
-- **Cloudflare Workers AI** uses a *scoped API token* from the environment or the store. Bee does not
-  read or reuse Wrangler's browser-login token: it belongs to Wrangler and is not interchangeable with an API token's
-  scopes. Put the account id in `base_url`, for example
-  `https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/ai/v1` under `protocols.openai-chat`; a provider that also
-  serves the Anthropic protocol lists it beside it, with `prefer`.
-- **Cloudflare AI Gateway** is a routing integration configured with its gateway URL, upstream provider/model identities
-  and required authentication. The Workers AI URL above is not an AI Gateway catalogue endpoint. Configure models
-  manually until gateway-native discovery is implemented; not every upstream model is usable through a given gateway.
+- **Cloudflare AI Gateway and Workers AI** use the native `cloudflare` provider with private Account ID and Gateway ID
+  settings and a scoped API token. Bee does not import Wrangler browser credentials. Configure models explicitly;
+  [REST protocol restrictions](inference.md#cloudflare-ai-gateway-requests) and account/model billing requirements apply.
 - **Inference credentials** (everything above) authenticate Bee to an *LLM provider*. **MCP server authorization**
   (OAuth 2.1 for a remote tool server) is a separate audience: the credential store keeps the two in separate tables so
   one can never be offered for the other. The MCP authorization flow itself is not implemented; MCP configuration stays

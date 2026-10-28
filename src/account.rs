@@ -898,6 +898,12 @@ impl Reader<'_> {
         definition
             .validate_fields(registry::FieldOwner::Instance, &settings)
             .map_err(|reason| self.invalid(&format!("{key}.settings"), reason))?;
+        if definition.id == "cloudflare" {
+            combined = overlay(
+                &crate::provider::cloudflare::defaults(&settings, definition.defaults()),
+                own,
+            );
+        }
         if definition.id == "google-cloud" && !settings.is_empty() {
             if own.contains_key("google_cloud") {
                 return Err(self.invalid(&key, "use settings or google_cloud, not both"));
@@ -1024,6 +1030,25 @@ impl Reader<'_> {
             None => Vec::new(),
             Some(value) => self.headers(&format!("{key}.headers"), value)?,
         };
+        if definition.id == "cloudflare" {
+            let account_id = table["settings"]["account_id"]
+                .as_str()
+                .expect("validated settings");
+            if endpoints.iter().any(|endpoint| {
+                endpoint.base_url()
+                    != crate::provider::cloudflare::base_url(account_id, endpoint.protocol())
+            }) || headers
+                .iter()
+                .any(|(name, _)| crate::provider::cloudflare::reserved_header(name))
+                || self.boolean(table, &key, "discovery")?
+            {
+                return Err(self.invalid(&key, "Cloudflare requires its account-derived REST endpoints, explicit models, discovery disabled and no authentication or gateway header overrides"));
+            }
+            for (model, protocol) in &model_protocols {
+                crate::provider::cloudflare::validate_route(model, *protocol)
+                    .map_err(|reason| self.invalid(&key, reason))?;
+            }
+        }
         let credential_env_fields = table
             .get("credential")
             .and_then(|credential| credential.get("fields"))

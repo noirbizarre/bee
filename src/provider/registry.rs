@@ -47,6 +47,17 @@ pub struct Field {
     pub value_type: FieldType,
 }
 
+impl Field {
+    /// Compiled-in prompt text cannot disclose a configured value.
+    pub fn prompt_label(&self) -> &'static str {
+        match self.name {
+            "account_id" => "Cloudflare Account ID",
+            "gateway_id" => "Cloudflare Gateway ID",
+            _ => self.name,
+        }
+    }
+}
+
 const KEY_FIELDS: &[Field] = &[Field {
     name: "key",
     required: true,
@@ -54,6 +65,23 @@ const KEY_FIELDS: &[Field] = &[Field {
     owner: FieldOwner::Credential,
     value_type: FieldType::Text,
 }];
+const CLOUDFLARE_FIELDS: &[Field] = &[
+    Field {
+        name: "account_id",
+        required: true,
+        secret: false,
+        owner: FieldOwner::Instance,
+        value_type: FieldType::Identifier,
+    },
+    Field {
+        name: "gateway_id",
+        required: true,
+        secret: false,
+        owner: FieldOwner::Instance,
+        value_type: FieldType::Identifier,
+    },
+    KEY_FIELDS[0],
+];
 const CLOUD_FIELDS: &[Field] = &[
     Field {
         name: "project",
@@ -94,6 +122,16 @@ pub struct Definition {
 impl Definition {
     /// Validate the private settings envelope without serializing it into public model facts.
     pub fn validate_fields(&self, owner: FieldOwner, fields: &Table) -> Result<(), &'static str> {
+        self.inspect_fields(owner, fields, true)
+    }
+
+    /// Login may collect absent fields, but never repairs malformed configured values.
+    pub(crate) fn inspect_fields(
+        &self,
+        owner: FieldOwner,
+        fields: &Table,
+        complete: bool,
+    ) -> Result<(), &'static str> {
         if fields.keys().any(|name| {
             !self
                 .fields
@@ -104,7 +142,7 @@ impl Definition {
         }
         for field in self.fields.iter().filter(|field| field.owner == owner) {
             let Some(value) = fields.get(field.name) else {
-                if field.required {
+                if field.required && complete {
                     return Err(
                         "required provider-specific field is missing; inspect `bee providers show <type>`",
                     );
@@ -130,6 +168,9 @@ impl Definition {
                 return Err(
                     "provider-specific identifier must contain only letters, digits, dots, hyphens or underscores",
                 );
+            }
+            if self.id == "cloudflare" && owner == FieldOwner::Instance {
+                super::cloudflare::validate_field(field.name, text)?;
             }
         }
         Ok(())
@@ -236,6 +277,28 @@ pub fn definitions() -> &'static [Definition] {
                 methods: &[AuthMethod::ApiKey, AuthMethod::OAuth],
                 fields: KEY_FIELDS,
                 defaults: Table::new,
+            },
+            Definition {
+                id: "cloudflare",
+                label: "Cloudflare AI Gateway",
+                methods: &[AuthMethod::ApiKey],
+                fields: CLOUDFLARE_FIELDS,
+                defaults: || {
+                    native(
+                        defaults(
+                            "Cloudflare AI Gateway",
+                            None,
+                            Some("CLOUDFLARE_API_TOKEN"),
+                            &[
+                                ("openai-chat", ""),
+                                ("openai-responses", ""),
+                                ("anthropic-messages", ""),
+                            ],
+                        ),
+                        false,
+                        None,
+                    )
+                },
             },
             Definition {
                 id: "openai",
