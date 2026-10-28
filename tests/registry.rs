@@ -325,3 +325,108 @@ fn native_oauth_and_adc_keep_their_target_restrictions() {
         assert!(load(&format!("[accounts.account]\n{text}")).is_err());
     }
 }
+
+#[test]
+fn private_settings_are_provider_declared_and_never_echo_rejected_values() {
+    for (provider, settings) in [
+        ("openai", "{key='private-settings-sentinel'}"),
+        ("google-cloud", "'private-settings-sentinel'"),
+        ("google-cloud", "{project=42}"),
+        ("google-cloud", "{project='private-settings-sentinel/path'}"),
+        ("google-cloud", "{project=\"private-settings-sentinel\\n\"}"),
+        ("google-cloud", "{project=' '}"),
+    ] {
+        let error = load(&format!(
+            "[accounts.work]\nprovider='{provider}'\nsettings={settings}"
+        ))
+        .unwrap_err();
+        let output = format!("{error} {error:?}");
+        assert!(output.contains("accounts.work.settings"), "{output}");
+        assert!(!output.contains("private-settings-sentinel"), "{output}");
+    }
+}
+
+#[test]
+fn declared_cloud_settings_construct_targets_and_reject_competing_legacy_settings() {
+    let accounts = load("[accounts.work]\nprovider='google-cloud'\nsettings={project='private-project',location='europe-west4',quota_project='private-quota'}").unwrap();
+    let account = accounts.get("work").unwrap();
+    assert_eq!(account.settings()["project"], "private-project");
+    assert_eq!(
+        account.google_cloud().unwrap().quota_project.as_deref(),
+        Some("private-quota")
+    );
+    assert_eq!(
+        account.base_url(),
+        "https://europe-west4-aiplatform.googleapis.com/v1/projects/private-project/locations/europe-west4/endpoints/openapi"
+    );
+    assert!(!format!("{accounts:?}").contains("private-"));
+
+    let error = load("[accounts.work]\nprovider='google-cloud'\nsettings={project='private-project'}\ngoogle_cloud={project='other-private-project'}").unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("use settings or google_cloud, not both")
+    );
+    assert!(!format!("{error} {error:?}").contains("private-project"));
+}
+
+#[test]
+fn credential_field_bindings_require_environment_ownership_and_declared_extra_fields() {
+    for (credential, reason) in [
+        ("{store=true,fields={}}", "require an environment source"),
+        (
+            "{env='PRIVATE_ENV',fields={key='PRIVATE_BINDING'}}",
+            "unknown credential field",
+        ),
+        (
+            "{env='PRIVATE_ENV',fields={undeclared='PRIVATE_BINDING'}}",
+            "unknown credential field",
+        ),
+        (
+            "{env='PRIVATE_ENV',fields='PRIVATE_BINDING'}",
+            "must be a table",
+        ),
+    ] {
+        let error = load(&format!(
+            "[accounts.work]\nprovider='openai'\ncredential={credential}"
+        ))
+        .unwrap_err();
+        let output = format!("{error} {error:?}");
+        assert!(output.contains(reason), "{output}");
+        assert!(!output.contains("PRIVATE_"), "{output}");
+    }
+    // A key-only provider needs no extra bindings; the key source stays in `env`.
+    let accounts =
+        load("[accounts.work]\nprovider='openai'\ncredential={env='PRIVATE_ENV',fields={}}")
+            .unwrap();
+    let account = accounts.get("work").unwrap();
+    assert!(account.credential_env_fields().is_empty());
+    assert_eq!(
+        account.credential(),
+        Some(&CredentialSource::Env("PRIVATE_ENV".into()))
+    );
+}
+
+#[test]
+fn native_acquisition_cannot_be_borrowed_by_compatible_accounts() {
+    for (setting, reason) in [
+        (
+            "provider='openai'\ncredential={store=true,login='github'}",
+            "GitHub device login requires provider = 'github'",
+        ),
+        (
+            "provider='openai'\ncredential={adc=true}",
+            "Google Cloud settings and ADC require the google-cloud provider",
+        ),
+        (
+            "provider='openai'\ngoogle_cloud={project='private-target'}",
+            "Google Cloud settings and ADC require the google-cloud provider",
+        ),
+    ] {
+        let error = load(&format!("[accounts.work]\n{setting}")).unwrap_err();
+        let output = format!("{error} {error:?}");
+        assert!(output.contains(reason), "{output}");
+        assert!(!output.contains("private-target"), "{output}");
+        assert!(matches!(error, bee::Error::ProviderInvalid { .. }));
+    }
+}

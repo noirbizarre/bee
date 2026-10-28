@@ -61,6 +61,56 @@ fn load(text: &str) -> bee::Result<Providers> {
 }
 
 #[test]
+fn model_suggestions_deduplicate_exact_ids_without_creating_a_default_or_rewriting_filters() {
+    let providers = load("[accounts.work]\nprovider='openai'\ndiscovery=false\nmodels=['vendor/Model','vendor/Model','vendor/model']").unwrap();
+    let account = providers.get("work").unwrap();
+    assert_eq!(account.suggested_models(), ["vendor/Model", "vendor/model"]);
+    assert_eq!(
+        account.models(),
+        ["vendor/Model", "vendor/Model", "vendor/model"]
+    );
+    assert_eq!(providers.configured_model(), None);
+    let omitted = load("[accounts.work]\nprovider='openai'").unwrap();
+    assert!(omitted.get("work").unwrap().suggested_models().is_empty());
+    assert!(omitted.get("work").unwrap().model_filter().is_none());
+}
+
+#[test]
+fn invalid_model_metadata_keys_and_values_keep_leaf_provenance_without_leaking_ids() {
+    for (model, metadata) in [
+        ("private-model-sentinel ", "{display_name='valid'}"),
+        ("private-model-sentinel", "{display_name=42}"),
+        ("private-model-sentinel", "{input_limit=0}"),
+        ("private-model-sentinel", "{output_modalities=['']}"),
+        (
+            "private-model-sentinel",
+            "{unknown='private-value-sentinel'}",
+        ),
+    ] {
+        let sandbox = Sandbox::new();
+        sandbox.write(
+            &sandbox.global(),
+            "[accounts.work]\nprovider='openai'\nmodel_metadata.base={display_name='Base'}",
+        );
+        sandbox.write(
+            &sandbox.project(),
+            &format!("[accounts.work.model_metadata]\n'{model}'={metadata}"),
+        );
+        let error = sandbox.providers().unwrap_err();
+        match &error {
+            Error::ProviderInvalid { key, path, .. } => {
+                assert_eq!(key, "accounts.work.model_metadata");
+                assert_eq!(path, &sandbox.project().display().to_string());
+            }
+            other => panic!("expected metadata validation error, got {other:?}"),
+        }
+        let output = rendered(error);
+        assert!(!output.contains("private-model-sentinel"), "{output}");
+        assert!(!output.contains("private-value-sentinel"), "{output}");
+    }
+}
+
+#[test]
 fn google_cloud_constructs_global_and_regional_targets_independently_of_connection_names() {
     for (location, host) in [
         ("global", "aiplatform.googleapis.com"),

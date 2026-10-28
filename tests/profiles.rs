@@ -173,6 +173,18 @@ fn qualified_references_split_once_and_preserve_opaque_raw_model_suffixes() {
 }
 
 #[test]
+fn qualified_preferences_and_collection_debug_keep_account_and_model_values_private() {
+    let accounts = load("model='private-account/private/model'\n[accounts.private-account]\nprovider='openai'\ndiscovery=false\nmodels=['private/model']").unwrap();
+    let reference = accounts.configured_model().unwrap();
+    assert_eq!(reference.qualified(), "private-account/private/model");
+    assert_eq!(accounts.only_name(), Some("private-account"));
+    for output in [format!("{reference:?}"), format!("{accounts:?}")] {
+        assert!(!output.contains("private-account"), "{output}");
+        assert!(!output.contains("private/model"), "{output}");
+    }
+}
+
+#[test]
 fn the_profile_environment_layer_respects_file_precedence_and_origins() {
     let root = tempfile::tempdir().unwrap();
     let global = root.path().join("config/bee/config.toml");

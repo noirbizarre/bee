@@ -890,6 +890,72 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn prepared_chatgpt_runtime_rejects_wrong_providers_and_logout_before_renewal() {
+        use crate::provider::runtime::Prepared;
+
+        let root = tempfile::tempdir().unwrap();
+        let store = FileStore::new(root.path().join("credentials.json"));
+        let mut credential = Credential::new(Secret::new(SENTINEL))
+            .oauth_token(None)
+            .for_provider("chatgpt");
+        credential.oauth = Some(registration());
+        store.put(Audience::Provider("work"), &credential).unwrap();
+        let http = std::sync::Arc::new(Fake::new(json!({}), json!({})));
+        let session =
+            Session::new(store.clone(), "work".into(), &credential, http.clone()).unwrap();
+        let profiles = crate::test_support::configured_providers(
+            "[accounts.work]\nprovider='chatgpt'\n[accounts.other]\nprovider='openai'",
+        );
+        let error = Prepared::credential(&session, profiles.get("other").unwrap(), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            crate::llm::Error::ChatGpt("renewable sessions require a validated ChatGPT instance")
+        ));
+        assert_eq!(
+            Prepared::credential(&session, profiles.get("work").unwrap(), None)
+                .await
+                .unwrap()
+                .unwrap(),
+            *credential.secret()
+        );
+        let mut rotated = credential.clone();
+        rotated.secret = Secret::new("private-rotated-access");
+        store.put(Audience::Provider("work"), &rotated).unwrap();
+        // Unlike Copilot, ChatGPT pins registration identity and permits token rotation mid-turn.
+        assert_eq!(
+            Prepared::credential(
+                &session,
+                profiles.get("work").unwrap(),
+                Some(credential.secret())
+            )
+            .await
+            .unwrap()
+            .unwrap(),
+            *rotated.secret()
+        );
+        store.remove(Audience::Provider("work")).unwrap();
+        let error = Prepared::credential(
+            &session,
+            profiles.get("work").unwrap(),
+            Some(credential.secret()),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            crate::llm::Error::ChatGpt(
+                "cannot renew authentication; retry later or run `bee auth login <instance>`"
+            )
+        ));
+        assert!(!format!("{error} {error:?}").contains(SENTINEL));
+        assert!(!format!("{error} {error:?}").contains("private-rotated-access"));
+        assert_eq!(http.calls.load(Ordering::SeqCst), 0);
+    }
+
     fn token_json(id: &str) -> Value {
         json!({"access_token":SENTINEL,"refresh_token":"rotating-refresh-secret","id_token":id,"scope":SCOPES,"token_type":"Bearer","expires_in":3600})
     }

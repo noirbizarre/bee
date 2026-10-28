@@ -466,6 +466,88 @@ response_key = "api_key"
     }
 
     #[test]
+    fn malformed_flow_fields_report_their_path_without_echoing_values() {
+        for (path, value) in [
+            ("kind", Value::Integer(7)),
+            ("headless", Value::String("private-setting".into())),
+            ("help", Value::String("private-setting\n".into())),
+            ("help", Value::Integer(7)),
+            ("authorize", Value::String("private-setting".into())),
+            ("exchange", Value::Integer(7)),
+            ("authorize.extra", Value::String("private-setting".into())),
+            ("authorize.extra.label", Value::Integer(7)),
+            (
+                "authorize.extra.label",
+                Value::String("private-setting\n".into()),
+            ),
+            (
+                "exchange.verifier",
+                Value::String("private-setting!".into()),
+            ),
+        ] {
+            let mut table = flow(VALID);
+            let mut target = &mut table;
+            let parts: Vec<_> = path.split('.').collect();
+            for part in &parts[..parts.len() - 1] {
+                target = target
+                    .entry((*part).to_owned())
+                    .or_insert_with(|| Value::Table(Table::new()))
+                    .as_table_mut()
+                    .unwrap();
+            }
+            target.insert(parts.last().unwrap().to_string(), value);
+            let error = LoginSpec::from_table("private-flow-name", &table).unwrap_err();
+            assert!(matches!(&error, SpecError::Invalid { key, .. } if key == path));
+            assert!(!format!("{error:?}").contains("private-setting"));
+        }
+        for section in ["authorize", "exchange"] {
+            let mut table = flow(VALID);
+            table.remove(section);
+            assert!(
+                matches!(LoginSpec::from_table("x", &table), Err(SpecError::Invalid { key, reason: "is required" }) if key == section)
+            );
+        }
+    }
+
+    #[test]
+    fn trusted_native_flows_refuse_endpoint_overrides() {
+        for kind in ["chatgpt", "github"] {
+            let mut table = flow(&format!("kind='{kind}'"));
+            table.insert(
+                "authorize_url".into(),
+                Value::String("https://private-setting.example".into()),
+            );
+            let error = LoginSpec::from_table("x", &table).unwrap_err();
+            assert!(
+                matches!(&error, SpecError::Unknown { key, allowed } if key == "authorize_url" && allowed == "kind")
+            );
+            assert!(!format!("{error:?}").contains("private-setting"));
+        }
+    }
+
+    #[test]
+    fn flow_debug_redacts_urls_help_names_and_extra_parameters() {
+        let mut table = flow(VALID);
+        table.insert("help".into(), Value::String("private-help".into()));
+        table["authorize_url"] = Value::String("https://private-host.example/auth".into());
+        table["authorize"].as_table_mut().unwrap().insert(
+            "extra".into(),
+            Value::Table(Table::from_iter([(
+                "label".into(),
+                Value::String("private-extra".into()),
+            )])),
+        );
+        let spec = LoginSpec::from_table("private-name", &table).unwrap();
+        assert_eq!(
+            spec.authorize.extra,
+            [("label".into(), "private-extra".into())]
+        );
+        let debug = format!("{spec:?}");
+        assert!(debug.contains("PkceKey"));
+        assert!(!debug.contains("private-"));
+    }
+
+    #[test]
     fn a_flow_is_refused_for_each_of_these_mistakes() {
         for (name, text) in [
             ("kind", VALID.replace("pkce-key", "device-code")),

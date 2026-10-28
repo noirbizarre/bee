@@ -202,6 +202,34 @@ fn rendered(error: Error) -> String {
     format!("{:?}", miette::Report::new(error))
 }
 
+#[rstest]
+#[case::different_provider(Credential::new(Secret::new(SECRET)).for_provider("anthropic"), "provider type")]
+#[case::unsupported_method(Credential::new(Secret::new(SECRET)).oauth_token(Some(Secret::new("refresh-canary"))).for_provider("openai"), "authentication method")]
+#[case::blank_required_key(Credential::new(Secret::new(" \t")), "credential fields")]
+#[case::unknown_secret_field(Credential::api_key_fields(Secret::new(SECRET), std::collections::BTreeMap::from([("field-canary".into(), Secret::new("secondary-canary"))])), "credential fields")]
+fn incompatible_stored_material_cannot_authenticate_an_account_or_leak_its_fields(
+    #[case] credential: Credential,
+    #[case] expected_key: &str,
+) {
+    let sandbox = Sandbox::new();
+    let providers =
+        sandbox.providers("[accounts.work]\nprovider='openai'\ncredential={store=true}\n");
+    let store = MemoryStore::default();
+    store.put(Audience::Provider("work"), &credential).unwrap();
+
+    let error = auth::resolve(profile(&providers, "work"), &sandbox.env(), &store, 0).unwrap_err();
+    assert!(matches!(&error, Error::ProviderInvalid { key, .. } if key == expected_key));
+    let output = format!("{error:?}\n{error}");
+    let output = format!("{output}\n{}", rendered(error));
+    for canary in [SECRET, "refresh-canary", "field-canary", "secondary-canary"] {
+        assert!(!output.contains(canary), "{output}");
+    }
+    assert_eq!(
+        store.get(Audience::Provider("work")).unwrap(),
+        Some(credential)
+    );
+}
+
 fn profile<'a>(providers: &'a Providers, name: &str) -> &'a Profile {
     providers.get(name).unwrap()
 }
@@ -990,6 +1018,197 @@ mod file_store {
 
     fn mode(path: &std::path::Path) -> u32 {
         fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[rstest]
+    #[case::material_not_object(serde_json::json!(SECRET), "credential material must be an object")]
+    #[case::missing_method(serde_json::json!({"fields": {}}), "unsupported or inconsistent")]
+    #[case::unknown_method(serde_json::json!({"method": SECRET}), "unsupported or inconsistent")]
+    #[case::unknown_key_field(serde_json::json!({"method": "api-key", "fields": {}, SECRET: SECRET}), "unsupported or inconsistent")]
+    #[case::missing_fields(serde_json::json!({"method": "api-key"}), "API key fields must be an object")]
+    #[case::fields_not_object(serde_json::json!({"method": "api-key", "fields": SECRET}), "API key fields must be an object")]
+    #[case::field_not_text(serde_json::json!({"method": "api-key", "fields": {SECRET: {"value": SECRET}}}), "credential fields must be nonempty text")]
+    #[case::blank_field(serde_json::json!({"method": "api-key", "fields": {SECRET: " \t"}}), "credential fields must be nonempty text")]
+    #[case::unknown_oauth_field(serde_json::json!({"method": "oauth", SECRET: SECRET}), "unsupported or inconsistent")]
+    #[case::empty_refresh(serde_json::json!({"method": "oauth", "refresh_token": ""}), "refresh token must be nonempty text")]
+    #[case::refresh_not_text(serde_json::json!({"method": "oauth", "refresh_token": {SECRET: SECRET}}), "refresh token must be nonempty text")]
+    fn malformed_typed_material_is_redacted_and_cannot_be_replaced_by_a_write(
+        #[case] material: serde_json::Value,
+        #[case] reason: &str,
+    ) {
+        let sandbox = Sandbox::new();
+        let store = sandbox.store();
+        let retained = Credential::new(Secret::new("retained-canary"));
+        store
+            .put(Audience::Provider("retained"), &retained)
+            .unwrap();
+        let mut document: serde_json::Value =
+            serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+        document["providers"]["broken"] = serde_json::json!({
+            "secret": SECRET, "provider_type": "custom", "material": material
+        });
+        let before = serde_json::to_vec(&document).unwrap();
+        fs::write(store.path(), &before).unwrap();
+
+        for error in [
+            store.get(Audience::Provider("retained")).unwrap_err(),
+            store
+                .put(Audience::Provider("broken"), &retained)
+                .unwrap_err(),
+            store.remove(Audience::Provider("broken")).unwrap_err(),
+        ] {
+            assert!(
+                matches!(&error, Error::AuthStoreParse { reason: message, .. } if message.contains(reason))
+            );
+            let output = format!("{error:?}\n{error}");
+            let output = format!("{output}\n{}", rendered(error));
+            for canary in [SECRET, "retained-canary"] {
+                assert!(!output.contains(canary), "{output}");
+            }
+            assert_eq!(fs::read(store.path()).unwrap(), before);
+        }
+        // Repair only the corrupt record to prove failed mutations retained the valid account.
+        document["providers"]
+            .as_object_mut()
+            .unwrap()
+            .remove("broken");
+        fs::write(store.path(), serde_json::to_vec(&document).unwrap()).unwrap();
+        assert_eq!(
+            store.get(Audience::Provider("retained")).unwrap(),
+            Some(retained)
+        );
+        assert_eq!(
+            store.generation(Audience::Provider("retained")).unwrap(),
+            Some(1)
+        );
+    }
+
+    #[rstest]
+    #[case::empty_provider("provider_type", serde_json::json!(""), "provider type must be nonempty text")]
+    #[case::provider_not_text("provider_type", serde_json::json!({SECRET: SECRET}), "provider type must be nonempty text")]
+    #[case::revisions_not_object("profile_revisions", serde_json::json!(SECRET), "profile revisions must be an object")]
+    #[case::revision_not_integer("profile_revisions", serde_json::json!({SECRET: SECRET}), "profile revisions must be integers")]
+    #[case::host_not_text("host_id", serde_json::json!({SECRET: SECRET}), "host identity must be text")]
+    #[case::providers_not_object("providers", serde_json::json!(SECRET), "`providers` must be an object")]
+    #[case::mcp_not_object("mcp_servers", serde_json::json!(SECRET), "`mcp_servers` must be an object")]
+    fn malformed_version_three_metadata_never_reaches_diagnostics_or_gets_overwritten(
+        #[case] field: &str,
+        #[case] value: serde_json::Value,
+        #[case] reason: &str,
+    ) {
+        let sandbox = Sandbox::new();
+        let store = sandbox.store();
+        let credential = Credential::new(Secret::new(SECRET));
+        store.put(Audience::Provider("work"), &credential).unwrap();
+        let mut document: serde_json::Value =
+            serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+        let entry_field = field == "provider_type";
+        if entry_field {
+            document["providers"]["work"][field] = value;
+        } else {
+            document[field] = value;
+        }
+        let before = serde_json::to_vec(&document).unwrap();
+        fs::write(store.path(), &before).unwrap();
+        for error in [
+            store.get(Audience::Provider("work")).unwrap_err(),
+            store
+                .put(Audience::Provider("work"), &credential)
+                .unwrap_err(),
+        ] {
+            assert!(
+                matches!(&error, Error::AuthStoreParse { reason: message, .. } if message.contains(reason))
+            );
+            assert!(!format!("{error:?}\n{error}").contains(SECRET));
+            assert!(!rendered(error).contains(SECRET));
+        }
+        assert_eq!(fs::read(store.path()).unwrap(), before);
+    }
+
+    #[rstest]
+    #[case::empty_provider(Credential::new(Secret::new(SECRET)).for_provider(""))]
+    #[case::blank_secondary(Credential::api_key_fields(Secret::new(SECRET), std::collections::BTreeMap::from([("secondary-canary".into(), Secret::new(" \t"))])))]
+    #[case::empty_refresh(Credential::new(Secret::new(SECRET)).oauth_token(Some(Secret::new(""))))]
+    fn invalid_typed_writes_preserve_both_audiences_and_the_login_generation(
+        #[case] invalid: Credential,
+    ) {
+        let sandbox = Sandbox::new();
+        let store = sandbox.store();
+        let provider = Credential::new(Secret::new("provider-canary"));
+        let mcp = Credential::new(Secret::new("mcp-canary"))
+            .oauth_token(None)
+            .expiring_at(100);
+        store.put(Audience::Provider("shared"), &provider).unwrap();
+        store.put(Audience::McpServer("shared"), &mcp).unwrap();
+        let before = fs::read(store.path()).unwrap();
+        let generation = store.generation(Audience::Provider("shared")).unwrap();
+        for audience in [Audience::Provider("shared"), Audience::McpServer("shared")] {
+            let error = store
+                .put_guarded(audience, &invalid, generation)
+                .unwrap_err();
+            assert!(matches!(error, Error::AuthStoreParse { .. }));
+            assert!(!rendered(error).contains(SECRET));
+            assert_eq!(fs::read(store.path()).unwrap(), before);
+            assert_eq!(
+                store.generation(Audience::Provider("shared")).unwrap(),
+                generation
+            );
+            assert_eq!(
+                store.get(Audience::Provider("shared")).unwrap(),
+                Some(provider.clone())
+            );
+            let restored = store.get(Audience::McpServer("shared")).unwrap().unwrap();
+            assert_eq!(restored, mcp);
+            assert!(!restored.is_expired(99));
+            assert!(restored.is_expired(100));
+        }
+        assert_eq!(
+            store.generation(Audience::McpServer("shared")).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn removing_the_last_mcp_only_credential_deletes_the_store_and_is_idempotent() {
+        let sandbox = Sandbox::new();
+        let store = sandbox.store();
+        let audience = Audience::McpServer("only");
+        store
+            .put(
+                audience,
+                &Credential::new(Secret::new(SECRET)).oauth_token(None),
+            )
+            .unwrap();
+        assert!(store.remove(audience).unwrap());
+        assert!(!store.path().exists());
+        assert!(!store.remove(audience).unwrap());
+        assert_eq!(store.get(audience).unwrap(), None);
+    }
+
+    #[test]
+    fn an_occupied_atomic_write_path_cannot_destroy_the_previous_credentials() {
+        let sandbox = Sandbox::new();
+        let store = sandbox.store();
+        let audience = Audience::Provider("work");
+        let retained = Credential::new(Secret::new(SECRET));
+        store.put(audience, &retained).unwrap();
+        let before = fs::read(store.path()).unwrap();
+        // A directory cannot be removed as a leftover file, even when tests run as root.
+        let temporary = store
+            .path()
+            .with_file_name(format!("credentials.json.{}.tmp", std::process::id()));
+        fs::create_dir(&temporary).unwrap();
+        let error = store
+            .put(
+                audience,
+                &Credential::new(Secret::new("replacement-canary")),
+            )
+            .unwrap_err();
+        assert!(matches!(error, Error::AuthStoreWrite { .. }));
+        assert!(!rendered(error).contains("replacement-canary"));
+        assert_eq!(fs::read(store.path()).unwrap(), before);
+        assert_eq!(store.get(audience).unwrap(), Some(retained));
+        assert_eq!(store.generation(audience).unwrap(), Some(1));
     }
 
     #[rstest]
