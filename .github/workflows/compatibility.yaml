@@ -28,7 +28,7 @@ jobs:
           cache: true
       - uses: jdx/mr-boxington-action@v1
         with:
-          cache-key-suffix: compatibility
+          cache-generation: compatibility-v1
           save-on-pull-request: true
       - name: Install the TCK Python runtime
         run: uv python install 3.14

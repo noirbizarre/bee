@@ -57,9 +57,10 @@ jobs:
 
       # The target payload includes Cargo downloads; a second Rust cache would
       # restore/save the same paths. Mise supplies mbx and native Cargo wrapping.
+      # Workload generations scope fallback restores too, unlike key suffixes.
       - uses: jdx/mr-boxington-action@v1
         with:
-          cache-key-suffix: lint
+          cache-generation: lint-v1
           save-on-pull-request: true
 
       # The hooks, not the mise tasks: this is the same command a developer's
@@ -103,7 +104,7 @@ jobs:
 
       - uses: jdx/mr-boxington-action@v1
         with:
-          cache-key-suffix: tests-${{ matrix.os.flag }}
+          cache-generation: tests-${{ matrix.os.flag }}-v1
           save-on-pull-request: true
 
       - name: Disable Windows Defender real-time scanning
@@ -181,7 +182,7 @@ jobs:
       - uses: jdx/mr-boxington-action@v1
         with:
           version: 1.28.0
-          cache-key-suffix: msrv
+          cache-generation: msrv-v1
           save-on-pull-request: true
 
       # `check`, not `test`: dev-dependencies routinely require a newer
@@ -220,7 +221,7 @@ jobs:
       - uses: jdx/mr-boxington-action@v1
         with:
           version: 1.28.0
-          cache-key-suffix: pr-build-${{ matrix.build.target }}
+          cache-generation: pr-build-${{ matrix.build.target }}-v1
           save-on-pull-request: true
       - uses: taiki-e/install-action@cross
         if: matrix.build.cross
