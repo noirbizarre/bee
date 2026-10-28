@@ -227,9 +227,9 @@ jobs:
           CROSS: ${{ matrix.build.cross }}
         run: |
           if [ "${CROSS:-}" = "true" ]; then
-            cross build --locked --target "$TARGET"
+            cross build --profile ci --locked --target "$TARGET"
           else
-            cargo build --locked --target "$TARGET"
+            cargo build --profile ci --locked --target "$TARGET"
           fi
 
   prerelease:

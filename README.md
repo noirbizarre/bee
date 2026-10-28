@@ -143,7 +143,7 @@ handling are implemented. Richer observability remains future work.
 ## Installation
 
 Bee is not published to crates.io (the `bee` crate name is taken by an
-unrelated project); releases will be distributed as GitHub release binaries, a Homebrew formula and an AUR package.
+unrelated project); releases are distributed as GitHub release binaries, a Homebrew formula and an AUR package.
 
 ```bash
 brew install noirbizarre/homebrew-tap/bee
@@ -156,7 +156,10 @@ paru -S bee-agent  # or your AUR helper of choice
 Or download a binary for your platform from the
 [latest release](https://github.com/noirbizarre/bee/releases/latest).
 
-The Homebrew and AUR packages only exist once the first release has been published.
+The [development prerelease](https://github.com/noirbizarre/bee/releases/tag/development) provides binaries for
+Linux, macOS and Windows from successful main release builds or an explicit manual rebuild.
+Its rolling `development` tag points to the published binaries' source commit, also recorded in release notes;
+package managers track stable releases.
 
 See [installation](docs/installation.md) for platform selection, checksum verification and building from source.
 
