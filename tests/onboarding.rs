@@ -12,6 +12,164 @@ fn fixture(text: &str) -> (tempfile::TempDir, Environment) {
     (root, env)
 }
 
+fn cloudflare_inputs() -> toml::Table {
+    toml::Table::from_iter([
+        (
+            "account_id".into(),
+            toml::Value::String("private-account".into()),
+        ),
+        (
+            "gateway_id".into(),
+            toml::Value::String("private-gateway".into()),
+        ),
+    ])
+}
+
+#[test]
+fn cloudflare_login_collects_only_missing_fields_and_publishes_settings_after_preflight() {
+    let original = "# keep this comment\n[accounts.work]\nprovider='cloudflare'\nenabled=false\ncredential={env='WORK_TOKEN'}\n[profiles.default]\naccounts=['work']\n";
+    let (root, env) = fixture(original);
+    let env = env.with_variable("WORK_TOKEN", "private-token");
+    assert!(Providers::from_config(&Config::load(&env, root.path()).unwrap()).is_err());
+    let draft = persist::begin_login(&env, root.path(), None).unwrap();
+    assert_eq!(draft.name(), "work");
+    assert_eq!(
+        draft
+            .missing_fields()
+            .iter()
+            .map(|field| field.name)
+            .collect::<Vec<_>>(),
+        ["account_id", "gateway_id"]
+    );
+    let plan = draft
+        .complete(&env, root.path(), cloudflare_inputs())
+        .unwrap();
+    let credential = plan.import_credential(&env).unwrap().unwrap();
+    assert_eq!(credential.secret().expose(), "private-token");
+    assert_eq!(
+        std::fs::read_to_string(env.global_config_path().unwrap()).unwrap(),
+        original
+    );
+    // Unrelated concurrent edits must survive the delayed configuration publication.
+    std::fs::write(
+        env.global_config_path().unwrap(),
+        format!("{original}\n[agent]\nmax_steps=12\n"),
+    )
+    .unwrap();
+    plan.commit(&env, root.path()).unwrap();
+    let text = std::fs::read_to_string(env.global_config_path().unwrap()).unwrap();
+    assert!(text.contains("# keep this comment"));
+    assert!(!text.contains("private-token"));
+    let config = Config::load(&env, root.path()).unwrap();
+    let providers = Providers::from_config(&config).unwrap();
+    let work = providers.get("work").unwrap();
+    assert!(!work.enabled());
+    assert_eq!(work.settings()["gateway_id"], "private-gateway");
+    assert!(matches!(
+        work.credential(),
+        Some(bee::provider::CredentialSource::Store { .. })
+    ));
+    assert_eq!(
+        config.get("agent.max_steps").unwrap().as_integer(),
+        Some(12)
+    );
+    assert!(providers.configured_model().is_none());
+    assert!(
+        persist::begin_login(&env, root.path(), Some("work"))
+            .unwrap()
+            .missing_fields()
+            .is_empty()
+    );
+}
+
+#[test]
+fn cloudflare_first_login_and_partially_configured_login_do_not_invent_routing_context() {
+    let (root, env) = fixture("");
+    let draft = persist::begin_login(&env, root.path(), Some("cloudflare")).unwrap();
+    let plan = draft
+        .complete(&env, root.path(), cloudflare_inputs())
+        .unwrap();
+    plan.commit(&env, root.path()).unwrap();
+    let providers = Providers::from_config(&Config::load(&env, root.path()).unwrap()).unwrap();
+    assert!(providers.get("cloudflare").unwrap().models().is_empty());
+    let original =
+        "[accounts.work]\nprovider='cloudflare'\nsettings={account_id='already-configured'}\n";
+    let (root, env) = fixture(original);
+    let draft = persist::begin_login(&env, root.path(), None).unwrap();
+    assert_eq!(draft.missing_fields().len(), 1);
+    assert!(draft.validate_input("account_id", "replacement").is_err());
+    let mut additions = cloudflare_inputs();
+    additions.remove("account_id");
+    let plan = draft.complete(&env, root.path(), additions).unwrap();
+    assert_eq!(
+        plan.accounts().get("work").unwrap().settings()["account_id"],
+        "already-configured"
+    );
+}
+
+#[test]
+fn login_drafts_reject_unrelated_incomplete_accounts_and_malformed_present_fields() {
+    for text in [
+        "[accounts.work]\nprovider='cloudflare'\nsettings={account_id='bad/value'}",
+        "[accounts.work]\nprovider='cloudflare'\n[accounts.other]\nprovider='cloudflare'",
+    ] {
+        let (root, env) = fixture(text);
+        assert!(persist::begin_login(&env, root.path(), Some("work")).is_err());
+        assert_eq!(
+            std::fs::read_to_string(env.global_config_path().unwrap()).unwrap(),
+            text
+        );
+    }
+}
+
+#[test]
+fn collected_settings_cannot_overwrite_a_concurrent_target_edit() {
+    let original = "[accounts.work]\nprovider='cloudflare'\n";
+    let (root, env) = fixture(original);
+    let draft = persist::begin_login(&env, root.path(), Some("work")).unwrap();
+    let plan = draft
+        .complete(&env, root.path(), cloudflare_inputs())
+        .unwrap();
+    let replacement = format!("{original}settings={{account_id='concurrent-account'}}\n");
+    std::fs::write(env.global_config_path().unwrap(), &replacement).unwrap();
+    assert!(
+        plan.commit(&env, root.path())
+            .unwrap_err()
+            .to_string()
+            .contains("authority changed")
+    );
+    assert_eq!(
+        std::fs::read_to_string(env.global_config_path().unwrap()).unwrap(),
+        replacement
+    );
+}
+
+#[test]
+fn login_provenance_ignores_a_separate_account_with_a_dotted_id() {
+    let original = "[accounts.work]\nprovider='cloudflare'\n[accounts.'work.personal']\nprovider='openai'\ncredential={env='PERSONAL_TOKEN'}\n";
+    let (root, env) = fixture(original);
+    let draft = persist::begin_login(&env, root.path(), Some("work")).unwrap();
+    let plan = draft
+        .complete(&env, root.path(), cloudflare_inputs())
+        .unwrap();
+    let replacement = original.replace(
+        "credential={env='PERSONAL_TOKEN'}",
+        "credential={store=true}",
+    );
+    std::fs::write(env.global_config_path().unwrap(), &replacement).unwrap();
+    plan.commit(&env, root.path()).unwrap();
+    let config = Config::load(&env, root.path()).unwrap();
+    let providers = Providers::from_config(&config).unwrap();
+    assert_eq!(
+        providers.get("work").unwrap().settings()["gateway_id"],
+        "private-gateway"
+    );
+    assert!(matches!(
+        providers.get("work.personal").unwrap().credential(),
+        Some(bee::provider::CredentialSource::Store { .. })
+    ));
+}
+
 #[test]
 fn pending_login_rejects_a_new_project_authority_override_without_touching_user_configuration() {
     let original = "[accounts.work]\nprovider='openai'\ncredential={env='ORIGINAL_ACCOUNT'}\n";
