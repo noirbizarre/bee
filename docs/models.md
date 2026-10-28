@@ -28,8 +28,8 @@ if a project or `BEE_CONFIG` file overrides profile membership, update that memb
 in the private credential store. Successful authentication immediately discovers models; discovery failure does not undo
 login. Manual token login uses the same hook. ChatGPT still requires its existing browser OAuth flow.
 
-The OpenRouter, ChatGPT, GitHub Copilot and OpenCode Go presets enable native discovery automatically.
-Legacy OpenCode Zen configuration retains opt-in discovery; first-use CLI onboarding enables it explicitly.
+The OpenRouter, ChatGPT, GitHub Copilot and OpenCode Go provider types enable native discovery automatically.
+OpenCode Zen retains opt-in discovery, including first-use CLI onboarding; set `discover_models = true` to enable it.
 Google AI Studio (`google-aistudio`) enables generic OpenAI-compatible model listing automatically.
 Set `discover_models = false` to disable
 automatic listing on a connection. `[catalog]` below controls public Models.dev metadata independently of native discovery.
@@ -61,12 +61,12 @@ bodies, credential values or URLs. Discovery failure never prevents manually con
 
 ```toml
 [providers.work]
-preset = "openai"
+type = "openai"
 model = "my-private-model"
-catalog_provider = "openai"       # explicit Models.dev ID; inherited from known shipped presets
+catalog_provider = "openai"       # explicit Models.dev ID; inherited from native type defaults
 catalog_protocol_hints = false   # opt-in only
 catalog_context_window = false   # opt-in only
-discover_models = false          # generic endpoint listing is opt-in; supported native presets enable it
+discover_models = false          # generic endpoint listing is opt-in; supported native types enable it
 
 metadata = { tool_call = true }
 model_metadata = { "my-private-model" = { display_name = "Private model", structured_output = false } }
@@ -86,7 +86,7 @@ are valid and simply have no enrichment. Presets carry associations as data; the
 
 Metadata fields resolve independently: model override → connection default → native declaration → public catalog → unknown.
 Explicit false values
-override true catalog declarations. Tables merge per key across configuration layers and presets; empty tables retain
+override true catalog declarations. Tables merge per key across configuration layers and type defaults; empty tables retain
 inherited values. Existing `model_protocols`, `context_window` and `model_context_windows` remain the canonical explicit
 routing/context settings. Catalog context/input/output limits stay distinct; output limits never silently replace
 `max_output_tokens` or protocol-specific request options.
@@ -135,7 +135,7 @@ ChatGPT OAuth credentials are renewed when necessary before listing. Missing cre
 prevent manually configured inference.
 
 Native integration identity is explicit (`discovery = "openrouter"`, `"chatgpt"` or `"github"`, supplied by the
-relevant preset), separate
+relevant provider type), separate
 from `catalog_provider` and inference protocols. Arbitrary connection names never select an adapter implicitly.
 OpenRouter requests its authenticated `/models/user` API, preserving returned labels, modalities, supported-parameter
 declarations and context limits. Its scope is user preferences, privacy settings and guardrails: it does not establish
@@ -143,14 +143,14 @@ remaining credits, quota, routing availability or successful inference. Paginati
 the listing origin/path before credentials are attached. Incomplete refreshes never replace a complete catalogue.
 
 Generic OpenAI-compatible discovery appends `/models` to each distinct configured base URL, retaining gateway paths,
-and uses the unpaginated `data[].id` contract. The `chatgpt` preset uses OpenAI's
+and uses the unpaginated `data[].id` contract. The `chatgpt` type uses OpenAI's
 account-specific `models[]` contract, keeps `visibility = "list"` entries, and presents `display_name` labels with exact
-`slug` IDs in server order. Its automatic endpoint discovery is enabled by the preset. Account names and IDs remain
+`slug` IDs in server order. Its automatic endpoint discovery is enabled by the type. Account names and IDs remain
 separate from the public Models.dev cache.
 Generic responses advertising more pages are unsupported rather than presented as complete.
 Google AI Studio uses this generic path at `https://generativelanguage.googleapis.com/v1beta/openai/models`, authenticated
 with its API key as a bearer token. IDs remain exact suggestions; configure or select a model explicitly. The external
-Models.dev association remains `google`, independent of Bee's `google-aistudio` preset ID. Native Gemini Models API
+Models.dev association remains `google`, independent of Bee's `google-aistudio` type ID. Native Gemini Models API
 pagination and capability/limit metadata are not implemented by this compatibility listing.
 Google Cloud (`google-cloud`) uses explicitly configured `google/...` model IDs and optional per-model context windows.
 It does not enable generic endpoint discovery or reuse AI Studio's catalogue as project/region availability evidence.

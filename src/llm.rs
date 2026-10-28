@@ -219,10 +219,8 @@ pub struct Step {
 #[derive(Clone)]
 pub struct Model {
     conversation_id: String,
-    google_cloud_session: Option<crate::auth::google_cloud::Session>,
-    copilot_session: Option<crate::auth::copilot::Session>,
+    runtime: Option<std::sync::Arc<dyn crate::provider::runtime::Prepared>>,
     copilot_agent: bool,
-    chatgpt_session: Option<crate::auth::chatgpt::Session>,
     instructions: String,
     cache_scope: String,
     profile: Profile,
@@ -233,6 +231,14 @@ pub struct Model {
 }
 
 impl Model {
+    /// Attach provider-owned turn authority without adding a model-loop provider branch.
+    pub fn with_runtime(
+        mut self,
+        runtime: std::sync::Arc<dyn crate::provider::runtime::Prepared>,
+    ) -> Self {
+        self.runtime = Some(runtime);
+        self
+    }
     #[cfg(test)]
     pub(crate) fn with_test_http(mut self, http: crate::http::InferenceHttp) -> Self {
         self.http = http;
@@ -245,10 +251,8 @@ impl Model {
         getrandom::fill(&mut identity).map_err(|_| Error::Randomness)?;
         Ok(Self {
             conversation_id: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(identity),
-            google_cloud_session: None,
-            copilot_session: None,
+            runtime: None,
             copilot_agent: false,
-            chatgpt_session: None,
             instructions: String::new(),
             cache_scope: "default".into(),
             http: crate::http::InferenceHttp::new()?,
@@ -278,69 +282,20 @@ impl Model {
         text: &mut (dyn FnMut(&str) + Send),
     ) -> Result<Step, Error> {
         self.context(messages, tools)?.check()?;
-        if self.profile.google_cloud().is_some() != self.google_cloud_session.is_some() {
-            return Err(Error::GoogleCloud(
-                "prepare a renewable Google Cloud session before inference",
-            ));
-        }
-        if self.profile.is_copilot() != self.copilot_session.is_some() {
-            return Err(Error::Copilot(
-                "prepare a validated Copilot session before inference",
-            ));
-        }
-        if let Some(session) = &self.copilot_session {
-            session.check(&self.profile).await.map_err(|_| {
-                Error::Copilot(
-                    "credentials changed or became unavailable; start a new turn or repeat login",
-                )
-            })?;
-            if self.credential.as_ref() != Some(session.credential.secret()) {
-                return Err(Error::Copilot(
-                    "request credential does not match the prepared session",
-                ));
+        let mut prepared;
+        let model = if let Some(runtime) = &self.runtime {
+            prepared = self.clone();
+            prepared.credential = runtime
+                .credential(&self.profile, self.credential.as_ref())
+                .await?;
+            // Classify semantic tool continuations before a wire adapter changes their role.
+            prepared.copilot_agent = !matches!(messages.last(), Some(Message::User(_)));
+            &prepared
+        } else {
+            if let Some(error) = self.profile.missing_runtime() {
+                return Err(error);
             }
-        }
-        if self.chatgpt_session.is_some() && !self.is_chatgpt() {
-            return Err(Error::ChatGpt(
-                "renewable sessions require a validated ChatGPT profile",
-            ));
-        }
-        if self.is_chatgpt() && self.chatgpt_session.is_none() {
-            return Err(Error::ChatGpt(
-                "a renewable ChatGPT session is required; run `bee auth login <profile>`",
-            ));
-        }
-        let mut refreshed;
-        let model = if let Some(session) = &self.chatgpt_session {
-            refreshed = self.clone();
-            refreshed.credential = Some(session.credential().await.map_err(|_| {
-                Error::ChatGpt(
-                    "cannot renew authentication; retry later or run `bee auth login <profile>`",
-                )
-            })?);
-            &refreshed
-        } else {
             self
-        };
-        let mut cloud;
-        let model = if let Some(session) = &model.google_cloud_session {
-            session.check(&model.profile).map_err(|_| {
-                Error::GoogleCloud("prepared session does not match the Cloud target")
-            })?;
-            cloud = model.clone();
-            cloud.credential = Some(session.credential().await.map_err(|_| Error::GoogleCloud("ADC changed or cannot be renewed; check credentials and start a new turn"))?.secret().clone());
-            &cloud
-        } else {
-            model
-        };
-        let mut copilot;
-        let model = if model.copilot_session.is_some() {
-            copilot = model.clone();
-            // Classify semantic tool continuations before Messages wraps them in a user role.
-            copilot.copilot_agent = !matches!(messages.last(), Some(Message::User(_)));
-            &copilot
-        } else {
-            model
         };
         let result = match model.endpoint().protocol() {
             Protocol::OpenAiChat => chat::run(model, messages, tools, text).await,
@@ -370,31 +325,29 @@ impl Model {
         mut self,
         session: crate::auth::google_cloud::Session,
     ) -> Self {
-        self.google_cloud_session = Some(session);
+        self.runtime = Some(std::sync::Arc::new(session));
         self
     }
     /// Attach a trusted target and identity pinned for this turn.
     pub fn with_copilot_session(mut self, session: crate::auth::copilot::Session) -> Self {
-        self.copilot_session = Some(session);
+        self.runtime = Some(std::sync::Arc::new(session));
         self
     }
 
     fn base_url(&self) -> &str {
-        self.copilot_session.as_ref().map_or_else(
-            || self.endpoint().base_url(),
-            |session| session.target.as_str(),
-        )
+        self.runtime
+            .as_ref()
+            .and_then(|runtime| runtime.base_url())
+            .unwrap_or_else(|| self.endpoint().base_url())
     }
     /// Use renewable ChatGPT credentials for each step of a long-running turn.
     pub fn with_chatgpt_session(mut self, session: crate::auth::chatgpt::Session) -> Self {
-        self.chatgpt_session = Some(session);
+        self.runtime = Some(std::sync::Arc::new(session));
         self
     }
 
     pub(crate) fn is_chatgpt(&self) -> bool {
-        self.profile
-            .login_spec()
-            .is_some_and(crate::preset::LoginSpec::is_chatgpt)
+        self.profile.is_chatgpt()
     }
     /// Use an already-resolved immutable route and budget without any catalog I/O.
     pub(crate) fn with_selection(mut self, selection: crate::models::Selection) -> Self {
@@ -472,34 +425,8 @@ impl Model {
             value.set_sensitive(true);
             headers.insert("x-opencode-session", value);
         }
-        if let Some(project) = self
-            .google_cloud_session
-            .as_ref()
-            .and_then(|s| s.quota_project())
-        {
-            let mut value =
-                reqwest::header::HeaderValue::from_str(project).map_err(|_| Error::Headers)?;
-            value.set_sensitive(true);
-            headers.insert("x-goog-user-project", value);
-        }
-        if let Some(session) = &self.copilot_session {
-            use reqwest::header::HeaderValue;
-            headers.insert(
-                "openai-intent",
-                HeaderValue::from_static("conversation-edits"),
-            );
-            headers.insert(
-                "x-interaction-type",
-                HeaderValue::from_static("conversation-agent"),
-            );
-            headers.insert(
-                "x-interaction-id",
-                HeaderValue::from_str(&session.interaction).map_err(|_| Error::Headers)?,
-            );
-            headers.insert(
-                "x-initiator",
-                HeaderValue::from_static(if self.copilot_agent { "agent" } else { "user" }),
-            );
+        if let Some(runtime) = &self.runtime {
+            runtime.headers(&mut headers, self.copilot_agent)?;
         }
         Ok(headers)
     }

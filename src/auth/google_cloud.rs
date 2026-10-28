@@ -209,6 +209,10 @@ fn fingerprint(source: &Source, principal: Option<&str>, target: &GoogleCloud) -
 
 fn bound(secret: Secret, identity: Secret, expires_at: Option<u64>) -> Credential {
     Credential {
+        material: super::Material::OAuth {
+            refresh_token: None,
+        },
+        provider_type: Some("google-cloud".into()),
         secret,
         cloud_identity: Some(identity),
         expires_at,

@@ -12,29 +12,23 @@ fn auth_error(error: crate::Error) -> Error {
     }
 }
 
-/// Implemented native integrations, not inference protocols or a provider allowlist.
+/// Native discovery capabilities. Provider registration does not extend a central enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Integration {
-    /// User preference/privacy-filtered native API.
-    OpenRouter,
-    /// Official subscription-backed OAuth integration, separate from API keys.
-    ChatGpt,
-    /// GitHub user-token authenticated Copilot model catalogue.
-    Copilot,
-    /// Console pay-as-you-go API keys, separate from subscription access.
-    OpenCode,
-    /// Go subscription API keys and offering-specific endpoints.
-    OpenCodeGo,
+pub struct Integration {
+    /// Native listing is filtered by the authenticated user's preferences.
+    pub preference_filtered: bool,
+    /// Resolve and validate an account-specific Copilot target before listing.
+    pub account_target: bool,
+    /// Subscription-backed listing uses verified native registration.
+    pub official: bool,
+    /// Offering-specific origin, separate from optional discovery enablement.
+    pub offering_root: Option<&'static str>,
 }
 
 impl Integration {
     /// Offering root is explicit, never inferred from an account or model name.
     pub(crate) fn opencode_root(self) -> Option<&'static str> {
-        match self {
-            Self::OpenCode => Some("https://opencode.ai/inference"),
-            Self::OpenCodeGo => Some("https://opencode.ai/inference/go"),
-            _ => None,
-        }
+        self.offering_root
     }
 }
 
@@ -75,7 +69,7 @@ pub(super) async fn credential(
 ) -> Result<Option<Credential>, Error> {
     if profile
         .login_spec()
-        .is_some_and(crate::preset::LoginSpec::is_chatgpt)
+        .is_some_and(crate::provider::signin::LoginSpec::is_chatgpt)
     {
         let store =
             crate::auth::FileStore::from_environment(env).map_err(|_| Error::Credentials)?;
@@ -107,8 +101,10 @@ pub(super) async fn credential(
 pub(super) fn empty_listing(profile: &Profile) -> EndpointListing {
     let chatgpt = profile
         .login_spec()
-        .is_some_and(crate::preset::LoginSpec::is_chatgpt);
-    let openrouter = profile.discovery() == Some(Integration::OpenRouter);
+        .is_some_and(crate::provider::signin::LoginSpec::is_chatgpt);
+    let openrouter = profile
+        .discovery()
+        .is_some_and(|integration| integration.preference_filtered);
     EndpointListing {
         native: profile.discovery().is_some() || chatgpt,
         provenance: if chatgpt {
@@ -138,7 +134,10 @@ pub(super) async fn discover(
     profile: &Profile,
     credential: Option<&Credential>,
 ) -> Result<EndpointListing, Error> {
-    if profile.discovery() == Some(Integration::Copilot) {
+    if profile
+        .discovery()
+        .is_some_and(|integration| integration.account_target)
+    {
         let credential = credential.ok_or(Error::Unauthorized)?;
         let target = crate::auth::copilot::target(credential.secret(), login_http)
             .await
@@ -167,8 +166,10 @@ pub(super) async fn discover(
     }
     let chatgpt = profile
         .login_spec()
-        .is_some_and(crate::preset::LoginSpec::is_chatgpt);
-    let openrouter = profile.discovery() == Some(Integration::OpenRouter);
+        .is_some_and(crate::provider::signin::LoginSpec::is_chatgpt);
+    let openrouter = profile
+        .discovery()
+        .is_some_and(|integration| integration.preference_filtered);
     let opencode = profile.discovery().and_then(Integration::opencode_root);
     if let Some(root) = opencode {
         // A proxy override must not redirect its private headers to the official service.
@@ -397,11 +398,10 @@ mod tests {
 
     #[test]
     fn copilot_non_picker_models_retain_routes_and_context_for_explicit_selection() {
-        let profile =
-            crate::test_support::configured_providers("[providers.work]\npreset='github'")
-                .get("work")
-                .unwrap()
-                .clone();
+        let profile = crate::test_support::configured_providers("[providers.work]\ntype='github'")
+            .get("work")
+            .unwrap()
+            .clone();
         let listing = copilot_listing(&profile, br#"{"data":[
             {"id":"hidden-model","model_picker_enabled":false,"supported_endpoints":["/chat/completions"],"capabilities":{"limits":{"max_context_window_tokens":32000}}},
             {"id":"picker-model","model_picker_enabled":true,"supported_endpoints":["/responses"]}
@@ -421,7 +421,7 @@ mod tests {
 
     #[test]
     fn copilot_explicit_routes_override_native_facts_but_cannot_violate_them() {
-        let profile = crate::test_support::configured_providers("[providers.work]\npreset='github'\nmodel_protocols={multi='openai-chat',conflict='openai-responses'}\ncontext_window=64000").get("work").unwrap().clone();
+        let profile = crate::test_support::configured_providers("[providers.work]\ntype='github'\nmodel_protocols={multi='openai-chat',conflict='openai-responses'}\ncontext_window=64000").get("work").unwrap().clone();
         let listing = copilot_listing(&profile, br#"{"data":[
             {"id":"multi","supported_endpoints":["/responses","/chat/completions"],"capabilities":{"limits":{"max_context_window_tokens":32000}}},
             {"id":"conflict","supported_endpoints":["/chat/completions"]},

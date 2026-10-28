@@ -112,7 +112,7 @@ fn defaults() -> (Arc<MemoryCache>, Arc<Time>) {
 #[tokio::test]
 async fn opencode_offerings_use_separate_catalogues_without_claiming_access_or_choosing_models() {
     let profiles = support::configured_providers(
-        "provider='zen'\n[providers.zen]\npreset='opencode'\n[providers.go]\npreset='opencode-go'",
+        "provider='zen'\n[providers.zen]\ntype='opencode'\n[providers.go]\ntype='opencode-go'",
     );
     let env = Environment::default()
         .with_variable("OPENCODE_API_KEY", "zen-key")
@@ -169,7 +169,7 @@ async fn opencode_offerings_use_separate_catalogues_without_claiming_access_or_c
 #[tokio::test]
 async fn opencode_custom_targets_do_not_send_proxy_credentials_to_official_discovery() {
     let profiles = support::configured_providers(
-        "[providers.test]\npreset='opencode-go'\nprotocols.openai-chat.base_url='https://proxy.example/v1'",
+        "[providers.test]\ntype='opencode-go'\nprotocols.openai-chat.base_url='https://proxy.example/v1'",
     );
     let (cache, clock) = defaults();
     let http = Arc::new(FakeHttp::new(vec![]));
@@ -212,7 +212,7 @@ impl bee::http::LoginHttp for CopilotAccount {
 #[tokio::test]
 async fn copilot_native_discovery_binds_routes_and_limits_to_the_selected_account() {
     let profile =
-        support::configured_providers("[providers.work]\npreset='github'\ncredential={env='KEY'}")
+        support::configured_providers("[providers.work]\ntype='github'\ncredential={env='KEY'}")
             .get("work")
             .unwrap()
             .clone();
@@ -282,7 +282,7 @@ async fn copilot_native_discovery_binds_routes_and_limits_to_the_selected_accoun
 #[tokio::test]
 async fn copilot_entitlement_rejection_clears_a_previous_private_listing() {
     let profile =
-        support::configured_providers("[providers.work]\npreset='github'\ncredential={env='KEY'}")
+        support::configured_providers("[providers.work]\ntype='github'\ncredential={env='KEY'}")
             .get("work")
             .unwrap()
             .clone();
@@ -306,7 +306,7 @@ async fn copilot_entitlement_rejection_clears_a_previous_private_listing() {
 #[tokio::test]
 async fn openrouter_native_pages_preserve_metadata_and_last_good_account_catalogue() {
     let profile = support::configured_providers(
-        "[providers.test]\npreset='openrouter'\ncredential={env='KEY'}",
+        "[providers.test]\ntype='openrouter'\ncredential={env='KEY'}",
     )
     .get("test")
     .unwrap()
@@ -391,7 +391,7 @@ async fn provider_pagination_cannot_send_credentials_to_another_origin_or_path()
         "https://user@openrouter.ai/api/v1/models/user",
     ] {
         let profile = support::configured_providers(
-            "[providers.test]\npreset='openrouter'\ncredential={env='KEY'}",
+            "[providers.test]\ntype='openrouter'\ncredential={env='KEY'}",
         )
         .get("test")
         .unwrap()
@@ -704,7 +704,7 @@ fn malformed_optional_limits_are_unknown_without_losing_other_model_facts() {
 #[tokio::test]
 async fn google_ai_studio_discovers_exact_models_without_public_cache_or_implicit_selection() {
     let profiles = support::configured_providers(
-        "provider='studio'\n[providers.studio]\npreset='google-aistudio'\n[providers.other]\npreset='google-aistudio'",
+        "provider='studio'\n[providers.studio]\ntype='google-aistudio'\n[providers.other]\ntype='google-aistudio'",
     );
     let profile = profiles.get("studio").unwrap();
     let (cache, clock) = defaults();
@@ -800,7 +800,7 @@ async fn chatgpt_models_keep_visible_server_order_and_names_out_of_the_public_ca
         )
         .unwrap();
     std::fs::write(store.path(),json!({"version":2,"providers":{"test":{"secret":"account-access-secret","expires_at":bee::auth::unix_now()+3600,"oauth":{"issuer":"https://auth.openai.com","client_id":"issued-client","subject":"account","refresh_token":"refresh-secret","id_token":"id-secret","scopes":["chatgpt.tokens.use.direct"]}}}}).to_string()).unwrap();
-    let profile = support::configured_providers("[providers.test]\npreset='chatgpt'")
+    let profile = support::configured_providers("[providers.test]\ntype='chatgpt'")
         .get("test")
         .unwrap()
         .clone();
@@ -862,7 +862,7 @@ async fn failed_renewal_retains_only_the_same_stored_accounts_catalogue() {
             .unwrap();
         let mut document = json!({"version":2,"providers":{"test":{"secret":"access-secret","expires_at":bee::auth::unix_now()+3600,"oauth":{"issuer":"https://auth.openai.com","client_id":"client","subject":"first-account","refresh_token":"refresh-secret","id_token":"id-secret","scopes":["chatgpt.tokens.use.direct"]}}}});
         std::fs::write(store.path(), document.to_string()).unwrap();
-        let profile = support::configured_providers("[providers.test]\npreset='chatgpt'")
+        let profile = support::configured_providers("[providers.test]\ntype='chatgpt'")
             .get("test")
             .unwrap()
             .clone();
@@ -1110,7 +1110,7 @@ fn catalog_settings_validate_types_and_merge_independently() {
     let project = bee::config::project_config_path(root.path());
     std::fs::create_dir_all(global.parent().unwrap()).unwrap();
     std::fs::create_dir_all(project.parent().unwrap()).unwrap();
-    std::fs::write(&global, "[catalog]\nrefresh=false\nrefresh_interval_secs=30\n[providers.test]\npreset='openai'\nmetadata={tool_call=true}\nmodel_metadata={known={output_limit=300}}\n").unwrap();
+    std::fs::write(&global, "[catalog]\nrefresh=false\nrefresh_interval_secs=30\n[providers.test]\ntype='openai'\nmetadata={tool_call=true}\nmodel_metadata={known={output_limit=300}}\n").unwrap();
     std::fs::write(&project, "[catalog]\nenabled=true\n[providers.test]\nmodel_metadata={known={tool_call=false},other={structured_output=true}}\n").unwrap();
     let config = Config::load(
         &Environment::new(Some(root.path().join("xdg")), None, None),
@@ -1251,7 +1251,7 @@ async fn concurrent_native_refreshes_share_only_the_same_accounts_request() {
         let (cache, clock) = defaults();
         let service = service(Settings::default(), http.clone(), cache, clock);
         let profile = support::configured_providers(
-            "[providers.test]\npreset='openrouter'\ncredential={env='KEY'}",
+            "[providers.test]\ntype='openrouter'\ncredential={env='KEY'}",
         )
         .get("test")
         .unwrap()
@@ -1494,7 +1494,7 @@ async fn native_initial_selection_is_sticky_and_survives_a_durable_restart() {
     let env = Environment::default().with_variable("KEY", "fixture-key");
     // Explicit refreshes make the ordering change deterministic without a background request.
     let profiles = support::configured_providers(
-        "[providers.test]\npreset='openrouter'\ncredential={env='KEY'}\ndiscover_models=false",
+        "[providers.test]\ntype='openrouter'\ncredential={env='KEY'}\ndiscover_models=false",
     );
     let (cache, clock) = defaults();
     let service = service(

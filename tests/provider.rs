@@ -64,7 +64,7 @@ fn google_cloud_constructs_global_and_regional_targets_independently_of_connecti
         ("global", "aiplatform.googleapis.com"),
         ("europe-west4", "europe-west4-aiplatform.googleapis.com"),
     ] {
-        let providers = load(&format!("[providers.work]\npreset='google-cloud'\nmodel='google/gemini-2.5-flash'\ngoogle_cloud={{project='resource-project',location='{location}'}}")).unwrap();
+        let providers = load(&format!("[providers.work]\ntype='google-cloud'\nmodel='google/gemini-2.5-flash'\ngoogle_cloud={{project='resource-project',location='{location}'}}")).unwrap();
         let profile = providers.get("work").unwrap();
         assert_eq!(profile.display_name(), Some("Google Cloud"));
         assert_eq!(
@@ -95,13 +95,13 @@ fn google_cloud_constructs_global_and_regional_targets_independently_of_connecti
 #[case("credential={adc=true,store=true}")]
 #[case("discover_models=true")]
 fn google_cloud_refuses_unsafe_overrides_without_echoing_configuration(#[case] extra: &str) {
-    let error = load(&format!("[providers.work]\npreset='google-cloud'\n{extra}")).unwrap_err();
+    let error = load(&format!("[providers.work]\ntype='google-cloud'\n{extra}")).unwrap_err();
     assert!(!format!("{error:?} {error}").contains(SECRET));
 }
 
 #[test]
 fn copilot_authentication_survives_env_overrides_and_disabled_discovery() {
-    let providers = load("[providers.work]\npreset='github'\ncredential={env='COPILOT_GITHUB_TOKEN'}\ndiscover_models=false").unwrap();
+    let providers = load("[providers.work]\ntype='github'\ncredential={env='COPILOT_GITHUB_TOKEN'}\ndiscover_models=false").unwrap();
     let profile = providers.get("work").unwrap();
     assert!(profile.is_copilot());
     assert_eq!(profile.catalog_provider(), Some("github-copilot"));
@@ -121,16 +121,16 @@ fn copilot_authentication_survives_env_overrides_and_disabled_discovery() {
 #[case("credential={store=true,login='chatgpt'}")]
 #[case("protocols.openai-chat.base_url='https://evil.example/sk-super-secret-token'")]
 fn copilot_rejects_unsafe_connection_overrides_without_repeating_values(#[case] extra: &str) {
-    let error = load(&format!("[providers.work]\npreset='github'\n{extra}")).unwrap_err();
+    let error = load(&format!("[providers.work]\ntype='github'\n{extra}")).unwrap_err();
     let rendered = format!("{error:?} {error}");
     assert!(!rendered.contains(SECRET));
     assert!(!rendered.contains("unsupported-secret"));
 }
 
 #[test]
-fn context_windows_merge_per_model_across_presets_and_layers() {
+fn context_windows_merge_per_model_across_instance_layers() {
     let sandbox = Sandbox::new();
-    sandbox.write(&sandbox.global(), "[presets.local]\ncontext_window=10000\nmodel_context_windows={small=1000,large=20000}\n[presets.local.protocols.openai-chat]\n[providers.work]\npreset='local'\nmodel_context_windows={small=2000}\n");
+    sandbox.write(&sandbox.global(), "[providers.work]\ntype='openai'\ncontext_window=10000\nmodel_context_windows={small=2000,large=20000}\n");
     sandbox.write(
         &sandbox.project(),
         "[providers.work]\ncontext_window=12000\nmodel_context_windows={large=30000}\n",
@@ -285,8 +285,9 @@ fn layered_model_mappings_merge_literal_ids_and_preserve_entry_origins() {
 }
 
 #[test]
-fn inference_limits_are_positive_and_work_in_presets() {
-    let providers = load("[presets.local]\ntimeout_ms=456\nmax_output_tokens=123\n[ presets.local.protocols.openai-chat ]\n[providers.work]\npreset='local'\n").unwrap();
+fn inference_limits_are_positive_and_override_native_defaults() {
+    let providers =
+        load("[providers.work]\ntype='openai'\ntimeout_ms=456\nmax_output_tokens=123\n").unwrap();
     let profile = providers.get("work").unwrap();
     assert_eq!(profile.timeout(), std::time::Duration::from_millis(456));
     assert_eq!(profile.max_output_tokens(), 123);
@@ -565,14 +566,11 @@ fn higher_layers_can_disable_inherited_write_policies_without_changing_value_typ
     sandbox.write(
         &sandbox.global(),
         r#"
-[presets.cached.protocols.openai-responses.options]
-prompt_cache_options = { enabled=true, mode='explicit', ttl='12h', breakpoints='instructions' }
-prompt_cache_key = {mode='explicit', value='private-application-key'}
 [providers.p]
-preset='cached'
 prefer=['openai-responses']
 [providers.p.protocols.openai-responses.options]
-prompt_cache_options = {enabled=true}
+prompt_cache_options = { enabled=true, mode='explicit', ttl='12h', breakpoints='instructions' }
+prompt_cache_key = {mode='explicit', value='private-application-key'}
 [providers.p.protocols.anthropic-messages.options]
 cache_control = {policy='stable-prefix-and-automatic',ttl='1h'}
 "#,
@@ -820,16 +818,16 @@ fn a_project_can_add_a_profile_and_choose_it_as_the_default() {
     "bee::provider::wrong_type"
 )]
 #[case::the_singular_protocol_key(
-    "[providers.p]\nprotocol = \"openai-chat\"",
-    "bee::provider::unknown_key"
+    "[providers.p]\ntype='custom'\nprotocol = \"openai-chat\"",
+    "bee::provider::invalid"
 )]
 #[case::base_url_beside_protocols(
     "[providers.p]\nprotocols = { openai-chat = {} }\nbase_url = \"https://x.example\"",
-    "bee::provider::unknown_key"
+    "bee::provider::invalid"
 )]
 #[case::options_beside_protocols(
     "[providers.p]\nprotocols = { openai-chat = {} }\noptions = {}",
-    "bee::provider::unknown_key"
+    "bee::provider::invalid"
 )]
 #[case::several_protocols_without_a_preference(
     "[providers.p]\nprotocols = { openai-chat = {}, anthropic-messages = {} }",
@@ -959,7 +957,7 @@ fn a_project_can_add_a_profile_and_choose_it_as_the_default() {
 )]
 #[case::option_of_the_other_protocol(
     "[providers.p]\nprotocols = { openai-chat = {} }\n[providers.p.options]\nmax_tokens = 5",
-    "bee::provider::unknown_key"
+    "bee::provider::invalid"
 )]
 #[case::bad_option_value(
     "[providers.p.protocols.openai-chat.options]\nmax_tokens_field = \"x\"",

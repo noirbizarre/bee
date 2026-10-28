@@ -3,8 +3,8 @@
 A **profile** groups references to provider **connections** and its own model preferences. A connection, defined under
 `[providers.<name>]`, owns endpoints, headers and a credential source. Profiles do not authenticate independently.
 
-Connections may inherit a human-readable `display_name` from their preset or override it directly. ACP displays
-`Display name (connection-id)` when the name differs from the ID, so two accounts using the same preset stay distinct.
+Instances may inherit a human-readable `display_name` from their provider type or override it directly. ACP displays
+`Display name (connection-id)` when the name differs from the ID, so two accounts using the same type stay distinct.
 Names are presentation only: profile membership, CLI arguments, account continuity and durable sessions still reference
 the configured connection ID. Relabeling a connection does not select another account.
 
@@ -14,12 +14,12 @@ the configured connection ID. Relabeling a connection does not select another ac
 profile = "work"
 
 [providers.work-api]
-preset = "openai"
+type = "openai"
 credential = { env = "WORK_OPENAI_API_KEY" }
 model = "connection-default"
 
 [providers.personal-chatgpt]
-preset = "chatgpt"
+type = "chatgpt"
 
 [profiles.work]
 connections = ["work-api"]
@@ -65,8 +65,8 @@ target. Unknown fields or invalid types are errors.
 
 Only member connections appear in ACP selectors, auth status and account-specific model discovery. An explicit connection
 argument to `bee auth status`, `bee auth logout` or `bee models list` must also be a member. Explicit `bee auth login`
-is an onboarding exception: it can add an existing connection to the active profile and create a missing built-in
-`openrouter`, `chatgpt` or `github` connection in user configuration. If a higher-priority configuration file overrides
+is an onboarding exception: it can add an existing instance to the active profile and create an instance named after
+a native provider type in user configuration. If a higher-priority configuration file overrides
 the profile's membership array, add the connection to that array manually before login.
 Positional arguments still name connections;
 login/logout and model listing use the active profile's default connection when omitted. Auth status without an argument
@@ -79,7 +79,7 @@ These IDs are suggestions, not an allowlist: clients can still select any well-f
 
 Profiles can explicitly share a connection; this shares its credentials and base defaults. A profile's model overrides
 do not change the connection definition or another profile. To separate accounts, define distinct connection names and
-credential sources, even when they use the same preset. Credentials remain stored by connection name, so logout of a
+credential sources, even when they use the same type. Credentials remain stored by instance name, so logout of a
 shared connection affects every profile referencing it.
 
 Profile selection is fixed at launch. Restart Bee with another selector to switch contexts. ACP provider/model choices

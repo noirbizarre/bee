@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted.
+Accepted. Provider instances and compiled-in types now follow
+[ADR-027](027-provider-registry-and-instance-authentication.md).
 
 ## Context
 

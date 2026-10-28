@@ -1,6 +1,6 @@
 //! Provider connections, free of the ACPv2 SDK.
 //!
-//! The historical Rust type `Profile` is a named connection: which protocols
+//! An `Instance` is a named connection: which protocols
 //! the endpoint speaks and where, with which headers, and which model to ask
 //! for by default. Protocols are properties of the connection, never inferred from its name, and
 //! nothing here knows a commercial provider: any name and any model id is
@@ -9,7 +9,7 @@
 //! See ADR-007, ADR-010 and ADR-013.
 //!
 //! Connections are read from the merged [`Config`] (ADR-006) under
-//! `providers.<name>`, optionally laid over a preset (ADR-009). Named grouping
+//! `providers.<name>`, referencing a registered provider type. Named grouping
 //! profiles scope the returned collection and its default connection (ADR-022).
 //! Nothing is sent anywhere yet:
 //! this module only describes endpoints. A credential is a *reference* to where
@@ -28,17 +28,24 @@ use toml::{Table, Value};
 
 use crate::config::Config;
 use crate::error::{Error, Result};
-use crate::preset::{Catalog, LoginSpec, SpecError, deep_merge};
+use signin::{LoginSpec, SpecError, deep_merge};
 
 pub mod cache;
+pub mod registry;
+pub mod runtime;
+pub mod signin;
 use cache::{AnthropicCache, OpenAiCache};
+pub use registry::AuthMethod;
 
 /// The keys a profile table accepts.
 const PROFILE_KEYS: &[&str] = &[
     "google_cloud",
     "display_name",
-    "auth",
-    "preset",
+    "type",
+    "settings",
+    "protocol",
+    "base_url",
+    "options",
     "protocols",
     "prefer",
     "model",
@@ -54,39 +61,12 @@ const PROFILE_KEYS: &[&str] = &[
     "catalog_protocol_hints",
     "catalog_context_window",
     "discover_models",
-    "discovery",
     "metadata",
     "model_metadata",
 ];
 
 /// The keys a table under `protocols` accepts.
 const ENDPOINT_KEYS: &[&str] = &["base_url", "options"];
-
-/// The keys a preset table accepts: a profile's, but a preset cannot be built
-/// on another, so chains and cycles cannot exist.
-const PRESET_KEYS: &[&str] = &[
-    "google_cloud",
-    "display_name",
-    "auth",
-    "protocols",
-    "prefer",
-    "model",
-    "models",
-    "model_protocols",
-    "credential",
-    "headers",
-    "timeout_ms",
-    "max_output_tokens",
-    "context_window",
-    "model_context_windows",
-    "catalog_provider",
-    "catalog_protocol_hints",
-    "catalog_context_window",
-    "discover_models",
-    "discovery",
-    "metadata",
-    "model_metadata",
-];
 
 /// How Bee talks to an endpoint.
 ///
@@ -388,7 +368,10 @@ impl GoogleCloud {
 
 /// One named connection profile.
 #[derive(Clone, PartialEq, Eq)]
-pub struct Profile {
+pub struct Instance {
+    settings: BTreeMap<String, String>,
+    credential_env_fields: BTreeMap<String, String>,
+    provider_type: String,
     google_cloud: Option<GoogleCloud>,
     copilot: bool,
     name: String,
@@ -417,10 +400,13 @@ pub struct Profile {
     model_metadata: BTreeMap<String, crate::models::Metadata>,
 }
 
+/// Historical Rust API alias. Grouping user profiles live in `crate::profile`.
+pub type Profile = Instance;
+
 // Configuration strings can contain secrets regardless of the field's intended purpose.
 impl fmt::Debug for Profile {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Profile")
+        f.debug_struct("Instance")
             .field("endpoints", &self.endpoints)
             .field("has_model", &self.model.is_some())
             .field("model_count", &self.models.len())
@@ -434,6 +420,48 @@ impl fmt::Debug for Profile {
 }
 
 impl Profile {
+    pub(crate) fn missing_runtime(&self) -> Option<crate::llm::Error> {
+        if self.google_cloud().is_some() {
+            Some(crate::llm::Error::GoogleCloud(
+                "prepare a renewable Google Cloud session before inference",
+            ))
+        } else if self.is_copilot() {
+            Some(crate::llm::Error::Copilot(
+                "prepare a validated Copilot session before inference",
+            ))
+        } else if self.is_chatgpt() {
+            Some(crate::llm::Error::ChatGpt(
+                "a renewable session is required; run `bee auth login <instance>`",
+            ))
+        } else {
+            None
+        }
+    }
+    /// Private provider/account configuration; callers must not expose it as model metadata.
+    pub fn settings(&self) -> &BTreeMap<String, String> {
+        &self.settings
+    }
+    /// Additional declared secret-field bindings; values are variable names, never secrets.
+    pub fn credential_env_fields(&self) -> &BTreeMap<String, String> {
+        &self.credential_env_fields
+    }
+    /// Native wire/auth authority belongs to the type, not to optional login or discovery.
+    pub fn is_chatgpt(&self) -> bool {
+        registry::definition(&self.provider_type)
+            .and_then(registry::Definition::integration)
+            .is_some_and(|capability| capability.official)
+    }
+    /// Registered integration identity; independent of the instance name.
+    pub fn provider_type(&self) -> &str {
+        &self.provider_type
+    }
+
+    /// Supported methods; the active method belongs to the resolved credential material.
+    pub fn auth_methods(&self) -> &'static [AuthMethod] {
+        registry::definition(&self.provider_type)
+            .expect("validated provider type")
+            .methods
+    }
     /// Deployment target for official Google Cloud inference.
     pub fn google_cloud(&self) -> Option<&GoogleCloud> {
         self.google_cloud.as_ref()
@@ -684,12 +712,8 @@ impl Providers {
     }
 
     pub(crate) fn connections(config: &Config) -> Result<BTreeMap<String, Profile>> {
-        // Built before any profile is read, so a profile can name a preset or
-        // a login flow the user defined (ADR-009).
-        let catalog = Catalog::from_config(config)?;
         let reader = Reader {
             config,
-            catalog: &catalog,
             fallback: "<unknown>".to_owned(),
         };
 
@@ -807,7 +831,6 @@ pub fn check_model_id(model: &str) -> std::result::Result<(), &'static str> {
 /// Reads one configuration, naming the file of whatever goes wrong.
 struct Reader<'a> {
     config: &'a Config,
-    catalog: &'a Catalog,
     // Where a value no file set came from: the preset that supplied it.
     fallback: String,
 }
@@ -820,12 +843,9 @@ impl Reader<'_> {
             .map_or_else(|| self.fallback.clone(), |path| path.display().to_string())
     }
 
-    /// Where the preset `name` is defined.
+    /// Built-in defaults have no user file; their identity is safe compiled-in data.
     fn preset_origin(&self, name: &str) -> String {
-        match self.config.origin(&format!("presets.{name}")) {
-            Some(path) => path.display().to_string(),
-            None => format!("<built-in preset {name}>"),
-        }
+        format!("<built-in provider {name}>")
     }
 
     fn wrong_type(&self, key: &str, expected: &'static str, found: &Value) -> Error {
@@ -893,31 +913,98 @@ impl Reader<'_> {
             ));
         }
         let own = self.table(&key, value)?;
+        if own.contains_key("preset") {
+            return Err(self.invalid(&format!("{key}.preset"), "removed configuration: replace `preset` with a registered provider `type`; custom endpoints require type = custom (see provider migration guide)"));
+        }
         self.only_keys(&key, own, PROFILE_KEYS)?;
 
-        let Some(preset) = own.get("preset") else {
-            return self.profile_from(name, &key, own, None);
-        };
-        let preset_key = format!("{key}.preset");
+        let preset_key = format!("{key}.type");
+        // Bare protocol configurations retain their existing custom-endpoint meaning.
+        let custom = Value::String("custom".into());
+        let preset = own.get("type").unwrap_or(&custom);
         let preset_name = self.string(&preset_key, preset)?;
         // Not echoed when unknown: the likeliest mistake is a pasted key.
-        let Some(preset_table) = self.catalog.preset(preset_name) else {
-            return Err(Error::ProviderUnknownPreset {
-                path: self.path(&preset_key),
-                key: preset_key,
-                available: self.catalog.preset_names().join(", "),
-            });
+        let Some(definition) = registry::definition(preset_name) else {
+            return Err(self.invalid(&preset_key, "unknown provider type; run `bee providers list` for supported types, or use type = custom"));
         };
 
         // Diagnostics about what the preset supplies name the preset, so the
         // user is not told "<unknown>" about a file they never wrote.
         let inner = Reader {
             config: self.config,
-            catalog: self.catalog,
             fallback: self.preset_origin(preset_name),
         };
-        inner.only_keys(&format!("presets.{preset_name}"), preset_table, PRESET_KEYS)?;
-        let combined = overlay(preset_table, own);
+        let mut combined = overlay(&definition.defaults(), own);
+        let settings = own
+            .get("settings")
+            .map(|value| self.table(&format!("{key}.settings"), value))
+            .transpose()?
+            .cloned()
+            .unwrap_or_default();
+        definition
+            .validate_fields(registry::FieldOwner::Instance, &settings)
+            .map_err(|reason| self.invalid(&format!("{key}.settings"), reason))?;
+        if preset_name == "google-cloud" && !settings.is_empty() {
+            if own.contains_key("google_cloud") {
+                return Err(self.invalid(&key, "use settings or google_cloud, not both"));
+            }
+            combined.insert("google_cloud".into(), Value::Table(settings));
+        }
+        if let Some(protocol) = own.get("protocol") {
+            if own.contains_key("protocols") || own.contains_key("prefer") {
+                return Err(self.invalid(
+                    &key,
+                    "use either protocol/base_url/options shorthand or protocols/prefer, not both",
+                ));
+            }
+            let protocol = self.string(&format!("{key}.protocol"), protocol)?;
+            // Selecting a protocol must not redirect a native credential to the protocol's public default.
+            let inherited = combined
+                .get("protocols")
+                .and_then(|protocols| protocols.get(protocol))
+                .and_then(Value::as_table);
+            if inherited.is_none() && !own.contains_key("base_url") && own.contains_key("type") {
+                return Err(self.invalid(
+                    &key,
+                    "this protocol has no provider endpoint default; supply an explicit base_url",
+                ));
+            }
+            let mut endpoint = inherited.cloned().unwrap_or_default();
+            for field in ["base_url", "options"] {
+                if let Some(value) = own.get(field) {
+                    match (endpoint.get_mut(field), value) {
+                        (Some(Value::Table(base)), Value::Table(over)) => deep_merge(base, over),
+                        _ => {
+                            endpoint.insert(field.into(), value.clone());
+                        }
+                    }
+                }
+            }
+            combined.insert(
+                "protocols".into(),
+                Value::Table(Table::from_iter([(
+                    protocol.into(),
+                    Value::Table(endpoint),
+                )])),
+            );
+            combined.remove("prefer");
+        } else if own.contains_key("base_url") || own.contains_key("options") {
+            return Err(self.invalid(&key, "base_url/options shorthand requires protocol"));
+        }
+        if own.contains_key("type")
+            && preset_name == "custom"
+            && !combined
+                .get("protocols")
+                .and_then(Value::as_table)
+                .is_some_and(|protocols| {
+                    !protocols.is_empty()
+                        && protocols
+                            .values()
+                            .all(|endpoint| endpoint.get("base_url").is_some())
+                })
+        {
+            return Err(self.invalid(&key, "custom providers require explicit protocol and base_url (or protocols with explicit base_url for every endpoint)"));
+        }
         inner.profile_from(name, &key, &combined, Some(preset_name))
     }
 
@@ -963,18 +1050,100 @@ impl Reader<'_> {
             }
         };
 
-        let (credential, login) = match table.get("credential") {
+        let (mut credential, mut login) = match table.get("credential") {
             None => (None, None),
             Some(value) => {
                 let (credential, login) = self.credential(&format!("{key}.credential"), value)?;
                 (Some(credential), login)
             }
         };
+        // Source overrides must not erase an integration's native acquisition/lifecycle contract.
+        if let Some(CredentialSource::Store { login: flow }) = &mut credential
+            && login.is_none()
+        {
+            let defaults = preset
+                .and_then(registry::definition)
+                .map(registry::Definition::defaults);
+            if let Some(default_flow) = defaults
+                .as_ref()
+                .and_then(|defaults| defaults.get("credential")?.get("login")?.as_str())
+            {
+                login = Some(Arc::new(
+                    self.login_spec(&format!("{key}.credential"), default_flow)?,
+                ));
+                *flow = Some(default_flow.into());
+            }
+        }
 
         let headers = match table.get("headers") {
             None => Vec::new(),
             Some(value) => self.headers(&format!("{key}.headers"), value)?,
         };
+        let definition = preset
+            .and_then(registry::definition)
+            .expect("resolved provider type");
+        let credential_env_fields = table
+            .get("credential")
+            .and_then(|credential| credential.get("fields"))
+            .map(|fields| -> Result<BTreeMap<String, String>> {
+                let fields = self.table(&format!("{key}.credential.fields"), fields)?;
+                if !matches!(credential, Some(CredentialSource::Env(_))) {
+                    return Err(self.invalid(
+                        &key,
+                        "credential field environment bindings require an environment source",
+                    ));
+                }
+                let allowed: Vec<_> = definition
+                    .fields
+                    .iter()
+                    .filter(|field| {
+                        field.owner == registry::FieldOwner::Credential && field.name != "key"
+                    })
+                    .map(|field| field.name)
+                    .collect();
+                if fields
+                    .keys()
+                    .any(|field| !allowed.contains(&field.as_str()))
+                {
+                    return Err(self.invalid(
+                        &format!("{key}.credential.fields"),
+                        "unknown credential field; inspect the provider type's field declarations",
+                    ));
+                }
+                fields
+                    .iter()
+                    .map(|(field, value)| {
+                        let variable = self.string(&format!("{key}.credential.fields"), value)?;
+                        if variable.is_empty()
+                            || variable.starts_with(|c: char| c.is_ascii_digit())
+                            || !variable
+                                .chars()
+                                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+                        {
+                            return Err(self.invalid(
+                                &format!("{key}.credential.fields"),
+                                "credential field bindings must be environment variable names",
+                            ));
+                        }
+                        Ok((field.clone(), variable.to_owned()))
+                    })
+                    .collect()
+            })
+            .transpose()?
+            .unwrap_or_default();
+        if matches!(credential, Some(CredentialSource::Env(_)))
+            && definition.fields.iter().any(|field| {
+                field.owner == registry::FieldOwner::Credential
+                    && field.required
+                    && field.name != "key"
+                    && !credential_env_fields.contains_key(field.name)
+            })
+        {
+            return Err(self.invalid(
+                &format!("{key}.credential.fields"),
+                "required credential field environment binding is missing",
+            ));
+        }
 
         let cloud = table.get("auth").and_then(Value::as_str) == Some("google-cloud");
         let copilot = match table.get("auth") {
@@ -1045,6 +1214,18 @@ impl Reader<'_> {
             }
             None
         };
+        if preset == Some("chatgpt")
+            && (!matches!(credential, Some(CredentialSource::Store { .. }))
+                || !login.as_ref().is_some_and(|flow| flow.is_chatgpt()))
+        {
+            return Err(self.invalid(
+                &key,
+                "ChatGPT requires its native stored OAuth registration; use browser login for this instance",
+            ));
+        }
+        if login.as_ref().is_some_and(|flow| flow.is_chatgpt()) && preset != Some("chatgpt") {
+            return Err(self.invalid(&key, "ChatGPT OAuth requires type = chatgpt; compatible endpoints cannot inherit native OAuth authority"));
+        }
         if login.as_ref().is_some_and(|flow| flow.is_copilot()) && !copilot {
             return Err(self.invalid(&key, "GitHub device login requires auth = github"));
         }
@@ -1071,6 +1252,9 @@ impl Reader<'_> {
         }
 
         Ok(Profile {
+            credential_env_fields,
+            settings: table.get("settings").and_then(Value::as_table).map(|settings| settings.iter().map(|(key,value)| (key.clone(), value.as_str().expect("validated provider field").to_owned())).collect()).unwrap_or_default(),
+            provider_type: preset.expect("provider type resolved before instance parsing").to_owned(),
             google_cloud,
             copilot,
             name: name.to_owned(),
@@ -1105,14 +1289,11 @@ impl Reader<'_> {
             catalog_context_window: self.boolean(table, &key, "catalog_context_window")?,
             discover_models: self.boolean(table, &key, "discover_models")?,
             discovery: table.get("discovery").map(|value| {
-                match self.string(&format!("{key}.discovery"), value)? {
-                    "openrouter" => Ok(crate::models::Integration::OpenRouter),
-                    "opencode" if !copilot && login.is_none() => Ok(crate::models::Integration::OpenCode),
-                    "opencode-go" if !copilot && login.is_none() => Ok(crate::models::Integration::OpenCodeGo),
-                    "github" if copilot => Ok(crate::models::Integration::Copilot),
-                    "chatgpt" if login.as_ref().is_some_and(|flow| flow.is_chatgpt()) => Ok(crate::models::Integration::ChatGpt),
-                    _ => Err(self.invalid(&key, "discovery requires a supported integration and matching authentication")),
-                }
+                let id = self.string(&format!("{key}.discovery"), value)?;
+                // An override cannot borrow another integration's private discovery authority.
+                if Some(id) != preset { return Err(self.invalid(&key, "native discovery belongs to the configured provider type")); }
+                registry::definition(id).and_then(registry::Definition::integration)
+                    .ok_or_else(|| self.invalid(&key, "this provider type has no native discovery capability"))
             }).transpose()?,
             metadata: table
                 .get("metadata")
@@ -1423,7 +1604,7 @@ impl Reader<'_> {
         value: &Value,
     ) -> Result<(CredentialSource, Option<Arc<LoginSpec>>)> {
         let table = self.table(key, value)?;
-        self.only_keys(key, table, &["env", "store", "login", "adc"])?;
+        self.only_keys(key, table, &["env", "store", "login", "adc", "fields"])?;
         if let Some(adc) = table.get("adc") {
             if adc != &Value::Boolean(true) || table.len() != 1 {
                 return Err(self.invalid(key, "ADC requires only adc = true"));
@@ -1500,11 +1681,11 @@ impl Reader<'_> {
     /// The login flow `name`, which `key` names.
     fn login_spec(&self, key: &str, name: &str) -> Result<LoginSpec> {
         // Not echoed when unknown: the likeliest mistake is a pasted token.
-        let Some(spec) = self.catalog.login_spec(name) else {
+        let Some(spec) = signin::builtin(name) else {
             return Err(Error::ProviderUnknownLogin {
                 path: self.path(key),
                 key: key.to_owned(),
-                available: self.catalog.login_names().join(", "),
+                available: "openrouter, chatgpt, github".into(),
             });
         };
         spec.map_err(|error| match error {

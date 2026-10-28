@@ -36,6 +36,10 @@ GitHub.com Copilot supports device OAuth or explicit environment GitHub user tok
 validated account API targets and native per-model endpoint/context declarations independent of public catalog hints.
 Pending interactions are turn-owned; cleanup precedes terminal idle and direct-close responses.
 Each native backend preserves its own continuation and tool-result semantics.
+Compiled-in provider types and named instances replace presets (ADR-027). Instances own credentials and private
+provider fields; user profiles group references. Generic API-key/OAuth material reads legacy stores and writes v3.
+Explicit environment login imports credentials and publishes stored authority; native turn runtimes own renewal/checks.
+`bee providers list/show` inspect definitions independently of public Models.dev discovery.
 Google Cloud uses official Vertex AI Chat compatibility with configured Gemini models, project/location routing and
 renewable authorized-user, service-account-key or attached-account ADC, separate from AI Studio API keys and billing.
 Optional Models.dev discovery enriches selection without blocking inference; public cache and account-specific endpoint
@@ -88,7 +92,7 @@ src/
 ├── auth.rs     credential sources, transactional 0600 store and secret handling (ADR-008), free of the SDK
 ├── auth/chatgpt.rs official local/OSS ChatGPT OAuth, verified identity, renewal and revocation (ADR-020)
 ├── login.rs    the `pkce-key` browser sign-in, driven by a `LoginSpec`, free of the SDK
-├── preset.rs   presets and login flows as data (ADR-009), free of the SDK
+├── provider/   compiled-in registry, declared fields, trusted sign-ins and prepared native runtimes (ADR-027)
 ├── models.rs   optional catalog/cache, endpoint discovery and metadata provenance, free of the SDK
 ├── http.rs     the one HTTP seam, so flows are tested against a fake
 ├── llm.rs      SDK-free inference types, errors and protocol dispatch
@@ -103,8 +107,6 @@ src/
 ├── cli.rs      argument types only
 ├── commands.rs what `bee auth` does and prints (binary only)
 └── error.rs    the crate's error type
-data/
-└── presets.toml the shipped presets and login flows, embedded in the binary
 tests/
 ├── cli.rs      the binary's observable contract
 ├── stdio.rs    the stdio transport, through the real binary
@@ -115,7 +117,7 @@ tests/
 ├── provider.rs provider profiles, validation and secret handling, in-process
 ├── selection.rs provider and model selection over ACPv2, in-process
 ├── auth.rs     credentials, the store and the sign-in flows, in-process
-├── preset.rs   presets, login flows as data and the project-file trust rule, in-process
+├── registry.rs native defaults, custom instances and removed-configuration migration diagnostics, in-process
 ├── mcp.rs      the MCP-over-ACP spike (ADR-002)
 └── mcp_integration.rs production model/MCP cycles, failures and lifecycle isolation (ADR-015)
 ```

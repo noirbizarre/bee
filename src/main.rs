@@ -40,6 +40,7 @@ fn main() -> ExitCode {
         },
         Some(Command::Auth(command)) => commands::run_auth(command),
         Some(Command::Models(command)) => commands::models::run(command),
+        Some(Command::Providers(command)) => commands::run_providers(command),
     };
 
     match result {

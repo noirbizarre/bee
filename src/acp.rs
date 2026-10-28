@@ -362,7 +362,7 @@ async fn inference(
     };
     let chatgpt = profile
         .login_spec()
-        .is_some_and(crate::preset::LoginSpec::is_chatgpt);
+        .is_some_and(crate::provider::signin::LoginSpec::is_chatgpt);
     let cloud_session = if profile.google_cloud().is_some() {
         Some(
             crate::auth::google_cloud::Session::with_http(
@@ -2156,7 +2156,11 @@ mod gate_tests {
         }
         let root = tempfile::tempdir().unwrap();
         let config_path = root.path().join("config.toml");
-        std::fs::write(&config_path, "[providers.account]\npreset='openrouter'\ncredential={env='KEY'}\ndiscover_models=false").unwrap();
+        std::fs::write(
+            &config_path,
+            "[providers.account]\ntype='openrouter'\ncredential={env='KEY'}\ndiscover_models=false",
+        )
+        .unwrap();
         let env = crate::config::Environment::new(None, None, Some(config_path))
             .with_variable("KEY", "fixture");
         let providers =

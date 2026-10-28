@@ -648,7 +648,7 @@ fn profile_ownership_isolates_history_and_models_across_process_restarts() {
 fn a_removed_selected_connection_cannot_fall_back_on_resume() {
     let root = tempfile::tempdir().unwrap();
     let state = root.path().join("state");
-    let connections = "[providers.one]\npreset='openai'\n[providers.two]\npreset='openai'\n";
+    let connections = "[providers.one]\ntype='openai'\n[providers.two]\ntype='openai'\n";
     let config = format!(
         "profile='work'\n[profiles.work]\nconnections=['one','two']\nprovider='one'\n{connections}"
     );

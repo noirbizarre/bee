@@ -1266,7 +1266,7 @@ mod account_tests {
     #[test]
     fn a_late_old_account_failure_preserves_the_replacement_listing_and_refresh_epoch() {
         let profile = crate::test_support::configured_providers(
-            "[providers.work]\npreset='github'\ncredential={env='TOKEN'}",
+            "[providers.work]\ntype='github'\ncredential={env='TOKEN'}",
         )
         .get("work")
         .unwrap()

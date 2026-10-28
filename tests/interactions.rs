@@ -1327,7 +1327,7 @@ async fn stopping_browser_login_drops_pending_work_before_terminal_idle(
     let root = tempfile::tempdir().unwrap();
     let (profiles, env) = login_fixture(root.path(), "http://127.0.0.1:1", "");
     let profiles = if chatgpt {
-        support::configured_providers("[providers.test]\npreset='chatgpt'\nmodel='account-model'")
+        support::configured_providers("[providers.test]\ntype='chatgpt'\nmodel='account-model'")
     } else {
         profiles
     };

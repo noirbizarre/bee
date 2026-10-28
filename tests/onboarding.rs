@@ -13,8 +13,43 @@ fn fixture(text: &str) -> (tempfile::TempDir, Environment) {
 }
 
 #[test]
+fn login_does_not_publish_stored_authority_after_the_environment_binding_changes() {
+    let (root, env) =
+        fixture("[providers.work]\ntype='openai'\ncredential={env='ORIGINAL_ACCOUNT'}");
+    let plan = persist::prepare(&env, root.path(), "work").unwrap();
+    let replacement = "[providers.work]\ntype='openai'\ncredential={env='REPLACEMENT_ACCOUNT'}";
+    let path = env.global_config_path().unwrap();
+    std::fs::write(&path, replacement).unwrap();
+    let error = plan.commit(&env, root.path()).unwrap_err();
+    assert!(error.to_string().contains("authority changed"));
+    assert_eq!(std::fs::read_to_string(path).unwrap(), replacement);
+}
+
+#[test]
+fn login_retains_unrelated_configuration_edits_made_during_authorization() {
+    let original = "[providers.work]\ntype='openai'\ncredential={env='ORIGINAL_ACCOUNT'}\n";
+    let (root, env) = fixture(original);
+    let plan = persist::prepare(&env, root.path(), "work").unwrap();
+    let path = env.global_config_path().unwrap();
+    std::fs::write(&path, format!("{original}\n[agent]\nmax_steps=12\n")).unwrap();
+    plan.commit(&env, root.path()).unwrap();
+    let config = Config::load(&env, root.path()).unwrap();
+    assert_eq!(
+        config
+            .get("agent.max_steps")
+            .and_then(toml::Value::as_integer),
+        Some(12)
+    );
+    let providers = Providers::from_config(&config).unwrap();
+    assert!(matches!(
+        providers.get("work").unwrap().credential(),
+        Some(bee::provider::CredentialSource::Store { .. })
+    ));
+}
+
+#[test]
 #[cfg(unix)]
-fn opencode_onboarding_uses_independent_stored_keys_and_preserves_existing_env_authority() {
+fn opencode_onboarding_uses_independent_stored_keys_and_switches_explicit_env_authority() {
     use bee::auth::{Audience, Credential, CredentialStore, FileStore, Secret};
     let (root, env) = fixture("");
     for name in ["opencode", "opencode-go"] {
@@ -34,7 +69,7 @@ fn opencode_onboarding_uses_independent_stored_keys_and_preserves_existing_env_a
             .unwrap();
         let profile = providers.get(name).unwrap();
         bee::auth::require_store(profile).unwrap();
-        assert!(profile.discover_models());
+        assert_eq!(profile.discover_models(), name == "opencode-go");
         assert_eq!(
             bee::auth::resolve(profile, &env, &store, 0)
                 .unwrap()
@@ -47,21 +82,23 @@ fn opencode_onboarding_uses_independent_stored_keys_and_preserves_existing_env_a
     store.remove(Audience::Provider("opencode-go")).unwrap();
     assert!(bee::auth::resolve(providers.get("opencode").unwrap(), &env, &store, 0).is_ok());
     assert!(bee::auth::resolve(providers.get("opencode-go").unwrap(), &env, &store, 0).is_err());
-    let original = "[providers.opencode]\npreset='opencode'\n";
+    let original = "[providers.opencode]\ntype='opencode'\n";
     let (root, env) = fixture(original);
     let plan = persist::prepare(&env, root.path(), "opencode").unwrap();
-    assert!(bee::auth::require_store(plan.providers().get("opencode").unwrap()).is_err());
+    assert!(bee::auth::require_store(plan.providers().get("opencode").unwrap()).is_ok());
+    assert_eq!(plan.import_env(), Some("OPENCODE_API_KEY"));
     plan.commit(&env, root.path()).unwrap();
-    assert_eq!(
-        std::fs::read_to_string(env.global_config_path().unwrap()).unwrap(),
-        original
+    assert!(
+        std::fs::read_to_string(env.global_config_path().unwrap())
+            .unwrap()
+            .contains("store = true")
     );
 }
 
 #[test]
 fn built_in_login_preflight_is_read_only_and_commit_preserves_comments_and_existing_default() {
     let original =
-        "# user's header\n[providers.old] # keep this comment\npreset='openai'\nmodel='custom'\n";
+        "# user's header\n[providers.old] # keep this comment\ntype='openai'\nmodel='custom'\n";
     let (root, env) = fixture(original);
     let plan = persist::prepare(&env, root.path(), "openrouter").unwrap();
     assert_eq!(plan.providers().default_name(), Some("old"));
@@ -94,7 +131,7 @@ fn built_in_login_preflight_is_read_only_and_commit_preserves_comments_and_exist
 #[test]
 fn login_adds_only_active_profile_membership_and_retains_its_previous_default() {
     let (root, env) = fixture(
-        "profile='work'\n[providers.old]\npreset='openai'\n[profiles.work]\nconnections=['old']\n[profiles.personal]\nconnections=[]\n",
+        "profile='work'\n[providers.old]\ntype='openai'\n[profiles.work]\nconnections=['old']\n[profiles.personal]\nconnections=[]\n",
     );
     persist::prepare(&env, root.path(), "chatgpt")
         .unwrap()
@@ -140,7 +177,7 @@ fn inline_user_tables_and_empty_profiles_can_be_bootstrapped_without_losing_conf
     for original in [
         "",
         "profiles={default={connections=[]}}\n",
-        "providers={old={preset='openai'}}\n",
+        "providers={old={type='openai'}}\n",
     ] {
         let (root, env) = fixture(original);
         persist::prepare(&env, root.path(), "chatgpt")

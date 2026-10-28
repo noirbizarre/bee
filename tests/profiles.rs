@@ -3,7 +3,7 @@
 use bee::config::{Config, Environment, project_config_path};
 use bee::provider::Providers;
 
-const CONNECTIONS: &str = "\n[providers.one]\npreset='openai'\nmodel='base'\nmodels=['suggestion']\n[providers.two]\npreset='openai'\ncredential={env='OTHER_ACCOUNT'}\n";
+const CONNECTIONS: &str = "\n[providers.one]\ntype='openai'\nmodel='base'\nmodels=['suggestion']\n[providers.two]\ntype='openai'\ncredential={env='OTHER_ACCOUNT'}\n";
 
 fn load(text: &str) -> bee::Result<Providers> {
     let dir = tempfile::tempdir().unwrap();

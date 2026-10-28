@@ -93,12 +93,13 @@ profile.
 ## Authentication
 
 A connection's `credential` names an environment variable (`{ env = "KEY" }`) or Bee's credential store
-(`{ store = true }`, optionally with `login = "openrouter"` for a browser sign-in). `bee auth login`, `logout` and
-`status` manage the store, which is a `0600` file under `$XDG_DATA_HOME/bee`. Providers are data:
-`preset = "openrouter"` (also `openai`, `anthropic`, `opencode`, `opencode-go`, `deepseek`, `google-aistudio`,
-`google-cloud`, `groq`, `mistral`, `xai`,
-`ollama`, `chatgpt`, `github`) fills in a connection, and your own `presets` and `login_flows` tables extend or
-override the shipped ones. `bee auth login github` provides GitHub.com device login and account model discovery;
+(`{ store = true }`). `bee auth login`, `logout` and `status` manage the store, a `0600` file under `$XDG_DATA_HOME/bee`.
+Each named instance references a built-in provider type, for example `[providers.work]` with `type = "openai"`.
+`bee providers list` lists integrations; `bee providers show github` describes authentication and declared fields.
+Use `type = "custom"` with a protocol and explicit base URL for compatible endpoints. Multiple instances of one type
+keep independent accounts, credentials and model settings. Explicit login imports environment credentials and switches
+that instance to stored authority. See the [provider migration guide](docs/providers.md#migrating-configuration).
+`bee auth login github` creates the `github` instance if necessary and provides GitHub.com device login and model discovery;
 an explicit `credential = { env = "COPILOT_GITHUB_TOKEN" }` override uses an environment GitHub user token instead.
 See [Copilot setup](docs/index.md#use-github-copilot) for consent identity and supported routing.
 OpenCode Zen and Go use separate console API-key connections: `bee auth login opencode --with-token` or
@@ -109,7 +110,7 @@ Google AI Plus subscription quotas are not API credits. See [setup](docs/index.m
 Google Cloud uses renewable ADC and explicit project/location settings for official Vertex AI Gemini inference,
 charged to Google Cloud with applicable Cloud credits. Cloud billing is separate from AI Studio's free tier and
 Google AI Plus/Pro or Antigravity quotas. See [Cloud setup](docs/index.md#use-google-cloud).
-Presets supply human-readable provider names; ACP labels retain the configured connection ID to distinguish accounts.
+Provider types supply human-readable names; ACP labels retain the configured instance ID to distinguish accounts.
 OpenRouter's sign-in returns an API key; Cloudflare uses a scoped API token and not Wrangler's login; remote MCP server
 authorization is a separate audience and is not implemented. Credentials are resolved when inference needs them. See the
 [documentation](https://noirbizarre.github.io/bee/#authentication).

@@ -120,7 +120,7 @@ fn invalid_params(error: &Error) -> bool {
 #[test]
 fn session_settings_debug_never_discloses_configured_display_names() {
     let mut sessions = bee::session::Sessions::with_providers(providers(
-        "[providers.test]\npreset='openai'\ndisplay_name='label-secret-sentinel'",
+        "[providers.test]\ntype='openai'\ndisplay_name='label-secret-sentinel'",
     ));
     let id = sessions.create(cwd());
     let settings = sessions.settings(&id).unwrap().unwrap();
@@ -133,7 +133,7 @@ fn session_settings_debug_never_discloses_configured_display_names() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn provider_labels_disambiguate_connections_while_selection_and_resume_keep_ids() {
-    let config = "provider='personal'\n[providers.personal]\npreset='google-aistudio'\nmodel='gemini-test'\n[providers.work]\npreset='google-aistudio'\nmodel='gemini-test'\n[providers.local]\nprotocols={openai-chat={}}";
+    let config = "provider='personal'\n[providers.personal]\ntype='google-aistudio'\nmodel='gemini-test'\n[providers.work]\ntype='google-aistudio'\nmodel='gemini-test'\n[providers.local]\nprotocols={openai-chat={base_url='http://localhost:11434/v1'}}";
     run(providers(config), async |connection| {
         let session = new_session(&connection).await?;
         let labels = |options: &[v2::SessionConfigOption]| {

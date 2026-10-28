@@ -280,6 +280,11 @@ impl Reference {
             .expect("serializable identity");
         let mut digest = Sha256::new();
         digest.update(b"bee-model-account-v1\0");
+        // A type/target change cannot inherit remembered authority from a compatible endpoint.
+        digest.update(
+            serde_json::to_vec(&(profile.provider_type(), profile.settings()))
+                .expect("serializable provider authority"),
+        );
         if profile.is_copilot() {
             // The same token/URL configured as a generic endpoint must not inherit Copilot authority.
             digest.update(b"github-copilot\0");
@@ -343,7 +348,7 @@ pub(crate) fn credential(
     // Read stable OAuth registration without refreshing here; prompt authentication owns network renewal.
     if profile
         .login_spec()
-        .is_some_and(crate::preset::LoginSpec::is_chatgpt)
+        .is_some_and(crate::provider::signin::LoginSpec::is_chatgpt)
     {
         let credential = store
             .get(crate::auth::Audience::Provider(profile.name()))

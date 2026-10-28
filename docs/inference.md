@@ -7,11 +7,11 @@ protocol; failures never trigger
 protocol fallback. Any opaque
 model ID is accepted without a catalog lookup, but the endpoint must support that model and the selected protocol.
 
-For example, a profile using `preset = "openai"` can set
+For example, an instance using `type = "openai"` can set
 `model_protocols = { "YOUR_CHAT_MODEL_ID" = "openai-chat" }` while keeping Responses as its preference.
 The effective session-selected or default model ID controls dispatch, endpoint URL/options and authentication headers
 together. The provider's credential, custom headers and common limits are shared. See
-[provider configuration](index.md#providers-and-models) for validation and layer/preset merge rules.
+[provider configuration](index.md#providers-and-models) for validation and layer/type-default merge rules.
 
 ## Request settings and supported subset
 
@@ -41,7 +41,7 @@ after side effects.
 
 ## Google AI Studio requests
 
-The `google-aistudio` preset uses Google's official
+The `google-aistudio` type uses Google's official
 [OpenAI compatibility endpoint](https://ai.google.dev/gemini-api/docs/openai) for the Gemini Developer API. Inference
 posts to `https://generativelanguage.googleapis.com/v1beta/openai/chat/completions` using the selected exact model ID,
 API-key bearer authentication, streamed text, function tools and the configured output cap. See
@@ -65,7 +65,7 @@ project/model dependent and separate from Google AI subscription quotas.
 
 ## Google Cloud requests
 
-The `google-cloud` preset uses renewable OAuth bearer tokens from supported ADC. The official global target is
+The `google-cloud` type uses renewable OAuth bearer tokens from supported ADC. The official global target is
 `https://aiplatform.googleapis.com/v1/projects/{project}/locations/global/endpoints/openapi/chat/completions`.
 Regional targets use `{location}-aiplatform.googleapis.com` and a matching location path. The selected model remains an
 exact `google/...` ID. Requests use the same text/function-calling, signed-call continuation and streaming usage behavior
@@ -88,7 +88,7 @@ No unverified caching fields are added. See [setup, supported ADC types and bill
 
 ## ChatGPT plan requests
 
-The `chatgpt` preset uses the public `POST https://api.openai.com/v1/responses` endpoint with a renewable OAuth bearer
+The `chatgpt` type uses the public `POST https://api.openai.com/v1/responses` endpoint with a renewable OAuth bearer
 token. It sends full client-managed history, `store: false`, `stream: true`, encrypted reasoning continuation, and
 function tools grouped in the `bee` namespace. Client-hosted MCP tools remain client-executed function tools.
 Only `response.completed` establishes success; late usage-limit failures and incomplete/interrupted streams fail the
@@ -108,7 +108,7 @@ See [setup and logout](index.md#use-your-chatgpt-plan).
 
 ## GitHub Copilot requests
 
-The `github` preset sends a GitHub user bearer token directly to the account's validated Copilot API host.
+The `github` type sends a GitHub user bearer token directly to the account's validated Copilot API host.
 It uses the existing Chat Completions, Responses and Messages adapters, with exact native model endpoint declarations
 below explicit `model_protocols` configuration. Authentication does not depend on model discovery being enabled.
 The default base is `https://api.githubcopilot.com`; account metadata can select its exact individual, business or
@@ -147,7 +147,7 @@ eviction can legitimately invalidate a prefix. Bee does not suppress fresh guida
 
 Audited against the linked official contracts on 2026-10-26. This is Bee's intentionally supported subset, not a promise
 that every endpoint implementing a wire protocol accepts every option. URL overrides are checked as the actual endpoint,
-regardless of preset or connection name. Optional catalog prices and metadata are not capability evidence.
+regardless of provider type or instance name. Optional catalog prices and metadata are not capability evidence.
 
 | Endpoint / adapter | Keys and native request controls in Bee | Usage preserved / limitations |
 | --- | --- | --- |
@@ -193,7 +193,7 @@ anonymity guarantee. Embedded `Model` callers can set a stable grouping scope wi
 
 ```toml
 [providers.openai]
-preset = "openai"
+type = "openai"
 model = "gpt-6.1-sol"
 
 [providers.openai.protocols.openai-responses.options]
@@ -236,7 +236,7 @@ and `o4-mini`. Retention support is independent of `store = false`; organization
 
 ```toml
 [providers.claude]
-preset = "anthropic"
+type = "anthropic"
 model = "claude-sonnet-4-6"
 
 [providers.claude.protocols.anthropic-messages.options]
@@ -345,9 +345,9 @@ Budgets and protocol hints freeze before the model/tool loop; Copilot's final sn
 resolution. Stale validated facts remain usable with visible provenance. Explicit model/protocol mappings do not wait
 for optional discovery; Copilot may await a first native listing to resolve an otherwise unspecified model route.
 
-Both settings accept positive 32-bit integers, including in presets. An exact, case-sensitive model entry overrides
+Both settings accept positive 32-bit integers on provider instances. An exact, case-sensitive model entry overrides
 the profile fallback. Quote model IDs containing TOML punctuation. The map merges per model across configuration
-layers and presets; an empty map does not clear inherited entries. Without an applicable limit, capacity is unknown:
+layers and type defaults; an empty map does not clear inherited entries. Without an applicable limit, capacity is unknown:
 Bee estimates occupancy but does not truncate or invent a context window. A profile fallback applies to every unmapped
 model selected in that profile, so configure it appropriately for those models.
 
@@ -413,11 +413,11 @@ See [ADR-014](adr/014-conversation-context-and-token-limits.md) for the design d
 
 Save this configuration as `.config/bee.toml` and use an ACPv2 client to launch `bee` from its containing workspace,
 supplying your own key and a model that
-supports Chat Completions. The example deliberately selects Chat even if a preset's default is Responses:
+supports Chat Completions. The example deliberately selects Chat even if the type's default is Responses:
 
 ```toml
 [providers.smoke]
-preset = "openai"
+type = "openai"
 prefer = ["openai-chat"]
 model = "YOUR_CHAT_MODEL_ID"
 timeout_ms = 120000
@@ -425,7 +425,8 @@ timeout_ms = 120000
 
 1. Supply `OPENAI_API_KEY` in the client's launch environment. Alternatively, on Unix add
    `credential = { store = true }` under `[providers.smoke]`, then run `bee auth login smoke --with-token`
-   with the token supplied through standard input. Login alone does not change an environment-backed credential reference.
+   with the token supplied through standard input. Plain explicit login imports the configured environment key and
+   switches the instance to stored authority. Remove higher-priority credential-source overrides before switching.
 2. Initialize, create a session and prompt for a short answer. Expect running, streamed text, then idle/end-turn.
 3. Ask a follow-up referring to the answer. Check that context is retained.
 4. Submit a longer prompt and cancel after output begins. Expect exactly one cancelled idle and no later chunks.
@@ -452,11 +453,11 @@ Repeat the text, follow-up and cancellation checks above with an OpenAI model su
 
 ```toml
 [providers.smoke]
-preset = "openai"
+type = "openai"
 model = "YOUR_RESPONSES_MODEL_ID"
 ```
 
-The OpenAI preset prefers Responses, so no preference override is needed. For a compatible gateway, use its documented
+The OpenAI type prefers Responses, so no preference override is needed. For a compatible gateway, use its documented
 Responses base URL and credentials explicitly:
 
 ```toml
@@ -476,12 +477,12 @@ Supply your own `ANTHROPIC_API_KEY` in the ACP client's launch environment and c
 
 ```toml
 [providers.smoke]
-preset = "anthropic"
+type = "anthropic"
 model = "YOUR_ANTHROPIC_MODEL_ID"
 max_output_tokens = 4096
 ```
 
-Repeat the short answer, follow-up and cancellation checks against the official endpoint. The preset uses
+Repeat the short answer, follow-up and cancellation checks against the official endpoint. The type uses
 `https://api.anthropic.com`; Bee appends `/v1/messages` and applies the required protocol headers. Do not enable thinking
 or server tools for this subset. A Messages-compatible gateway may override this protocol's base URL without changing
 its provider name or authentication source. Validate such gateways separately against their own documented contract.

@@ -21,7 +21,7 @@ use bee::auth::{
 use bee::config::{Config, Environment, project_config_path};
 use bee::http::{Http, HttpResponse, Unreachable};
 use bee::login::{self, CallbackListener, Code, Pkce};
-use bee::preset::{Catalog, LoginSpec};
+use bee::provider::signin::{self, LoginSpec};
 use bee::provider::{Profile, Protocol, Providers};
 use pretty_assertions::assert_eq;
 use rstest::rstest;
@@ -87,10 +87,108 @@ impl Sandbox {
 
 /// The shipped OpenRouter sign-in, which is data (ADR-009).
 fn openrouter() -> LoginSpec {
-    Catalog::builtin()
-        .login_spec("openrouter")
-        .unwrap()
-        .unwrap()
+    signin::builtin("openrouter").unwrap().unwrap()
+}
+
+#[cfg(unix)]
+#[test]
+fn typed_material_round_trips_without_exposing_refresh_tokens_or_secondary_fields() {
+    use bee::auth::{FileStore, Material};
+    use bee::provider::AuthMethod;
+    let root = tempfile::tempdir().unwrap();
+    let store = FileStore::new(root.path().join("credentials.json"));
+    let oauth = Credential::new(Secret::new("access-secret"))
+        .oauth_token(Some(Secret::new("refresh-secret")))
+        .expiring_at(123)
+        .for_provider("custom");
+    let key = Credential::api_key_fields(
+        Secret::new("primary-secret"),
+        std::collections::BTreeMap::from([("secondary".into(), Secret::new("secondary-secret"))]),
+    )
+    .for_provider("custom");
+    store.put(Audience::Provider("one"), &oauth).unwrap();
+    store.put(Audience::Provider("two"), &key).unwrap();
+    assert_eq!(
+        store.get(Audience::Provider("one")).unwrap().unwrap(),
+        oauth
+    );
+    assert_eq!(store.get(Audience::Provider("two")).unwrap().unwrap(), key);
+    assert_eq!(oauth.method(), AuthMethod::OAuth);
+    assert!(matches!(
+        oauth.material(),
+        Material::OAuth {
+            refresh_token: Some(_)
+        }
+    ));
+    for value in [&oauth, &key] {
+        assert!(!format!("{value:?}").contains("secret"));
+    }
+    assert!(store.get(Audience::McpServer("one")).unwrap().is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn writing_typed_credentials_migrates_legacy_entries_without_losing_audiences_or_revisions() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    for version in [1, 2] {
+        let path = root.path().join(format!("credentials-{version}.json"));
+        std::fs::write(&path, format!(r#"{{"version":{version},"providers":{{"old":{{"secret":"old-secret"}}}},"mcp_servers":{{"old":{{"secret":"mcp-secret"}}}},"profile_revisions":{{"removed":7}}}}"#)).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let store = bee::auth::FileStore::new(&path);
+        store
+            .put(
+                Audience::Provider("new"),
+                &Credential::new(Secret::new("new-secret")).for_provider("custom"),
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .get(Audience::Provider("old"))
+                .unwrap()
+                .unwrap()
+                .secret()
+                .expose(),
+            "old-secret"
+        );
+        assert_eq!(
+            store
+                .get(Audience::McpServer("old"))
+                .unwrap()
+                .unwrap()
+                .secret()
+                .expose(),
+            "mcp-secret"
+        );
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(json["version"], 3);
+        assert_eq!(json["profile_revisions"]["removed"], 7);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn stale_static_secret_acquisition_cannot_overwrite_newer_login_or_restore_logged_out_authority() {
+    let root = tempfile::tempdir().unwrap();
+    let store = bee::auth::FileStore::new(root.path().join("credentials.json"));
+    let audience = Audience::Provider("work");
+    let first = store.generation(audience).unwrap();
+    let newer = Credential::new(Secret::new("newer-secret"));
+    store.put(audience, &newer).unwrap();
+    let stale = Credential::new(Secret::new("stale-secret"));
+    assert!(matches!(
+        store.put_guarded(audience, &stale, first),
+        Err(Error::AuthCredentialsChanged)
+    ));
+    assert_eq!(store.get(audience).unwrap(), Some(newer));
+    let before_logout = store.generation(audience).unwrap();
+    store.remove(audience).unwrap();
+    assert!(matches!(
+        store.put_guarded(audience, &stale, before_logout),
+        Err(Error::AuthCredentialsChanged)
+    ));
+    assert!(store.get(audience).unwrap().is_none());
 }
 
 fn rendered(error: Error) -> String {
@@ -1061,7 +1159,7 @@ mod file_store {
     #[rstest]
     #[case::not_json("this is not json")]
     #[case::wrong_top_level("[]")]
-    #[case::wrong_version(r#"{"version": 3}"#)]
+    #[case::wrong_version(r#"{"version": 99}"#)]
     #[case::no_version(r#"{"providers": {}}"#)]
     #[case::unknown_key(r#"{"version": 1, "extra": 1}"#)]
     #[case::entry_not_an_object(r#"{"version": 1, "providers": {"or": "sk-super-secret-token"}}"#)]

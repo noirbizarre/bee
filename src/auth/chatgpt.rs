@@ -629,6 +629,10 @@ fn tokens_at(
         .filter(|n| *n > 0)
         .ok_or_else(|| failure("missing token expiry"))?;
     Ok(Credential {
+        material: super::Material::OAuth {
+            refresh_token: None,
+        },
+        provider_type: Some("chatgpt".into()),
         cloud_identity: None,
         secret: access,
         expires_at: Some(received_at.saturating_add(seconds)),
@@ -802,11 +806,15 @@ mod tests {
     #[test]
     fn remembered_account_binding_survives_oauth_token_renewal_but_not_registration_replacement() {
         let profile =
-            crate::test_support::configured_providers("[providers.account]\npreset='chatgpt'")
+            crate::test_support::configured_providers("[providers.account]\ntype='chatgpt'")
                 .get("account")
                 .unwrap()
                 .clone();
         let mut credential = Credential {
+            material: super::super::Material::OAuth {
+                refresh_token: None,
+            },
+            provider_type: Some("chatgpt".into()),
             cloud_identity: None,
             secret: Secret::new("first-access"),
             expires_at: Some(1),
@@ -1005,7 +1013,7 @@ mod tests {
         let (_root, store) = store();
         install(&store, true);
         let profile =
-            crate::test_support::configured_providers("[providers.account]\npreset='chatgpt'")
+            crate::test_support::configured_providers("[providers.account]\ntype='chatgpt'")
                 .get("account")
                 .unwrap()
                 .clone();

@@ -202,7 +202,7 @@ async fn copilot_streams_native_tools_with_account_routes_and_correct_initiator_
     };
     std::fs::write(
         &path,
-        format!("[providers.account]\npreset='github'\n{credential}\n{explicit}"),
+        format!("[providers.account]\ntype='github'\n{credential}\n{explicit}"),
     )
     .unwrap();
     let env = crate::config::Environment::new(None, Some(root.path().into()), Some(path))
@@ -354,7 +354,7 @@ async fn cancelling_or_closing_a_copilot_device_login_stops_polling_before_compl
     let path = root.path().join("config.toml");
     std::fs::write(
         &path,
-        "[providers.account]\npreset='github'\nmodel='explicit-model'",
+        "[providers.account]\ntype='github'\nmodel='explicit-model'",
     )
     .unwrap();
     let env = crate::config::Environment::new(None, Some(root.path().into()), Some(path));

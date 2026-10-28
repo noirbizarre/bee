@@ -113,6 +113,7 @@ A provider connection is separate from the grouping profile, the protocols it sp
 provider = "work"                  # legacy default connection, within the implicit default profile
 
 [providers.work]                   # any configured connection ID, independent of vendor
+type = "custom"                   # registered integration, independent of the instance name
 display_name = "Company gateway"  # optional presentation name; IDs remain stable
 model = "corp/ft-2026"             # optional default model: any id, listed anywhere or not
 models = ["corp/base"]             # optional suggestions for model selectors, not a limit
@@ -123,10 +124,10 @@ max_output_tokens = 4096          # optional output limit
 context_window = 32768            # optional explicit context capacity; no default
 model_context_windows = { "corp/base" = 16384 } # optional exact-model capacity overrides
 
-# `protocols` is required: one table per protocol the provider speaks: "openai-chat", "openai-responses" or
+# Custom endpoints specify one table per protocol: "openai-chat", "openai-responses" or
 # "anthropic-messages".
 [providers.work.protocols.openai-chat]
-base_url = "https://gateway.corp.example/v1"   # optional; defaults per protocol
+base_url = "https://gateway.corp.example/v1"   # explicit for custom endpoints
 options = { max_tokens_field = "max_completion_tokens" }   # settings only this protocol understands
 ```
 
@@ -137,6 +138,7 @@ model IDs to configured protocols. Unmapped IDs use the first endpoint in prefer
 
 ```toml
 [providers.gateway]
+type = "custom"
 prefer = ["anthropic-messages", "openai-chat"]
 model_protocols = { "vendor/model.v2" = "openai-chat" }
 
@@ -150,17 +152,17 @@ options = { max_tokens = 2048 }
 
 Mapping keys are literal, case-sensitive model IDs: quote IDs containing dots, slashes or other TOML punctuation.
 There is no prefix matching or vendor inference. Mapping targets must be supported protocols configured on the final
-connection, including endpoints inherited from a preset; invalid targets stop Bee at launch. Mappings do not add model
+instance, including endpoints supplied by its type; invalid targets stop Bee at launch. Mappings do not add model
 suggestions or restrict which IDs can be selected. Unknown/private models remain usable without Models.dev or another
 catalog. `prefer` is still required for multi-protocol connections because unmapped models need a fallback.
 
-`model_protocols` merges key by key across global, `BEE_CONFIG` and project files, and over presets: a higher-priority
+`model_protocols` merges key by key across global, `BEE_CONFIG` and project files, and over type defaults: a higher-priority
 entry replaces the same model ID while retaining other entries. An empty table (`model_protocols = {}`) does not clear
 inherited mappings. See [ADR-013](adr/013-per-model-protocol-selection.md).
 
 `context_window` and entries of `model_context_windows` are positive 32-bit token capacities. Exact model entries win
 over the connection fallback; otherwise capacity is unknown unless catalog context windows are explicitly enabled.
-The model map merges per key across layers and presets,
+The model map merges per key across layers and provider defaults,
 without clearing inherited entries for an empty table. Before each request, Bee estimates input, reserves the effective
 output maximum and drops oldest complete turns when needed. The active turn and its tool pairs remain intact.
 Configured sessions report labeled estimates and notices when older context is removed. See
@@ -189,13 +191,13 @@ Protocol resolution uses that effective model ID for every prompt, whether selec
 default. Changing models resolves the endpoint again, retains portable history and drops native continuation.
 
 Requests use the resolved protocol exactly; failures never trigger a retry on another protocol. `openai-chat`,
-`openai-responses` and `anthropic-messages` can run inference, including presets preferring Responses or Messages.
+`openai-responses` and `anthropic-messages` can run inference, including types preferring Responses or Messages.
 See [Inference and smoke tests](inference.md) for the supported subset and verification instructions.
 
 ### Prompt-cache settings
 
 Native cache settings belong to `providers.<connection>.protocols.<protocol>.options`, including when inherited from a
-preset. OpenAI Chat and Responses accept `prompt_cache_key` (a table with `mode = "auto"`, `"disabled"` or `"explicit"`
+provider type. OpenAI Chat and Responses accept `prompt_cache_key` (a table with `mode = "auto"`, `"disabled"` or `"explicit"`
 and an explicit `value`), `prompt_cache_retention` (`"default"`, `"in_memory"`, `"24h"`), and `prompt_cache_options`
 (`enabled`, `mode`, `ttl`, `breakpoints`). Anthropic Messages accepts `cache_control` (`policy`, `ttl`).
 
@@ -205,7 +207,7 @@ before inference; wire compatibility alone does not enable a control. Unsupporte
 `bee::llm::cache` errors instead of being stripped. See the
 [capability checklist and configuration examples](inference.md#prompt-caching) before enabling a policy.
 
-Nested options merge key by key across presets and configuration layers. Use `prompt_cache_key.mode = "disabled"`,
+Nested options merge key by key across provider defaults and configuration layers. Use `prompt_cache_key.mode = "disabled"`,
 `prompt_cache_retention = "default"`, `prompt_cache_options.enabled = false`, or `cache_control.policy = "disabled"` to
 override an inherited setting; an empty table does not reset it. Disabling a key only omits that routing/accounting field,
 not the provider's automatic caching.
@@ -214,7 +216,7 @@ not the provider's automatic caching.
 
 A connection's `credential` says where its secret comes from, independently of the protocol and model. Ordinary protocol
 defaults present it as `Authorization: Bearer` for `openai-chat` and `openai-responses`, or `x-api-key` for
-`anthropic-messages`. Native authentication can override that presentation: Copilot's `auth = "github"` uses
+`anthropic-messages`. Native authentication can override that presentation: the `github` provider type uses
 `Authorization: Bearer` for all three protocols, including Messages, without an `x-api-key` header.
 Exactly one source, or none:
 
@@ -229,19 +231,21 @@ An empty variable counts as unset. A credential that is named but missing or exp
 command fixes it; Bee never quietly sends a request without it. Credentials are resolved when a request needs them, not
 at launch.
 
-### Presets
+### Provider types and instances
 
-Bee ships ready-made connection presets. A connection names a preset and overlays its own keys:
+Bee ships a compiled-in provider registry. A named instance references a type and overrides its allowed defaults:
 
 ```toml
 [providers.work]
-preset = "openrouter"              # protocols and credential come from the preset
+type = "openrouter"                # protocols and authentication come from the provider type
 model = "anthropic/claude-sonnet-4"
 ```
 
-Shipped presets, with the variable each reads its key from:
+`bee providers list` lists the types; `bee providers show TYPE` describes authentication and fields.
+See [provider configuration and migration](providers.md) for custom endpoints and multiple accounts.
+Shipped native types, with the variable each reads its key from:
 
-| Preset | Display name | Protocols, preferred first | Credential |
+| Type | Display name | Protocols, preferred first | Credential |
 | --- | --- | --- | --- |
 | `openai` | OpenAI | `openai-responses`, `openai-chat` | `OPENAI_API_KEY` |
 | `chatgpt` | ChatGPT | `openai-responses` | stored ChatGPT OAuth tokens |
@@ -253,23 +257,23 @@ Shipped presets, with the variable each reads its key from:
 | `deepseek` | DeepSeek | `openai-chat`, `openai-responses`, `anthropic-messages` | `DEEPSEEK_API_KEY` |
 | `google-aistudio` | Google AI Studio | `openai-chat` (official Gemini compatibility endpoint) | `GEMINI_API_KEY` |
 | `google-cloud` | Google Cloud | `openai-chat` (official Vertex AI compatibility endpoint) | renewable ADC |
-| `google` | Google AI Studio (legacy preset) | `openai-chat` | `GEMINI_API_KEY` |
+| `google` | Google AI Studio (legacy identity) | `openai-chat` | `GEMINI_API_KEY` |
 | `groq` | Groq | `openai-chat`, `openai-responses` | `GROQ_API_KEY` |
 | `mistral` | Mistral | `openai-chat` | `MISTRAL_API_KEY` |
 | `xai` | xAI | `openai-responses`, `openai-chat` | `XAI_API_KEY` |
 | `ollama` | Ollama | `openai-chat`, local server | none |
 
-`display_name` is optional on connections and presets. A connection override wins over its preset's name; without
+`display_name` is optional on instances. An instance override wins over its type's name; without
 either, the selector uses the connection ID. Names must be nonblank, contain no control characters and fit in 256 UTF-8
 bytes. ACP shows `Display name (connection-id)` when the two differ, preserving distinct account choices. Selection,
 CLI arguments, credential storage and durable sessions always use the connection ID.
 
-Scalars and arrays in the connection replace the preset's. `model_protocols`, `model_context_windows`, `headers` and each
+Scalars and arrays in the instance replace type defaults. `model_protocols`, `model_context_windows`, `headers` and each
 protocol's table under `protocols` merge key by key, `prefer` replaces, and `credential` is replaced whole.
 URLs follow vendor documentation or the referenced native integration contract. OpenCode translates text models across
 Chat, Responses and Messages, including Gemini text models. Exact `model_protocols` entries can override the preference.
-OpenCode Go uses separate endpoints (`/inference/go`) and needs a connection of its own. Presets deliberately contain no
-model lists: configure `model` or select an ID through ACP.
+OpenCode Go uses separate endpoints (`/inference/go`) and needs an instance of its own. Definitions contain no model
+lists: configure `model` or select an ID through ACP.
 
 ### Use OpenCode Zen or Go
 
@@ -289,29 +293,30 @@ bee auth status
 bee models list opencode-go --endpoint
 ```
 
-Each login creates a separate store-backed connection in the active profile and enables model discovery. Select an
+Each login creates a separate store-backed instance in the active profile. Go enables automatic model discovery; Zen
+retains discovery opt-in. Select an
 appropriate text model through ACP or set `model` in that connection. Public offering lists are unranked and do not
 prove access, so Bee does not choose their first entry automatically. Zen's free-tier chat models require OpenCode;
 use paid Zen text models or Go from Bee. Non-text services such as Jev are outside Bee's inference protocols.
 
-Environment configuration remains supported, including existing `preset = "opencode"` configurations:
+Environment configuration remains supported:
 
 ```toml
 provider = "zen"
 
 [providers.zen]
-preset = "opencode"                # OPENCODE_API_KEY
+type = "opencode"                  # OPENCODE_API_KEY
 model = "gpt-6.1-sol"              # choose a currently available paid text model
 
 [providers.go]
-preset = "opencode-go"             # OPENCODE_GO_API_KEY
+type = "opencode-go"               # OPENCODE_GO_API_KEY
 model = "kimi-k3"                  # choose a model available to your subscription
 ```
 
 Pass the appropriate variable to the Bee subprocess. No key or model ID is borrowed from the other offering. Existing
-environment-backed connections are not converted by login. To use stored credentials for an existing or custom-named
-connection, explicitly add `credential = { store = true }` beneath its `preset`, then run
-`bee auth login CONNECTION --with-token`. Connection IDs are credential identities; use a new connection when changing
+environment-backed instances switch to stored credentials on explicit login. Plain `bee auth login CONNECTION` imports
+the configured environment key; `--with-token` imports stdin instead. Higher-priority source overrides must be removed
+before login can switch authority. Instance IDs are credential identities; use a new instance when changing
 offerings/accounts rather than repurposing an existing stored credential.
 
 Rotate or revoke keys in the console, then repeat token login to replace Bee's stored copy. `bee auth logout CONNECTION`
@@ -331,48 +336,20 @@ Bee never enables it, switches offerings or retries inference against another cr
 [Go usage limits and client requirements](https://opencode.ai/docs/go/) and
 [Zen pricing and privacy terms](https://opencode.ai/docs/zen/) for current conditions.
 
-Define your own preset, or override a shipped one by name, in a `presets` table of any configuration file:
+Compatible ad hoc endpoints use a normal instance of the `custom` provider type:
 
 ```toml
-[presets.corp]
-credential = { env = "CORP_KEY" }
-
-[presets.corp.protocols.anthropic-messages]
+[providers.corp]
+type = "custom"
+protocol = "anthropic-messages"
 base_url = "https://llm.corp.example"
-
-[presets.ollama.protocols.openai-chat]   # overrides one key of the shipped preset
-base_url = "http://gpu-box:11434/v1"
+credential = { env = "CORP_KEY" }
+model = "private-model"
 ```
 
-A browser sign-in is data too. `login = "<name>"` refers to a `login_flows` entry, and you can add one for another
-provider whose flow is an authorization code with PKCE that returns an API key (`kind = "pkce-key"`):
-
-```toml
-[login_flows.acme]
-kind = "pkce-key"
-authorize_url = "https://id.acme.example/authorize"
-exchange_url = "https://id.acme.example/v2/token"
-headless = true                    # the provider can show the code, so `--paste-code` works
-
-[login_flows.acme.authorize]       # the provider's query parameter names
-callback = "redirect"
-challenge = "chal"
-challenge_method = "meth"
-state = "st"
-
-[login_flows.acme.exchange]        # its JSON field names, and where the credential comes back
-code = "authorization_code"
-verifier = "proof"
-challenge_method = "meth"
-response_key = "api_key"
-```
-
-Login flows may only be defined in the global file or the file `BEE_CONFIG` names, never in the project's
-`.config/bee.toml`: a flow chooses where the authorization code and key are sent, and a project file can come from a
-repository you only cloned. ChatGPT uses a separate `kind = "chatgpt"` mechanism with fixed trusted endpoints;
-its OAuth registration, identity verification and token renewal are not configurable PKCE-key exchanges.
-GitHub Copilot uses a separate fixed `kind = "github"` device mechanism.
-See [ADR-009](adr/009-provider-presets-and-login-flows.md).
+Provider authentication contracts are compiled-in. Configuration cannot author new OAuth issuers or redirect credential
+exchanges. The removed preset/login-flow syntax and migration steps are documented in [providers](providers.md).
+See [ADR-027](adr/027-provider-registry-and-instance-authentication.md).
 
 ### Use Google AI Studio
 
@@ -387,7 +364,7 @@ Add this connection to your Bee configuration, replacing the model placeholder w
 
 ```toml
 [providers.google-aistudio]
-preset = "google-aistudio"
+type = "google-aistudio"
 model = "YOUR_GEMINI_MODEL_ID"
 ```
 
@@ -400,10 +377,10 @@ bee auth status google-aistudio
 bee models list google-aistudio --endpoint --json
 ```
 
-The preset uses the official Gemini Developer API OpenAI-compatible endpoint and enables authenticated `/models`
+The provider type uses the official Gemini Developer API OpenAI-compatible endpoint and enables authenticated `/models`
 discovery. Select an exact text/function-capable model explicitly: these generic suggestions do not supply an initial
 default or guarantee invocation access. A custom `credential = { env = "GOOGLE_API_KEY" }` can replace the default
-variable. Bee does not automatically fall back between keys. The legacy `google` preset remains supported with its
+variable. Bee does not automatically fall back between keys. The legacy `google` type remains supported with its
 existing opt-in discovery default.
 
 Eligible free-tier access and paid-tier behavior depend on the model, project, region and Google's current
@@ -419,7 +396,7 @@ This integration uses an AI Studio API key, with no Antigravity OAuth or subscri
 
 ### Use Google Cloud
 
-The `google-cloud` preset displays **Google Cloud** and runs Gemini through the official
+The `google-cloud` type displays **Google Cloud** and runs Gemini through the official
 [Vertex AI OpenAI-compatible API](https://cloud.google.com/vertex-ai/generative-ai/docs/start/openai).
 Choose a billing-enabled resource project, enable `aiplatform.googleapis.com`, and grant the invoking identity
 `aiplatform.endpoints.predict` (commonly through `roles/aiplatform.user`, Vertex AI User).
@@ -439,7 +416,7 @@ Ordinary `gcloud auth login` alone does not create ADC. Add a connection, replac
 
 ```toml
 [providers.google-cloud]
-preset = "google-cloud"
+type = "google-cloud"
 model = "google/YOUR_SUPPORTED_GEMINI_MODEL_ID"
 google_cloud = { project = "your-project-id", location = "global" }
 # google_cloud.quota_project can explicitly override the quota project in ADC.
@@ -501,7 +478,7 @@ To use a GitHub user token from an explicitly selected environment variable inst
 
 ```toml
 [providers.github]
-preset = "github"
+type = "github"
 credential = { env = "COPILOT_GITHUB_TOKEN" }
 ```
 
@@ -510,13 +487,13 @@ Bee does not search other variables, copy the token into its store, or fall back
 Use a token accepted by the Copilot direct API for your account. A GitHub token that can access repositories
 does not necessarily authorize Copilot. Classic PATs are not a supported setup; server rejection remains authoritative.
 
-The preset's `auth = "github"` applies independently of optional discovery, presenting a bearer token on all
+The type's native authentication applies independently of optional discovery, presenting a bearer token on all
 three protocols. Account metadata may select a validated GitHub Copilot API host. Explicit entitlement denial stops
 the operation with guidance to activate Copilot or request an organization seat. Custom Enterprise login domains
 are not implemented. See [Copilot inference](inference.md#github-copilot-requests) for routing and context limits.
 
 With `discover_models = false`, configure a model and an exact `model_protocols` mapping when it differs from the
-preset preference. Authentication and safe target preparation still run. With native discovery enabled, advertised
+type preference. Authentication and safe target preparation still run. With native discovery enabled, advertised
 model endpoints determine the route below explicit configuration, without model-family guesses or protocol retries.
 ACP clients supporting URL elicitation can complete the same cancellable device flow during the first prompt.
 
@@ -526,7 +503,7 @@ Status reports local presence, not verified entitlement. Failed or cancelled log
 
 ### Use your ChatGPT plan
 
-The `chatgpt` preset implements OpenAI's official
+The `chatgpt` type implements OpenAI's official
 [open-source/local application flow](https://developers.openai.com/siwc/token-sharing-open-source).
 It uses your eligible ChatGPT account/workspace plan or credits for supported Responses requests.
 Eligibility depends on OpenAI's current account, workspace, region and policy requirements;
@@ -545,7 +522,7 @@ For a custom account label, configure a named connection:
 provider = "personal"
 
 [providers.personal]
-preset = "chatgpt"
+type = "chatgpt"
 # Optionally override the native initial choice with an exact model slug.
 ```
 
@@ -563,7 +540,7 @@ Authorize ChatGPT-plan usage when prompted, then use the account-specific model 
 picker to select an available model slug. A declined plan permission is retained as a signed-in, inference-disabled
 registration; explicitly repeat `bee auth login personal` to request permission again.
 
-Named connections are distinct account/workspace labels. Add another connection using `preset = "chatgpt"` for another
+Named instances are distinct account/workspace labels. Add another instance using `type = "chatgpt"` for another
 registration; email alone does not identify a workspace. Reauthorization of an existing connection must match its
 verified account and issued client ID. Bee reuses registration and host identity across restarts and logout.
 The Bee data directory defines one host installation; give copied installations or self-hosted VMs distinct host
@@ -579,7 +556,7 @@ hints. Bee does not read Codex's credential files.
 mapping for later sign-in. If revocation cannot be confirmed, Bee says so; disconnect the app in ChatGPT settings.
 [Manage usage and access](https://chatgpt.com/settings/usage), including account-wide and app-specific limits.
 
-The existing `openai` preset still uses `OPENAI_API_KEY` and separate API billing. OpenRouter's browser flow still
+The `openai` type still uses `OPENAI_API_KEY` and separate API billing. OpenRouter's browser flow still
 returns an API key. Bee never silently changes from ChatGPT-plan usage to API-key billing.
 See [ChatGPT inference limitations](inference.md#chatgpt-plan-requests) and
 [ADR-020](adr/020-chatgpt-plan-authentication.md).
@@ -628,7 +605,7 @@ bee auth status [CONNECTION]                # where each credential comes from, 
 
 `CONNECTION` defaults to the active profile's default connection for login/logout; status lists its member connections.
 Explicit targets must be members, except explicit login can add a connection to the active profile. Missing built-in
-`openrouter`, `chatgpt` and `github` connections are created on login.
+native provider instances are created on login when their name matches a registered type.
 `--no-browser` prints the sign-in URL without opening it.
 Prompts and URLs go to stderr; only `status` writes to stdout. Bare `bee` still serves ACPv2.
 
@@ -672,7 +649,7 @@ user-controlled API key. Configure a connection in your Bee configuration:
 
 ```toml
 [providers.openrouter]
-preset = "openrouter"
+type = "openrouter"
 ```
 
 ```bash
@@ -706,11 +683,11 @@ Provider failures stop the request without silently switching credentials or pro
 
 Browser authentication avoids manually copying an API key, but the inference credential is the same kind of bearer
 key. To supply an existing key, use `bee auth login openrouter --with-token` and provide it on standard input.
-Alternatively, replace the preset's credential source:
+Alternatively, replace the provider type's credential source:
 
 ```toml
 [providers.openrouter]
-preset = "openrouter"
+type = "openrouter"
 credential = { env = "OPENROUTER_API_KEY" }
 ```
 

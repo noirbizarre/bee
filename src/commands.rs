@@ -19,8 +19,97 @@ use crate::cli::{AuthCommand, LoginArgs};
 
 pub mod models;
 
+/// Prompts must remain live, while success cannot precede configuration publication.
+struct LoginOutput<'a> {
+    terminal: &'a mut dyn Write,
+    pending: &'a mut Vec<u8>,
+}
+
+impl Write for LoginOutput<'_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.terminal.write(bytes)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.terminal.flush()
+    }
+    fn write_fmt(&mut self, args: std::fmt::Arguments<'_>) -> io::Result<()> {
+        let message = args.to_string();
+        if message.starts_with("Signed in")
+            || message.starts_with("Stored the")
+            || message.starts_with("Discovered ")
+        {
+            self.pending.write_all(message.as_bytes())
+        } else {
+            self.terminal.write_all(message.as_bytes())
+        }
+    }
+}
+
+/// Registry inspection deliberately does not load project configuration.
+pub fn run_providers(command: crate::cli::ProvidersCommand) -> Result<()> {
+    use bee::provider::registry;
+    let mut out = io::stdout().lock();
+    match command {
+        crate::cli::ProvidersCommand::List => {
+            for definition in registry::definitions() {
+                writeln!(out, "{:<18} {}", definition.id, definition.label).map_err(write_error)?;
+            }
+        }
+        crate::cli::ProvidersCommand::Show { provider_type } => {
+            let definition =
+                registry::definition(&provider_type).ok_or(Error::ProviderInvalid {
+                    path: "<command line>".into(),
+                    key: "provider type".into(),
+                    reason: "unknown provider type; run `bee providers list`",
+                })?;
+            writeln!(
+                out,
+                "{} ({})\nAuthentication: {:?}",
+                definition.label, definition.id, definition.methods
+            )
+            .map_err(write_error)?;
+            for field in definition.fields {
+                writeln!(
+                    out,
+                    "{}: {}, {}, {:?}",
+                    field.name,
+                    if field.required {
+                        "required"
+                    } else {
+                        "optional"
+                    },
+                    if field.secret {
+                        "secret"
+                    } else {
+                        "private metadata"
+                    },
+                    field.owner
+                )
+                .map_err(write_error)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// How long a request to the provider may take.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn acquire_environment(
+    plan: &bee::config::persist::LoginConnection,
+    env: &Environment,
+    instance: &Profile,
+    store: &dyn CredentialStore,
+) -> Result<Option<(auth::Credential, Option<u64>)>> {
+    if plan.import_env().is_none() {
+        return Ok(None);
+    }
+    // Snapshot before reading credentials; a later login/logout must supersede this acquisition.
+    let generation = store.generation(auth::Audience::Provider(instance.name()))?;
+    Ok(plan
+        .import_credential(env)?
+        .map(|credential| (credential, generation)))
+}
 
 /// Everything `bee auth` touches, handed in so tests can stand in for it.
 pub struct Context<'a> {
@@ -53,12 +142,12 @@ pub fn run_auth(command: AuthCommand) -> Result<()> {
     let config = Config::load(&env, &project_dir)?;
     let configured = Providers::from_config(&config)?;
     let onboarding = match &command {
-        AuthCommand::Login(LoginArgs {
-            profile: Some(name),
-            ..
-        }) if configured.get(name).is_none() => {
-            Some(bee::config::persist::prepare(&env, &project_dir, name)?)
-        }
+        AuthCommand::Login(args) => args
+            .profile
+            .as_deref()
+            .or_else(|| configured.default_name())
+            .map(|name| bee::config::persist::prepare(&env, &project_dir, name))
+            .transpose()?,
         _ => None,
     };
     let providers = onboarding
@@ -71,28 +160,62 @@ pub fn run_auth(command: AuthCommand) -> Result<()> {
     let stdin = io::stdin();
     let interactive = stdin.is_terminal();
     let mut input = stdin.lock();
+    let mut imported = None;
+    if let (Some(plan), AuthCommand::Login(args)) = (&onboarding, &command)
+        && !args.with_token
+        && !args.no_browser
+        && !args.paste_code
+    {
+        let instance = chosen(providers, args.profile.as_deref())?;
+        imported = acquire_environment(plan, &env, instance, &store)?;
+    }
     let mut out = io::stdout().lock();
     let mut err = io::stderr().lock();
-    execute(
-        command,
-        &mut Context {
-            env: &env,
-            providers,
-            store: &store,
-            http: &http,
-            login_http: &bee::http::AsyncLoginHttp,
-            discovery: Some(&discovery),
-            timeout: login::DEFAULT_TIMEOUT,
-            open: &open_browser,
-            interactive,
-            out: &mut out,
-            err: &mut err,
-            input: &mut input,
-        },
-    )?;
-    if let Some(plan) = onboarding {
-        plan.commit(&env, &project_dir)?;
+    let mut pending_output = Vec::new();
+    let mut login_output = LoginOutput {
+        terminal: &mut err,
+        pending: &mut pending_output,
+    };
+    if let Some((credential, generation)) = imported {
+        let name = match &command {
+            AuthCommand::Login(args) => args
+                .profile
+                .as_deref()
+                .or_else(|| providers.default_name())
+                .expect("planned instance"),
+            _ => unreachable!(),
+        };
+        if let Some(plan) = &onboarding {
+            plan.check(&env, &project_dir)?;
+        }
+        store.put_guarded(auth::Audience::Provider(name), &credential, generation)?;
+        writeln!(pending_output, "Stored environment credentials for `{name}`; this instance now uses Bee's credential store.").map_err(write_error)?;
+    } else {
+        execute(
+            command,
+            &mut Context {
+                env: &env,
+                providers,
+                store: &store,
+                http: &http,
+                login_http: &bee::http::AsyncLoginHttp,
+                discovery: Some(&discovery),
+                timeout: login::DEFAULT_TIMEOUT,
+                open: &open_browser,
+                interactive,
+                out: &mut out,
+                err: &mut login_output,
+                input: &mut input,
+            },
+        )?;
     }
+    if let Some(plan) = onboarding {
+        plan.commit(&env, &project_dir).map_err(|_| Error::ConfigWrite {
+            path: env.global_config_path().map_or_else(|| "<user configuration>".into(), |path| path.display().to_string()),
+            reason: "credentials may have been stored but configuration publication failed; review user configuration and repeat login",
+        })?;
+    }
+    err.write_all(&pending_output).map_err(write_error)?;
     Ok(())
 }
 
@@ -151,6 +274,13 @@ fn write_error(source: io::Error) -> Error {
 
 fn login(args: &LoginArgs, context: &mut Context<'_>) -> Result<()> {
     let profile = chosen(context.providers, args.profile.as_deref())?;
+    if profile.credential().is_none() {
+        return writeln!(
+            context.err,
+            "This provider instance requires no credential."
+        )
+        .map_err(write_error);
+    }
     // Before opening a browser: signing in to something that cannot be stored
     // would waste the user's time and then throw the key away.
     auth::require_store(profile)?;
@@ -158,7 +288,7 @@ fn login(args: &LoginArgs, context: &mut Context<'_>) -> Result<()> {
 
     if profile
         .login_spec()
-        .is_some_and(bee::preset::LoginSpec::is_copilot)
+        .is_some_and(bee::provider::signin::LoginSpec::is_copilot)
         && !args.with_token
     {
         if args.paste_code {
@@ -190,7 +320,7 @@ fn login(args: &LoginArgs, context: &mut Context<'_>) -> Result<()> {
 
     if profile
         .login_spec()
-        .is_some_and(bee::preset::LoginSpec::is_chatgpt)
+        .is_some_and(bee::provider::signin::LoginSpec::is_chatgpt)
     {
         if args.with_token || args.paste_code {
             return Err(Error::ChatGpt {
@@ -222,6 +352,7 @@ fn login(args: &LoginArgs, context: &mut Context<'_>) -> Result<()> {
         });
     }
 
+    let generation = context.store.generation(auth::Audience::Provider(name))?;
     if args.with_token {
         if context.interactive {
             writeln!(
@@ -238,7 +369,7 @@ fn login(args: &LoginArgs, context: &mut Context<'_>) -> Result<()> {
                 path: "<stdin>".to_owned(),
                 source,
             })?;
-        auth::store_secret(profile, &line, context.store)?;
+        auth::store_secret_guarded(profile, &line, context.store, generation)?;
         writeln!(context.err, "Stored the API token for `{name}`.").map_err(write_error)?;
         return Ok(());
     }
@@ -287,7 +418,7 @@ fn login(args: &LoginArgs, context: &mut Context<'_>) -> Result<()> {
     };
     // Stored only now, after every check passed: a failed sign-in must leave
     // the previous credential exactly as it was.
-    auth::store_secret(profile, secret.expose(), context.store)?;
+    auth::store_secret_guarded(profile, secret.expose(), context.store, generation)?;
     writeln!(
         context.err,
         "Signed in. Stored the credential for `{name}`."
@@ -299,7 +430,7 @@ fn logout(name: Option<&str>, context: &mut Context<'_>) -> Result<()> {
     let profile = chosen(context.providers, name)?;
     if profile
         .login_spec()
-        .is_some_and(bee::preset::LoginSpec::is_chatgpt)
+        .is_some_and(bee::provider::signin::LoginSpec::is_chatgpt)
     {
         let store = context
             .store
@@ -437,6 +568,33 @@ mod tests {
     use super::*;
 
     const KEY: &str = "sk-or-test-key";
+
+    #[cfg(unix)]
+    #[test]
+    fn environment_acquisition_carries_its_original_generation_to_publication() {
+        let root = tempfile::tempdir().unwrap();
+        let env = Environment::new(Some(root.path().join("config")), None, None)
+            .with_variable("OPENAI_API_KEY", "old-environment-account");
+        let plan = bee::config::persist::prepare(&env, root.path(), "openai").unwrap();
+        let instance = plan.providers().get("openai").unwrap();
+        let store = FileStore::new(root.path().join("credentials.json"));
+        let (credential, generation) = acquire_environment(&plan, &env, instance, &store)
+            .unwrap()
+            .unwrap();
+        let replacement = auth::Credential::new(auth::Secret::new("newer-login-account"));
+        store
+            .put(Audience::Provider("openai"), &replacement)
+            .unwrap();
+        assert!(matches!(
+            store.put_guarded(Audience::Provider("openai"), &credential, generation),
+            Err(Error::AuthCredentialsChanged)
+        ));
+        assert_eq!(
+            store.get(Audience::Provider("openai")).unwrap(),
+            Some(replacement)
+        );
+        assert!(!env.global_config_path().unwrap().exists());
+    }
 
     #[cfg(unix)]
     #[test]
@@ -642,7 +800,7 @@ mod tests {
             std::fs::create_dir_all(project_config_path(&project).parent().unwrap()).unwrap();
             std::fs::write(
                 project_config_path(&project),
-                "[providers.or]\npreset = \"openrouter\"\n",
+                "[providers.or]\ntype = \"openrouter\"\n",
             )
             .unwrap();
             let env = Environment::new(None, Some(dir.path().join("home")), None);
@@ -918,7 +1076,7 @@ mod tests {
         use std::sync::atomic::Ordering;
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("config.toml");
-        std::fs::write(&path, "[providers.account]\npreset='chatgpt'").unwrap();
+        std::fs::write(&path, "[providers.account]\ntype='chatgpt'").unwrap();
         let env = Environment::new(None, Some(root.path().into()), Some(path));
         let providers = Providers::from_config(&Config::load(&env, root.path()).unwrap()).unwrap();
         let store = FileStore::from_environment(&env).unwrap();

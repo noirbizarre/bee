@@ -26,7 +26,6 @@ pub mod models;
 pub mod permissions;
 mod plan;
 pub mod presentation;
-pub mod preset;
 mod profile;
 pub mod provider;
 pub mod scenario;

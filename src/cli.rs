@@ -47,12 +47,27 @@ fn scenario_parser() -> impl TypedValueParser<Value = bee::scenario::Scenario> {
 /// What a person can ask Bee to do besides being launched by a client.
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Inspect the built-in provider integrations without configuration or credentials.
+    #[command(subcommand)]
+    Providers(ProvidersCommand),
     /// Discover model IDs and metadata without making the catalog an allowlist.
     #[command(subcommand)]
     Models(ModelsCommand),
     /// Manage the credentials of provider connections.
     #[command(subcommand)]
     Auth(AuthCommand),
+}
+
+/// Compiled-in integrations, distinct from the public Models.dev catalogue.
+#[derive(Debug, Subcommand)]
+pub enum ProvidersCommand {
+    /// List supported native and custom provider types.
+    List,
+    /// Show supported authentication and declared fields for one provider type.
+    Show {
+        /// Provider type, as used in instance configuration.
+        provider_type: String,
+    },
 }
 
 /// `bee models ...`.
@@ -93,10 +108,11 @@ pub enum ModelsCommand {
 /// `bee auth ...`.
 #[derive(Debug, Subcommand)]
 pub enum AuthCommand {
-    /// Store a credential for a connection that uses `credential = { store = true }`.
+    /// Authenticate an instance, creating it when its name identifies a native provider type.
     ///
-    /// Without flags, signs in with the browser if the connection has a `login`
-    /// configured. With `--with-token`, reads an API token from standard input.
+    /// Without flags, imports declared environment credentials or runs native browser/device login.
+    /// Explicit environment login switches the instance to stored authority.
+    /// With `--with-token`, reads an API token from standard input.
     Login(LoginArgs),
     /// Forget the credential Bee stored for a connection.
     ///

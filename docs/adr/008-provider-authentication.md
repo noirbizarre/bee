@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted.
+Accepted. Typed methods/material and explicit environment import now follow
+[ADR-027](027-provider-registry-and-instance-authentication.md).
 
 ## Context
 

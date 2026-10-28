@@ -26,6 +26,7 @@ nav = [
   { "CLI and troubleshooting" = "cli.md" },
   { "Inference" = "inference.md" },
   { "Profiles" = "profiles.md" },
+  { "Providers" = "providers.md" },
   { "Tools" = "tools.md" },
   { "Session history" = "sessions.md" },
   { "Model discovery" = "models.md" },

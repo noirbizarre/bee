@@ -48,7 +48,7 @@ async fn opencode_failures_give_console_advice_without_replaying_requests_or_ech
     let mut response = Response::json(json!({"error":{"message":"private-upstream-secret"}}));
     response.status = status;
     let server = Server::start(vec![response]);
-    let profile = support::profile("openai-chat", &server.url, "discovery='opencode-go'");
+    let profile = support::profile("openai-chat", &server.url, "type='opencode-go'");
     let model = bee::llm::Model::new(
         profile,
         "text-model".into(),
@@ -81,7 +81,7 @@ async fn opencode_rejects_invalid_conversation_headers_and_configured_collisions
         let profile = support::profile(
             "openai-chat",
             "http://127.0.0.1:1",
-            &format!("discovery='opencode'\n{extra}"),
+            &format!("type='opencode'\n{extra}"),
         );
         let model = bee::llm::Model::new(profile, "text-model".into(), None)
             .unwrap()
@@ -108,7 +108,7 @@ async fn opencode_durable_resume_preserves_the_wire_conversation_identity() {
         Response::json(chat_text("resumed")),
     ]);
     let profiles = support::configured_providers(&format!(
-        "[providers.test]\npreset='opencode-go'\nmodel='text-model'\ndiscover_models=false\nprotocols.openai-chat.base_url='{}'",
+        "[providers.test]\ntype='opencode-go'\nmodel='text-model'\ndiscover_models=false\nprotocols.openai-chat.base_url='{}'",
         server.url
     ));
     let saved = Arc::new(Mutex::new(None));
@@ -228,7 +228,7 @@ async fn opencode_conversation_headers_survive_tool_steps_and_later_prompts(
         Response::json(answer(protocol, "other")),
     ]);
     let profiles = support::configured_providers(&format!(
-        "[providers.test]\npreset='{preset}'\nmodel='text-model'\ndiscover_models=false\nprefer=['{protocol}']\nprotocols.{protocol}.base_url='{}'",
+        "[providers.test]\ntype='{preset}'\nmodel='text-model'\ndiscover_models=false\nprefer=['{protocol}']\nprotocols.{protocol}.base_url='{}'",
         server.url
     ));
     let mut registry = bee::tool::Registry::default();
@@ -441,7 +441,7 @@ async fn google_ai_studio_signed_calls_reach_native_tools_and_remain_private_acr
         Response::json(answer("openai-chat", "second")),
     ]);
     let profiles = support::configured_providers(&format!(
-        "[providers.studio]\npreset='google-aistudio'\nmodel='gemini-test'\ndiscover_models=false\nprotocols.openai-chat.base_url='{}'",
+        "[providers.studio]\ntype='google-aistudio'\nmodel='gemini-test'\ndiscover_models=false\nprotocols.openai-chat.base_url='{}'",
         server.url
     ));
     let mut registry = bee::tool::Registry::default();

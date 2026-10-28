@@ -18,13 +18,13 @@ Create `.config/bee.toml` inside the directory from which the client will launch
 provider = "openai"
 
 [providers.openai]
-preset = "openai"
+type = "openai"
 model = "YOUR_RESPONSES_MODEL_ID"
 credential = { env = "OPENAI_API_KEY" }
 ```
 
 Replace the model placeholder with an exact Responses-capable model ID available to your API account. The OpenAI
-preset prefers Responses. This route uses OpenAI API billing, not a ChatGPT subscription. For other providers,
+provider type prefers Responses. This route uses OpenAI API billing, not a ChatGPT subscription. For other providers,
 protocols or local endpoints, see [configuration](index.md#providers-and-models) and [inference](inference.md).
 
 Alternatively, save the file globally at `~/.config/bee/config.toml`, or set `BEE_CONFIG` to its absolute path.

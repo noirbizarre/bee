@@ -227,7 +227,7 @@ mod tests {
         let path = root.path().join("config.toml");
         std::fs::write(
             &path,
-            "[providers.account]\npreset='openrouter'\ncredential={env='KEY'}",
+            "[providers.account]\ntype='openrouter'\ncredential={env='KEY'}",
         )
         .unwrap();
         let env =

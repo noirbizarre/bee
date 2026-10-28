@@ -246,7 +246,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let store = FileStore::new(root.path().join("credentials.json"));
         let profile =
-            crate::test_support::configured_providers("[providers.copilot]\npreset='github'")
+            crate::test_support::configured_providers("[providers.copilot]\ntype='github'")
                 .get("copilot")
                 .unwrap()
                 .clone();
@@ -275,7 +275,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let store = FileStore::new(root.path().join("unused-credentials.json"));
         let profile = crate::test_support::configured_providers(
-            "[providers.github]\npreset='github'\ncredential={env='TOKEN'}",
+            "[providers.github]\ntype='github'\ncredential={env='TOKEN'}",
         )
         .get("github")
         .unwrap()
@@ -513,7 +513,7 @@ impl SignIn {
                     if value["token_type"].as_str().is_some_and(|kind| !kind.eq_ignore_ascii_case("bearer")) {
                         return Err(failure("unsupported device token type; retry login"));
                     }
-                    let credential = Credential::new(Secret::new(token));
+                    let credential = Credential::new(Secret::new(token)).oauth_token(None).for_provider("github");
                     target(credential.secret(), http).await?;
                     return Ok(credential);
                 }
