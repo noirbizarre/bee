@@ -98,7 +98,7 @@ async fn serve_runs_the_agent_over_any_transport_the_sdk_can_connect() {
 
     let (client, served) = tokio::join!(
         client,
-        bee::acp::serve(agent_side, bee::provider::Providers::default())
+        bee::acp::serve(agent_side, bee::account::Accounts::default())
     );
 
     client.expect("the client completes its exchange");

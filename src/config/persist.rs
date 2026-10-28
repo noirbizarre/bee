@@ -7,27 +7,27 @@ use fs2::FileExt;
 use toml_edit::{DocumentMut, Item, Table, TableLike, value};
 
 use super::{Config, Environment};
-use crate::provider::Providers;
+use crate::account::{Account, Accounts};
 use crate::{Error, Result};
 
 /// A preflight result retains no credential and exposes no configuration values.
-pub struct LoginConnection {
+pub struct LoginAccount {
     name: String,
-    providers: Providers,
+    providers: Accounts,
     import_env: Option<String>,
     import_fields: std::collections::BTreeMap<String, String>,
-    original: Option<crate::provider::Instance>,
+    original: Option<Account>,
 }
 
-impl LoginConnection {
+impl LoginAccount {
     /// Reject authority edits while authentication was pending, preserving unrelated edits.
     pub fn check(&self, env: &Environment, cwd: &Path) -> Result<()> {
         let config = Config::load(env, cwd)?;
-        if Providers::connections(&config)?.get(&self.name) != self.original.as_ref() {
+        if Accounts::connections(&config)?.get(&self.name) != self.original.as_ref() {
             return Err(failure(
                 &env.global_config_path()
                     .unwrap_or_else(|| "<user configuration>".into()),
-                "provider authority changed during login; review the instance and repeat login",
+                "account authority changed during login; review the account and repeat login",
             ));
         }
         Ok(())
@@ -57,12 +57,12 @@ impl LoginConnection {
             .collect::<Result<_>>()?;
         let instance = self.providers.get(&self.name).expect("planned instance");
         let credential = crate::auth::Credential::api_key_fields(secret, fields)
-            .for_provider(instance.provider_type());
+            .for_provider(instance.provider());
         credential.validate_for(instance)?;
         Ok(Some(credential))
     }
-    /// Effective connections after the proposed user-only change.
-    pub fn providers(&self) -> &Providers {
+    /// Configured accounts after the proposed user-only change.
+    pub fn accounts(&self) -> &Accounts {
         &self.providers
     }
 
@@ -75,7 +75,7 @@ impl LoginConnection {
             if effective.get(&self.name) != self.providers.get(&self.name) {
                 return Err(failure(
                     Path::new("<effective configuration>"),
-                    "provider definition changed during login; review the instance and repeat login",
+                    "account definition changed during login; review the account and repeat login",
                 ));
             }
             return Ok(());
@@ -104,7 +104,7 @@ impl LoginConnection {
         if effective.get(&self.name) != self.providers.get(&self.name) {
             return Err(failure(
                 &path,
-                "provider definition changed during login; credentials may have been stored; review the instance and repeat login",
+                "account definition changed during login; credentials may have been stored; review the account and repeat login",
             ));
         }
         let Some(document) = document else {
@@ -146,9 +146,9 @@ fn failure(path: &Path, reason: &'static str) -> Error {
 }
 
 /// Only explicit built-in login creates declarations; status and startup do not.
-pub fn prepare(env: &Environment, cwd: &Path, name: &str) -> Result<LoginConnection> {
+pub fn prepare(env: &Environment, cwd: &Path, name: &str) -> Result<LoginAccount> {
     let config = Config::load(env, cwd)?;
-    let connections = Providers::connections(&config)?;
+    let connections = Accounts::connections(&config)?;
     let import_env = match connections
         .get(name)
         .and_then(|instance| instance.credential())
@@ -170,7 +170,7 @@ pub fn prepare(env: &Environment, cwd: &Path, name: &str) -> Result<LoginConnect
         .get(name)
         .map(|instance| instance.credential_env_fields().clone())
         .unwrap_or_default();
-    Ok(LoginConnection {
+    Ok(LoginAccount {
         name: name.into(),
         providers,
         import_env,
@@ -187,9 +187,10 @@ fn table<'a>(parent: &'a mut dyn TableLike, key: &str) -> &'a mut dyn TableLike 
         .expect("validated table")
 }
 
-fn proposed(env: &Environment, cwd: &Path, name: &str) -> Result<(Option<DocumentMut>, Providers)> {
+fn proposed(env: &Environment, cwd: &Path, name: &str) -> Result<(Option<DocumentMut>, Accounts)> {
     let config = Config::load(env, cwd)?;
-    let providers = Providers::from_config(&config)?;
+    // Authentication addresses configured identities even when profile membership excludes them.
+    let providers = crate::auth::configured_accounts(&config)?;
     if providers.get(name).is_some_and(|instance| {
         !matches!(
             instance.credential(),
@@ -200,7 +201,7 @@ fn proposed(env: &Environment, cwd: &Path, name: &str) -> Result<(Option<Documen
     }
     let configured = config
         .table()
-        .get("providers")
+        .get("accounts")
         .and_then(toml::Value::as_table)
         .is_some_and(|table| table.contains_key(name));
     if !configured
@@ -230,9 +231,9 @@ fn proposed(env: &Environment, cwd: &Path, name: &str) -> Result<(Option<Documen
         )
     })?;
     if !configured {
-        table(table(document.as_table_mut(), "providers"), name).insert("type", value(name));
+        table(table(document.as_table_mut(), "accounts"), name).insert("provider", value(name));
     }
-    let connections = Providers::connections(&config)?;
+    let connections = Accounts::connections(&config)?;
     let switch_source = connections.get(name).is_some_and(|instance| {
         matches!(
             instance.credential(),
@@ -242,50 +243,44 @@ fn proposed(env: &Environment, cwd: &Path, name: &str) -> Result<(Option<Documen
         && crate::provider::registry::definition(name)
             .is_some_and(|definition| !definition.methods.is_empty()));
     if switch_source {
-        let connection = table(table(document.as_table_mut(), "providers"), name);
+        let connection = table(table(document.as_table_mut(), "accounts"), name);
         let credential = table(connection, "credential");
         credential.remove("env");
         credential.remove("fields");
         credential.insert("store", value(true));
     }
-    let explicit = config
-        .get("profiles")
-        .and_then(toml::Value::as_table)
-        .is_some_and(|groups| !groups.is_empty());
-    if explicit && providers.get(name).is_none() {
-        let group_name = providers.profile_name();
-        let key = format!("profiles.{group_name}.connections");
+    let active = Accounts::from_config(&config)?;
+    let group_name = active.profile_name();
+    let key = format!("profiles.{group_name}.accounts");
+    // Existing-account login must never enable an account or expand a profile's scope.
+    if !configured && config.get(&key).is_some() {
         if config.origin(&key).is_some_and(|origin| origin != path) {
             return Err(failure(
                 config.origin(&key).expect("known origin"),
-                "active-profile membership is overridden here; add the connection to that membership array",
+                "active-profile membership is overridden here; add the account to that membership array",
             ));
         }
         let group = table(table(document.as_table_mut(), "profiles"), group_name);
-        // Copy membership only from the global layer; higher-layer arrays were rejected.
-        let mut members = toml_edit::Array::new();
-        for member in providers.names() {
-            members.push(member);
+        if let Some(members) = group.get_mut("accounts").and_then(Item::as_array_mut) {
+            // Append in place so existing membership order, formatting and comments survive login.
+            members.push(name);
+        } else {
+            // Higher-layer arrays were rejected; retain effective membership if the user layer omits it.
+            let mut members = toml_edit::Array::new();
+            for member in active.names() {
+                members.push(member);
+            }
+            members.push(name);
+            group.insert("accounts", value(members));
         }
-        members.push(name);
-        group.insert("connections", value(members));
-        if group.get("provider").is_none()
-            && let Some(previous) = providers.default_name()
-        {
-            group.insert("provider", value(previous));
-        }
-    } else if config.get("provider").is_none()
-        && let Some(previous) = providers.default_name()
-    {
-        document["provider"] = value(previous);
     }
     let replacement = document
         .to_string()
         .parse::<toml::Table>()
         .map_err(|_| failure(&path, "cannot validate updated configuration"))?;
     let effective = Config::load_with_global(env, cwd, Some(&replacement))?;
-    let updated = Providers::from_config(&effective)?;
-    if updated.get(name).is_none() {
+    let updated = crate::auth::configured_accounts(&effective)?;
+    if !configured && Accounts::from_config(&effective)?.get(name).is_none() {
         return Err(failure(
             &path,
             "higher-priority configuration prevents active-profile membership",

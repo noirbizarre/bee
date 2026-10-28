@@ -62,7 +62,6 @@ The unstable files include the baseline; enabling a local Rust feature does not 
 | [Transport][spec-transport] | UTF-8 stdio framing, message timing and JSON-RPC batches |
 | [Extensions][spec-extensions] | Negotiation, unknown fields/variants and metadata patches |
 | [Lifecycle][spec-lifecycle] | Prompt acceptance, states, completion, notices, compaction and usage |
-| [Migration][spec-migration] | V1-to-v2 changed and removed surfaces |
 
 ## Status and responsibility
 
@@ -90,7 +89,7 @@ permissions, negotiated form input, cancellation/close cleanup and controlled ac
 wire tests in `tests/support/scenarios.rs` cover ordering, response validation, replay and terminal states.
 This evidence is separate from the recorded TCK runs below.
 
-Scenario sessions are memory-only; provider/model selectors, inference, native execution, MCP discovery and browser
+Scenario sessions are memory-only; account/model selection, inference, native execution, MCP discovery and browser
 login are not exercised. No configuration, credentials or external services are required. The general capability
 inventory below describes ordinary Bee unless explicitly stated otherwise.
 
@@ -157,13 +156,13 @@ All methods in this table are client → agent; updates are agent → client.
 | `session/resume`, current-state synchronization | Implemented and supported | Requires original cwd/known identity. Omitted/null `replayFrom` sends current state before response; active state remains active. [Session][test-session] and [cancellation tests][test-cancel]. |
 | Start replay and stable entity identity | Implemented and supported | `replayFrom: {"type":"start"}` sends retained full messages, latest plans and tool/terminal snapshots, then current state; no execution replay. Unknown/malformed cursors rejected; cumulative replay budget can reject a whole replay. `tests/stdio.rs`, `tests/tool_presentation.rs`, [retention contract](sessions.md). |
 | Durable sessions and exclusive attachment | Implemented and supported | Production survives restarts; one OS-lock owner, explicit corruption/storage failures. Embedded runtimes default to memory. [Process tests][test-stdio], [session history](sessions.md). Durability has no separate v2 capability flag. |
-| Profile-scoped session ownership | Implemented and supported | Listing is limited to the active profile; cross-profile resume and removed selected connections fail before recovery/replay. `profile_ownership_isolates_history_and_models_across_process_restarts` in [wire tests][test-stdio]. This is local session policy, not an additional ACP capability. |
+| Profile-scoped session ownership | Implemented and supported | Listing is limited to the active profile; cross-profile resume and removed selected accounts fail before recovery/replay. `profile_ownership_isolates_history_and_models_across_process_restarts` in [wire tests][test-stdio]. This is local session policy, not an additional ACP capability. |
 | `session/close` | Implemented and supported | Detaches rather than deletes. Active work/requests are cleaned up and terminal idle precedes response. Known closed sessions are idempotent; unknown IDs fail. [Close tests][test-cancel], [session tests][test-session]. |
 | `session/prompt` acceptance and message IDs | Implemented and supported | Response acknowledges the accepted user message, not final completion. Echo → running → output → terminal idle; one foreground turn per session. [Ordering tests][test-session], [busy-turn tests][test-cancel]. |
 | `session/cancel` notification | Implemented and supported | Cancels active work; idle/unknown IDs produce no spurious updates. No assistant output after terminal idle. [Cancellation tests][test-cancel], [MCP cancellation][test-mcp]. |
-| `session/set_config_option` | Partially supported | Provider/model select IDs only, scoped per session; invalid types/IDs and active-turn changes fail. Unlisted model IDs are allowed. [Selection tests][test-selection], [option construction][acp-code]. |
-| Select options, categories and background updates | Implemented and supported | Standard `model` category and custom `_provider`; no options when unconfigured. Optional discovery emits `config_option_update` without losing current custom model IDs. [Selection][test-selection], [model discovery tests][test-models]. |
-| Profile/account-bound automatic model selection | Implemented and supported | New sessions prefer the profile's last successfully used connection/model/account; unsafe automatic reuse warns and requires explicit selection. Preference-write failure warns without undoing answers. [Selection tests][test-selection], [profile resolution](profiles.md#configured-default-and-last-used-model). |
+| `session/set_config_option` | Partially supported | One qualified account/model choice, scoped per session; invalid/unavailable IDs and active-turn changes fail. Selection and inference enforce account availability. [Selection tests][test-selection], [current account contract](adr/028-account-model-availability-and-selection.md). |
+| Select options, categories and background updates | Implemented and supported | Unified standard `model` selector across active accounts, with qualified IDs and display labels. Unselected/pending/unavailable sessions show a presentation-only placeholder; background updates include per-account status. No first-choice default. [Model availability](models.md). |
+| Profile/account-bound automatic model selection | Implemented and supported | New sessions prefer usable account-bound successful recency, then an applicable qualified default, else remain unselected. Unsafe reuse requires selection; no native-order or cross-account fallback. Preference-write failure warns without undoing answers. [Profile resolution](profiles.md#configured-default-and-last-used-model). |
 | Boolean/additional settings, other standard categories | Planned | `boolean`, and concrete settings using categories such as `mode`, `model_config`, `thought_level`, are not currently offered. [#79](https://github.com/noirbizarre/bee/issues/79); not experimental provider-management RPCs. |
 | Additional roots / `session.additionalDirectories` | Planned | Not advertised or integrated into session workspace state. [#69](https://github.com/noirbizarre/bee/issues/69). Native path access beyond cwd is not this capability. |
 | `session/delete` / `session.delete` | Not planned | Not advertised; closing does not delete retained history. [Session retention](sessions.md#storage-and-retention), [capability tests][test-acp]. |
@@ -284,7 +283,7 @@ or a currently supported convention. Direct attachment transport work is tracked
 | --- | --- | --- |
 | `session/fork` / `session.fork` | Planned | No fork handler/capability; durable resume is not a fork. [#76](https://github.com/noirbizarre/bee/issues/76). |
 | Client `systemPrompt`: append / override | Not planned | Neither `session.systemPrompt` nor `.mode.override` advertised. Scoped AGENTS.md and skills are separate Bee instruction sources. [Initialization][acp-code]. |
-| `providers/list`, `providers/set`, `providers/disable` / root `providers` | Not planned | No management handlers or capability. Provider/model selects do not permit endpoint/credential editing. [Handler/option code][acp-code]. |
+| `providers/list`, `providers/set`, `providers/disable` / root `providers` | Not planned | No management handlers or capability. The qualified model selector does not permit endpoint/credential editing. [Handler/option code][acp-code]. |
 | Markdown and file-backed `plan_update` representations | Not planned | Only item plans produced; no `markdown` or `file` representation. [Plan implementation][plan-code]. |
 | `plan_removed` | Not planned | No removal notifications; clearing item entries uses an empty full snapshot. [Plan tests][test-plans]. |
 | `subagent_update`, child mutation/cancel capabilities | Not planned | No standard child-session exposure. Outbound client/delegation issues [#20](https://github.com/noirbizarre/bee/issues/20)/[#21](https://github.com/noirbizarre/bee/issues/21) are not commitments to this experimental representation. |
@@ -292,10 +291,10 @@ or a currently supported convention. Direct attachment transport work is tracked
 | End-of-work `idle.usage` token totals | Not planned | No total/input/output/thought/cache token counters on terminal state. Distinct from supported estimated `usage_update` and planned monetary cost. [Finalization][acp-code]. |
 | `state_update.state: unknown` | Partially supported | Schema can represent it, but Bee always supplies a known running/requires_action/idle snapshot; it does not need the unknown-state producer fallback. [Resume/finalization][acp-code]. |
 
-## ACP v1 inventory and migration boundary
+## ACP v1 inventory and version boundary
 
 Authority: [V1][v1-schema], [V1 experimental][v1-unstable], their complete
-[baseline][v1-methods]/[experimental][v1-experimental-methods] method inventories, and [Migration][spec-migration].
+[baseline][v1-methods]/[experimental][v1-experimental-methods] method inventories.
 **Bee does not intend to implement wire-v1 interoperability.** Shared method names or Rust types do not make
 the following v1 surfaces available. V2 support described above applies only to the v2 shapes and lifecycle.
 
@@ -351,7 +350,6 @@ Update those links with the audit provenance when rechecking implementation clai
 [spec-transport]: https://github.com/agentclientprotocol/agent-client-protocol/blob/e2d83349bc9e28a4059ea3acefa1c91c966f74e2/docs/protocol/v2/transports.mdx
 [spec-extensions]: https://github.com/agentclientprotocol/agent-client-protocol/blob/e2d83349bc9e28a4059ea3acefa1c91c966f74e2/docs/protocol/v2/extensibility.mdx
 [spec-lifecycle]: https://github.com/agentclientprotocol/agent-client-protocol/blob/e2d83349bc9e28a4059ea3acefa1c91c966f74e2/docs/protocol/v2/prompt-lifecycle.mdx
-[spec-migration]: https://github.com/agentclientprotocol/agent-client-protocol/blob/e2d83349bc9e28a4059ea3acefa1c91c966f74e2/docs/protocol/v2/migration.mdx
 [sdk-transport]: https://docs.rs/crate/agent-client-protocol/3.5.0/source/src/jsonrpc/transport_actor.rs
 [acp-code]: https://github.com/noirbizarre/bee/blob/b8c3eeb/src/acp.rs
 [interaction-code]: https://github.com/noirbizarre/bee/blob/b8c3eeb/src/acp/interactions.rs

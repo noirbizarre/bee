@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
+use crate::account::{Accounts as Providers, ModelRef};
 use crate::llm::Message;
-use crate::provider::{Providers, check_model_id};
 
 /// Why a session operation was refused.
 ///
@@ -21,7 +21,7 @@ use crate::provider::{Providers, check_model_id};
 pub enum SessionError {
     /// Automatic recency must not choose a different account without confirmation.
     #[error(
-        "model selection requires confirmation; choose a provider and model explicitly over ACP before prompting"
+        "model selection requires confirmation; choose an account-qualified model over ACP before prompting"
     )]
     SelectionRequired,
     /// A durable session cannot import another profile's context or settings.
@@ -78,7 +78,7 @@ pub enum SessionError {
     SettingsBusy(String),
 
     /// The client chose a provider profile that is not configured.
-    #[error("unknown provider `{name}`; the configured providers are: {available}")]
+    #[error("unknown account `{name}`; the active accounts are: {available}")]
     UnknownProvider {
         /// What the client asked for.
         name: String,
@@ -92,31 +92,30 @@ pub enum SessionError {
 
     /// A provider or model was chosen but no provider profile is configured.
     #[error(
-        "no provider is configured, so there is nothing to select; \
-         define one under `[providers]` in Bee's configuration"
+        "no account is active, so there is nothing to select; \
+         define one under `[accounts]` in Bee's configuration"
     )]
     NoProvider,
 }
 
-/// A session's provider and model, as the client sees and may change them.
+/// A session's account and model, as the client sees and may change them.
 ///
 /// These are *session settings*, chosen over ACP, and distinct from provider
 /// *configuration* (endpoint, headers, credential), which only the
 /// configuration files set (ADR-007).
 #[derive(Clone, PartialEq, Eq)]
 pub struct Settings {
-    /// The effective provider profile.
-    pub provider: String,
-    /// Every configured profile name, sorted.
-    pub providers: Vec<String>,
-    /// Optional presentation names, keyed by stable configured connection ID.
-    pub provider_display_names: std::collections::BTreeMap<String, String>,
+    /// The selected configured account, absent when no model is selected.
+    pub account: Option<String>,
+    /// Every active account name, sorted.
+    pub accounts: Vec<String>,
+    /// Optional presentation names, keyed by stable configured account ID.
+    pub account_display_names: std::collections::BTreeMap<String, String>,
     /// The effective model, if the profile or the client gave one.
     pub model: Option<String>,
-    /// Configured/discovered IDs, retaining any current custom choice.
-    /// Suggestions are never a limit or an automatic default.
+    /// Qualified available model IDs across every active account.
     pub models: Vec<String>,
-    /// Enriched choices; discovery remains suggestions rather than validation.
+    /// Enriched qualified choices, subject to account availability.
     pub model_info: Vec<crate::models::ModelInfo>,
     /// Public catalog freshness, including unavailable and cache-only states.
     pub catalog_status: serde_json::Value,
@@ -126,7 +125,7 @@ pub struct Settings {
 impl std::fmt::Debug for Settings {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Settings")
-            .field("provider_count", &self.providers.len())
+            .field("account_count", &self.accounts.len())
             .field("has_model", &self.model.is_some())
             .field("model_count", &self.models.len())
             .finish_non_exhaustive()
@@ -170,9 +169,9 @@ pub struct Listing {
 /// One atomic turn snapshot, including the execution base for native tools.
 #[derive(Clone)]
 pub(crate) struct InferenceInput {
-    pub(crate) selection: crate::models::Selection,
+    pub(crate) protocol: Option<crate::provider::Protocol>,
     pub(crate) instructions: crate::instructions::State,
-    pub(crate) profile: crate::provider::Profile,
+    pub(crate) profile: crate::account::Account,
     pub(crate) model: String,
     pub(crate) messages: Vec<Message>,
     pub(crate) cwd: PathBuf,
@@ -273,6 +272,18 @@ impl Sessions {
     }
 
     pub(crate) fn block_automatic(&mut self, id: &str, reason: crate::selection::Reason) {
+        let fallback = (reason == crate::selection::Reason::ModelUnavailable)
+            .then(|| self.automatic(id))
+            .flatten()
+            .and_then(|reference| {
+                crate::selection::resolve(
+                    &reference,
+                    &self.providers,
+                    &self.environment,
+                    self.discovery.as_deref(),
+                )
+                .ok()
+            });
         if let Some(session) = self.by_id.get_mut(id)
             && matches!(
                 session.selection_state,
@@ -281,8 +292,15 @@ impl Sessions {
         {
             // Confirmation may restore a different default model on this connection.
             portable(&mut session.history);
-            session.model = None;
-            session.selection_state = crate::selection::State::Blocked(reason);
+            if let Some(reference) = fallback {
+                // Only the resolver can authorize a same-account fallback; terminal persistence records it before idle.
+                session.provider = Some(reference.connection.clone());
+                session.model = Some(reference.model.clone());
+                session.selection_state = crate::selection::State::Automatic(reference);
+            } else {
+                session.model = None;
+                session.selection_state = crate::selection::State::Blocked(reason);
+            }
         }
     }
 
@@ -290,7 +308,17 @@ impl Sessions {
         &self,
     ) -> (Option<String>, Option<String>, crate::selection::State) {
         let Some(reference) = self.recent() else {
-            return (None, None, Default::default());
+            // Pin a configured preference into the session so a later configuration edit cannot move its history across accounts.
+            return self.providers.configured_model().map_or(
+                (None, None, Default::default()),
+                |reference| {
+                    (
+                        Some(reference.account.clone()),
+                        Some(reference.model.clone()),
+                        Default::default(),
+                    )
+                },
+            );
         };
         match crate::selection::resolve(
             &reference,
@@ -374,7 +402,7 @@ impl Sessions {
 
     /// An empty registry whose sessions choose among `providers`.
     #[must_use]
-    pub fn with_providers(providers: Providers) -> Self {
+    pub fn with_accounts(providers: Providers) -> Self {
         Self {
             providers,
             ..Self::default()
@@ -402,8 +430,8 @@ impl Sessions {
     /// The provider and model `id` would use for its next turn.
     ///
     /// Precedence: the client's choice or the recent choice pinned at creation,
-    /// then the configuration's default, then (for the provider) the only connection.
-    /// `None` when no provider is configured at all.
+    /// then the configuration's optional qualified default. A sole account/model is not a default.
+    /// `None` when no account is active at all.
     ///
     /// # Errors
     ///
@@ -433,95 +461,26 @@ impl Sessions {
         }
         // Inference only needs the selected ID, never the potentially large
         // selector projection of every catalog model under the registry lock.
-        let name = session
-            .provider
-            .as_deref()
-            .or_else(|| self.providers.default_name())?;
+        let name = session.provider.as_deref().or_else(|| {
+            self.providers
+                .configured_model()
+                .map(|reference| reference.account.as_str())
+        })?;
         let profile = self.providers.get(name)?.clone();
-        let model = session
-            .model
-            .clone()
-            .or_else(|| profile.default_model().map(str::to_owned))?;
-        let selection = self
-            .discovery
-            .as_ref()
-            .map(|service| service.snapshot())
-            .unwrap_or_default()
-            .resolve(&profile, &model);
-        let mut messages = session.history.clone();
-        // Refresh may change protocol with no model-ID change. Only the turn's
-        // copy becomes portable, so failure/cancellation cannot destroy history.
-        if !profile.is_copilot()
-            && session
-                .protocol
-                .is_some_and(|protocol| protocol != selection.protocol)
-        {
-            portable(&mut messages);
-        }
+        let model = session.model.clone().or_else(|| {
+            self.providers
+                .configured_model()
+                .filter(|reference| reference.account == name)
+                .map(|reference| reference.model.clone())
+        })?;
         Some(InferenceInput {
-            selection,
+            protocol: session.protocol,
             instructions: session.instructions.clone(),
             profile,
             model,
-            messages,
+            messages: session.history.clone(),
             cwd: session.cwd.clone(),
         })
-    }
-
-    /// Pin a native initial choice; the ACP caller persists it before publication.
-    pub(crate) fn initialize_native(&mut self, id: &str, active_token: Option<u64>) -> bool {
-        let Some(session) = self.by_id.get(id) else {
-            return false;
-        };
-        if !session.open
-            || matches!(session.selection_state, crate::selection::State::Blocked(_))
-            || session.model.is_some()
-            || match active_token {
-                Some(token) => session
-                    .active
-                    .as_ref()
-                    .is_none_or(|turn| turn.token != token),
-                None => session.active.is_some(),
-            }
-        {
-            return false;
-        }
-        let Some(profile) = session
-            .provider
-            .as_deref()
-            .or_else(|| self.providers.default_name())
-            .and_then(|name| self.providers.get(name))
-        else {
-            return false;
-        };
-        if profile.default_model().is_some() {
-            return false;
-        }
-        let Some(model) = self.discovery.as_ref().and_then(|service| {
-            service
-                .snapshot()
-                .native_default(profile)
-                .map(str::to_owned)
-        }) else {
-            return false;
-        };
-        let provider = profile.name().to_owned();
-        let session = self.by_id.get_mut(id).expect("existing session");
-        session.model = Some(model);
-        session.provider = Some(provider);
-        true
-    }
-
-    pub(crate) fn selected_profile(&self, id: &str) -> Option<crate::provider::Profile> {
-        let session = self.by_id.get(id)?;
-        self.providers
-            .get(
-                session
-                    .provider
-                    .as_deref()
-                    .or_else(|| self.providers.default_name())?,
-            )
-            .cloned()
     }
 
     /// Commit only while this turn owns the session; cancelled work is stale.
@@ -544,15 +503,20 @@ impl Sessions {
 
     fn describe(&self, session: &Session) -> Option<Settings> {
         let providers = &self.providers;
-        let name = session
-            .provider
-            .as_deref()
-            .or_else(|| providers.default_name())?;
-        let profile = providers.get(name)?;
-        let model = session
-            .model
-            .clone()
-            .or_else(|| profile.default_model().map(str::to_owned));
+        if providers.is_empty() {
+            return None;
+        }
+        let name = session.provider.as_deref().or_else(|| {
+            providers
+                .configured_model()
+                .map(|reference| reference.account.as_str())
+        });
+        let model = session.model.clone().or_else(|| {
+            providers
+                .configured_model()
+                .filter(|reference| Some(reference.account.as_str()) == name)
+                .map(|reference| reference.model.clone())
+        });
         let model = if matches!(session.selection_state, crate::selection::State::Blocked(_)) {
             None
         } else {
@@ -563,13 +527,48 @@ impl Sessions {
             .as_ref()
             .map(|service| service.snapshot())
             .unwrap_or_default();
-        let model_info = snapshot.suggestions(profile, model.as_deref());
+        let mut model_info = Vec::new();
+        let mut statuses = serde_json::Map::new();
+        for id in providers.names() {
+            let account = providers.get(id)?;
+            // Private endpoint results must be projected against this account's current authority.
+            let account_snapshot = match crate::selection::credential(account, &self.environment) {
+                Ok(credential) => self
+                    .discovery
+                    .as_ref()
+                    .map(|service| service.account_snapshot(account, credential.as_ref()))
+                    .unwrap_or_default(),
+                Err(_) => {
+                    // Public labels remain useful for declared models before login, but private evidence cannot survive missing credentials.
+                    let mut public = snapshot.clone();
+                    public.endpoints.clear();
+                    public
+                }
+            };
+            let listing = account_snapshot.endpoints.get(id);
+            statuses.insert(
+                id.into(),
+                serde_json::json!({
+                    "status": account_snapshot.availability_status(account),
+                    "fetched_at": listing.and_then(|listing| listing.fetched_at),
+                    "error": listing.and_then(|listing| listing.error),
+                }),
+            );
+            for mut info in account_snapshot.suggestions(account, None) {
+                info.id = ModelRef {
+                    account: id.into(),
+                    model: info.id,
+                }
+                .qualified();
+                model_info.push(info);
+            }
+        }
         // Keep the original public ID list consistent with the enriched view.
         let models = model_info.iter().map(|info| info.id.clone()).collect();
         Some(Settings {
-            provider: name.to_owned(),
-            providers: providers.names().map(str::to_owned).collect(),
-            provider_display_names: providers
+            account: name.filter(|_| model.is_some()).map(str::to_owned),
+            accounts: providers.names().map(str::to_owned).collect(),
+            account_display_names: providers
                 .names()
                 .filter_map(|id| {
                     providers
@@ -581,41 +580,11 @@ impl Sessions {
             model,
             models,
             model_info,
-            catalog_status: serde_json::json!({"available": snapshot.fetched_at.is_some(), "stale": snapshot.stale, "fetched_at": snapshot.fetched_at, "error": snapshot.error, "cache_error": snapshot.cache_error, "connection": snapshot.endpoints.get(profile.name()).map(|listing| serde_json::json!({"provenance":listing.provenance,"scope":listing.scope,"fetched_at":listing.fetched_at,"attempted_at":listing.attempted_at,"stale":listing.stale,"error":listing.error,"inference_succeeded_at":listing.inference_succeeded_at}))}),
+            catalog_status: serde_json::json!({"available": snapshot.fetched_at.is_some(), "stale": snapshot.stale, "fetched_at": snapshot.fetched_at, "error": snapshot.error, "cache_error": snapshot.cache_error, "accounts": statuses}),
         })
     }
 
-    /// Choose the provider profile `id` uses. Choosing another provider drops
-    /// the session's model choice: model ids belong to a provider.
-    ///
-    /// # Errors
-    ///
-    /// [`SessionError::NoProvider`], [`SessionError::UnknownProvider`],
-    /// [`SessionError::Unknown`], [`SessionError::Closed`] or
-    /// [`SessionError::SettingsBusy`].
-    pub fn set_provider(&mut self, id: &str, name: &str) -> Result<(), SessionError> {
-        if self.providers.is_empty() {
-            return Err(SessionError::NoProvider);
-        }
-        if self.providers.get(name).is_none() {
-            return Err(SessionError::UnknownProvider {
-                name: name.to_owned(),
-                available: self.providers.names().collect::<Vec<_>>().join(", "),
-            });
-        }
-        let current = self.settings(id)?.map(|settings| settings.provider);
-        let session = self.settable_session(id)?;
-        if current.as_deref() != Some(name) {
-            session.model = None;
-            portable(&mut session.history);
-        }
-        session.provider = Some(name.to_owned());
-        session.selection_state = crate::selection::State::Explicit;
-        Ok(())
-    }
-
-    /// Choose the model `id` uses. Any well-formed id is accepted, listed or
-    /// not: catalog presence is never required.
+    /// Atomically choose an available account-qualified model.
     ///
     /// # Errors
     ///
@@ -626,20 +595,67 @@ impl Sessions {
         if self.providers.is_empty() {
             return Err(SessionError::NoProvider);
         }
-        check_model_id(model).map_err(SessionError::InvalidModel)?;
+        self.settable_session(id)?;
+        let reference = ModelRef::parse(model).map_err(SessionError::InvalidModel)?;
+        let account = self.providers.get(&reference.account).ok_or_else(|| {
+            SessionError::UnknownProvider {
+                name: reference.account.clone(),
+                available: self.providers.names().collect::<Vec<_>>().join(", "),
+            }
+        })?;
+        let credential = crate::selection::credential(account, &self.environment)
+            .ok()
+            .flatten();
+        let snapshot = self
+            .discovery
+            .as_ref()
+            .map(|service| service.account_snapshot(account, credential.as_ref()))
+            .unwrap_or_default();
+        snapshot
+            .check_available(account, &reference.model)
+            .map_err(SessionError::InvalidModel)?;
         let session = self.settable_session(id)?;
-        if session.model.as_deref() != Some(model) {
+        if session.model.as_deref() != Some(&reference.model)
+            || session.provider.as_deref() != Some(&reference.account)
+        {
             portable(&mut session.history);
         }
-        session.model = Some(model.to_owned());
+        session.provider = Some(reference.account);
+        session.model = Some(reference.model);
         session.selection_state = crate::selection::State::Explicit;
         Ok(())
+    }
+
+    /// Resolve selection discovery without holding the session registry mutex.
+    pub(crate) fn selection_account(
+        &self,
+        id: &str,
+        value: &str,
+    ) -> Result<crate::account::Account, SessionError> {
+        let session = self
+            .by_id
+            .get(id)
+            .ok_or_else(|| SessionError::Unknown(id.into()))?;
+        if !session.open {
+            return Err(SessionError::Closed(id.into()));
+        }
+        if session.active.is_some() || session.finalizing {
+            return Err(SessionError::SettingsBusy(id.into()));
+        }
+        let reference = ModelRef::parse(value).map_err(SessionError::InvalidModel)?;
+        self.providers
+            .get(&reference.account)
+            .cloned()
+            .ok_or_else(|| SessionError::UnknownProvider {
+                name: reference.account,
+                available: self.providers.names().collect::<Vec<_>>().join(", "),
+            })
     }
 
     /// An open session with no turn running.
     fn settable_session(&mut self, id: &str) -> Result<&mut Session, SessionError> {
         let session = self.open_session(id)?;
-        if session.active.is_some() {
+        if session.active.is_some() || session.finalizing {
             return Err(SessionError::SettingsBusy(id.to_owned()));
         }
         Ok(session)
@@ -744,19 +760,6 @@ impl Sessions {
             && let Some(service) = &self.discovery
         {
             // A refresh skipped while busy must still validate remembered selection at idle.
-            service.notify();
-        }
-        // Discovery deferred during a turn must be reconsidered after terminal idle.
-        if self.by_id.get(id).is_some_and(|session| {
-            session.model.is_none()
-                && !matches!(session.selection_state, crate::selection::State::Blocked(_))
-                && session.active.is_none()
-                && session.turns == token
-        }) && let Some(profile) = self.selected_profile(id)
-            && profile.default_model().is_none()
-            && let Some(service) = &self.discovery
-            && service.snapshot().native_default(&profile).is_some()
-        {
             service.notify();
         }
         current
@@ -1252,12 +1255,12 @@ mod tests {
             dir.path(),
         )
         .unwrap();
-        Sessions::with_providers(Providers::from_config(&config).unwrap())
+        Sessions::with_accounts(Providers::from_config(&config).unwrap())
     }
 
-    const TWO: &str = "provider = \"a\"\n\
-        [providers.a]\nprotocols = { openai-chat = {} }\nmodel = \"m1\"\nmodels = [\"m2\"]\n\
-        [providers.b]\nprotocols = { openai-chat = {} }\nmodel = \"n1\"\n";
+    const TWO: &str = "model = \"a/m1\"\n\
+        [accounts.a]\nprovider='custom'\nprotocols = { openai-chat = {base_url='https://example.test/v1'} }\nmodels = [\"m1\",\"m2\"]\n\
+        [accounts.b]\nprovider='custom'\nprotocols = { openai-chat = {base_url='https://other.test/v1'} }\nmodels = [\"n1\"]\n";
 
     #[test]
     fn without_providers_a_session_has_no_settings_and_nothing_to_select() {
@@ -1267,7 +1270,7 @@ mod tests {
         assert_eq!(sessions.settings(&id), Ok(None));
         assert_eq!(sessions.set_model(&id, "m"), Err(SessionError::NoProvider));
         assert_eq!(
-            sessions.set_provider(&id, "p"),
+            sessions.set_model(&id, "p/m"),
             Err(SessionError::NoProvider)
         );
     }
@@ -1279,39 +1282,39 @@ mod tests {
 
         let settings = sessions.settings(&id).unwrap().unwrap();
 
-        assert_eq!(settings.provider, "a");
+        assert_eq!(settings.account.as_deref(), Some("a"));
         assert_eq!(settings.model.as_deref(), Some("m1"));
-        assert_eq!(settings.models, ["m1", "m2"]);
-        assert_eq!(settings.providers, ["a", "b"]);
+        assert_eq!(settings.models, ["a/m1", "a/m2", "b/n1"]);
+        assert_eq!(settings.accounts, ["a", "b"]);
     }
 
     #[test]
-    fn a_model_the_profile_never_listed_is_accepted_and_suggested_back() {
+    fn an_unavailable_model_cannot_expand_the_picker_or_change_selection() {
         let mut sessions = with(TWO);
         let id = sessions.create("/a");
 
-        sessions.set_model(&id, "my/private-finetune").unwrap();
+        assert!(sessions.set_model(&id, "a/my/private-finetune").is_err());
 
         let settings = sessions.settings(&id).unwrap().unwrap();
-        assert_eq!(settings.model.as_deref(), Some("my/private-finetune"));
-        assert_eq!(settings.models, ["m1", "m2", "my/private-finetune"]);
+        assert_eq!(settings.model.as_deref(), Some("m1"));
+        assert_eq!(settings.models, ["a/m1", "a/m2", "b/n1"]);
     }
 
     #[test]
-    fn choosing_another_provider_drops_the_model_choice_but_the_same_one_keeps_it() {
+    fn qualified_selection_updates_account_and_raw_model_together() {
         let mut sessions = with(TWO);
         let id = sessions.create("/a");
-        sessions.set_model(&id, "custom").unwrap();
+        sessions.set_model(&id, "a/m2").unwrap();
 
-        sessions.set_provider(&id, "a").unwrap();
+        sessions.set_model(&id, "a/m2").unwrap();
         assert_eq!(
             sessions.settings(&id).unwrap().unwrap().model.as_deref(),
-            Some("custom")
+            Some("m2")
         );
 
-        sessions.set_provider(&id, "b").unwrap();
+        sessions.set_model(&id, "b/n1").unwrap();
         let settings = sessions.settings(&id).unwrap().unwrap();
-        assert_eq!(settings.provider, "b");
+        assert_eq!(settings.account.as_deref(), Some("b"));
         assert_eq!(settings.model.as_deref(), Some("n1"));
     }
 
@@ -1321,9 +1324,17 @@ mod tests {
         let first = sessions.create("/a");
         let second = sessions.create("/a");
 
-        sessions.set_provider(&first, "b").unwrap();
+        sessions.set_model(&first, "b/n1").unwrap();
 
-        assert_eq!(sessions.settings(&second).unwrap().unwrap().provider, "a");
+        assert_eq!(
+            sessions
+                .settings(&second)
+                .unwrap()
+                .unwrap()
+                .account
+                .as_deref(),
+            Some("a")
+        );
     }
 
     #[test]
@@ -1332,7 +1343,7 @@ mod tests {
         let id = sessions.create("/a");
 
         assert!(matches!(
-            sessions.set_provider(&id, "zzz"),
+            sessions.set_model(&id, "zzz/model"),
             Err(SessionError::UnknownProvider { .. })
         ));
         assert!(matches!(
@@ -1352,7 +1363,7 @@ mod tests {
             Err(SessionError::SettingsBusy(id.clone()))
         );
         assert_eq!(
-            sessions.set_provider(&id, "b"),
+            sessions.set_model(&id, "b/n1"),
             Err(SessionError::SettingsBusy(id))
         );
     }
@@ -1361,10 +1372,13 @@ mod tests {
     fn a_resumed_session_keeps_its_choice() {
         let mut sessions = with(TWO);
         let id = sessions.create("/a");
-        sessions.set_provider(&id, "b").unwrap();
+        sessions.set_model(&id, "b/n1").unwrap();
         sessions.close(&id).unwrap();
         sessions.resume(&id, Path::new("/a")).unwrap();
 
-        assert_eq!(sessions.settings(&id).unwrap().unwrap().provider, "b");
+        assert_eq!(
+            sessions.settings(&id).unwrap().unwrap().account.as_deref(),
+            Some("b")
+        );
     }
 }

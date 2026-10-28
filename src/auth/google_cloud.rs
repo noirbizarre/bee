@@ -12,9 +12,10 @@ use tokio::sync::Mutex;
 
 use super::{Credential, Secret, unix_now};
 use crate::{
+    account::Account as Profile,
     config::Environment,
     error::{Error, Result},
-    provider::{GoogleCloud, Profile},
+    provider::GoogleCloud,
 };
 
 pub(crate) const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";

@@ -14,6 +14,7 @@ use std::thread;
 use std::time::Duration;
 
 use bee::Error;
+use bee::account::{Account as Profile, Accounts as Providers};
 use bee::auth::{
     self, Audience, Credential, CredentialStore, FileStore, ProfileStatus, Secret, Status,
     StoreState,
@@ -21,8 +22,8 @@ use bee::auth::{
 use bee::config::{Config, Environment, project_config_path};
 use bee::http::{Http, HttpResponse, Unreachable};
 use bee::login::{self, CallbackListener, Code, Pkce};
+use bee::provider::Protocol;
 use bee::provider::signin::{self, LoginSpec};
-use bee::provider::{Profile, Protocol, Providers};
 use pretty_assertions::assert_eq;
 use rstest::rstest;
 use tempfile::TempDir;
@@ -36,21 +37,27 @@ const SECRET: &str = "sk-super-secret-token";
 
 /// A profile that keeps its credential in the store, with a browser sign-in.
 const STORED: &str = r#"
-provider = "or"
+model = "or/test"
 
-[providers.or]
+[accounts.or]
+provider = "custom"
+discovery = false
+models = ["test"]
 protocols = { openai-chat = { base_url = "https://openrouter.ai/api/v1" } }
 credential = { store = true, login = "openrouter" }
 
-[providers.token]
-protocols = { anthropic-messages = {} }
+[accounts.token]
+provider = "custom"
+protocols = { anthropic-messages = { base_url = "https://api.anthropic.com" } }
 credential = { store = true }
 
-[providers.env]
-protocols = { openai-chat = {} }
+[accounts.env]
+provider = "custom"
+protocols = { openai-chat = { base_url = "https://api.openai.com/v1" } }
 credential = { env = "BEE_TEST_KEY" }
 
-[providers.local]
+[accounts.local]
+provider = "custom"
 protocols = { openai-chat = { base_url = "http://localhost:11434/v1" } }
 "#;
 

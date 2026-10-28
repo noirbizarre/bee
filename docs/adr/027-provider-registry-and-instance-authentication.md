@@ -7,6 +7,11 @@ Accepted. Implements #108. Supersedes the preset/configurable-flow choices of
 [ADR-007](007-provider-profiles-and-model-selection.md) and [ADR-008](008-provider-authentication.md).
 Native security contracts in ADRs 020–026 remain applicable.
 
+Instance schema/terminology and configuration compatibility guidance below are superseded by
+[ADR-028](028-account-model-availability-and-selection.md). Current configured identities are `[accounts.ID]` with
+`provider = "NAME"`, boolean `discovery` and optional `catalog`; profile membership and qualified selection use the
+account contract. Registry boundaries, typed credential-store compatibility and native security lifecycles remain applicable.
+
 ## Context
 
 Presets were a second user-facing provider concept. Connections already owned credentials and profiles grouped them,
@@ -48,4 +53,4 @@ contracts remain compiled-in, preventing configuration from redirecting credenti
 - `bee providers list/show` inspect types; `bee models providers` remains public Models.dev browsing.
 - New Cloudflare, Scaleway and OVH integrations remain follow-up work using these extension points.
 
-See the [provider guide](../providers.md) for configuration, lifecycle and migration.
+See the [provider guide](../providers.md) for current configuration and lifecycle.

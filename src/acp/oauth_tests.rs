@@ -61,7 +61,11 @@ async fn chatgpt_browser_login_renews_between_native_tool_requests_and_commits_h
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("payload.txt"), "fixture-file-content").unwrap();
     let config_path = root.path().join("config.toml");
-    std::fs::write(&config_path, "[providers.account]\ntype='chatgpt'").unwrap();
+    std::fs::write(
+        &config_path,
+        "model='account/available-model'\n[accounts.account]\nprovider='chatgpt'",
+    )
+    .unwrap();
     let env = crate::config::Environment::new(None, Some(root.path().into()), Some(config_path));
     let config = crate::config::Config::load(&env, root.path()).unwrap();
     let profiles = Providers::from_config(&config).unwrap();

@@ -23,7 +23,7 @@ fn subprocess_with_path(root: &tempfile::TempDir, url: &str, path: Option<&str>)
     std::fs::write(
         &config,
         support::native_bash_config(&format!(
-            "[catalog]\nenabled=false\n[providers.test]\nmodel='test'\n[providers.test.protocols.openai-chat]\nbase_url='{url}'"
+            "model='test/test'\n[catalog]\nenabled=false\n[accounts.test]\nprovider='custom'\nmodels=['test']\n[accounts.test.protocols.openai-chat]\nbase_url='{url}'"
         )),
     )
     .unwrap();

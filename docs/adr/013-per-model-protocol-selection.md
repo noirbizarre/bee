@@ -7,6 +7,10 @@ Extended by [ADR-018](018-optional-model-discovery.md) for explicitly enabled ca
 
 ## Context
 
+The configuration examples and default/advisory selection rules in this record are historical; see
+[ADR-028](028-account-model-availability-and-selection.md) for accounts, qualified defaults and enforced availability.
+Exact raw-ID protocol routing remains applicable and does not grant availability.
+
 A gateway can expose Chat Completions, Responses and Anthropic Messages while requiring different protocols for
 different models. A provider-wide preference cannot describe this. Model catalogs can be unavailable or omit private
 and newly released models, so inference must not depend on catalog metadata. Provider identity, opaque model IDs,

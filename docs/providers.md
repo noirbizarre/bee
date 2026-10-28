@@ -1,15 +1,15 @@
-# Providers, instances and credentials
+# Providers, accounts and credentials
 
 Bee distinguishes three identities:
 
-- A **provider type** is a compiled-in integration, such as `openai`, `github`, or `custom`. It declares defaults,
-  authentication mechanisms and private fields. Adding a type does not extend a central provider enum.
-- A **provider instance** is a named account/endpoint configuration under `[providers.NAME]`. Credentials, discovery
-  and durable selection use this instance name. Several instances can reference the same type.
-- A **user profile** groups instance references and model preferences. It does not create an authentication identity.
-  Sharing an instance between profiles shares its credentials; see [profiles](profiles.md).
+- A **provider** is a compiled-in implementation, such as `openai`, `github` or `custom`. It declares protocol and
+  endpoint defaults, native capabilities, trusted authentication mechanisms and private fields.
+- An **account** is a configured identity under `[accounts.ID]`, referencing its implementation with `provider = "NAME"`.
+  It owns credential bindings, endpoint overrides, discovery and model availability. Several accounts can use one provider.
+- A **profile** scopes account references and an optional qualified default model. It does not create an authentication
+  identity. Sharing an account shares credentials; see [profiles](profiles.md).
 
-## Discover native types
+## Inspect compiled-in providers
 
 ```sh
 bee providers list
@@ -17,51 +17,70 @@ bee providers show github
 bee providers show google-cloud
 ```
 
-These commands inspect definitions without loading project configuration or credentials. They are separate from
-`bee models providers`, which browses Models.dev. Native types supply protocol, endpoint and authentication defaults;
-the full list and provider-specific setup appear under [authentication](index.md#authentication).
+These commands inspect definitions independently of configuration, credentials and public Models.dev discovery.
+`bee models providers` instead browses Models.dev. The complete compiled-in inventory is `openai`, `anthropic`,
+`openrouter`, `chatgpt`, `github`, `ollama`, `opencode`, `opencode-go`, `deepseek`, `google-aistudio`, `google-cloud`,
+`groq`, `mistral`, `xai` and generic `custom`. Groq uses `groq` and `GROQ_API_KEY`; Grok models belong to `xai`, using
+`XAI_API_KEY`. DeepSeek uses `DEEPSEEK_API_KEY`, and Mistral uses `MISTRAL_API_KEY`.
+See [provider setup and credentials](index.md#authentication) for endpoints, protocols and vendor-specific facts.
 
 ## Configure multiple accounts
 
 ```toml
-provider = "personal"
+model = "personal/your-personal-model"
 
-[providers.personal]
-type = "openai"
+[accounts.personal]
+provider = "openai"
 credential = { env = "PERSONAL_OPENAI_KEY" }
-model = "your-personal-model"
+discovery = false
+models = ["your-personal-model"]
 
-[providers.work]
-type = "openai"
+[accounts.work]
+provider = "openai"
+display_name = "Work"
 credential = { store = true }
-model = "your-work-model"
+discovery = false
+models = ["your-work-model"]
 ```
 
-Authenticate each instance independently. ACP labels retain the instance name even when both display as OpenAI.
-Logout affects only the targeted instance, including every profile referencing it. Changing a type, target or account
-can require explicit model reselection; Bee never substitutes another account after failure.
+`enabled` defaults to true and controls baseline profile membership; explicit profile `accounts` lists replace that
+baseline and can include disabled accounts. Root/profile `model` is optional and qualified. Account model declarations
+are raw IDs, not defaults. No first account/model is selected automatically.
+
+ACP provides one model picker across active accounts, with qualified IDs such as `work/your-work-model`. Labels combine
+the account display name (provider label, then account ID as fallback) and model display name (raw ID as fallback).
+Qualified IDs remain visible when labels collide and are always the machine values. Relabeling does not change identity.
+Display names must be nonblank, control-free and at most 256 UTF-8 bytes.
+
+Authenticate accounts independently. Logout affects every profile referencing that account. Changed credentials or
+targets may require explicit reselection; Bee never substitutes another account after failure.
 
 ## Custom endpoints
 
 ```toml
-[providers.gateway]
-type = "custom"
+model = "gateway/private/arbitrary-model.v2"
+
+[accounts.gateway]
+provider = "custom"
 protocol = "openai-chat"
 base_url = "https://gateway.example/v1"
 credential = { env = "GATEWAY_KEY" }
 headers = { "X-Team" = "engineering" }
 options = { max_tokens_field = "max_completion_tokens" }
-model = "private/arbitrary-model.v2"
-models = ["another-model"]
+discovery = false
+models = ["private/arbitrary-model.v2", "another-model"]
 ```
 
-Supported protocols are `openai-chat`, `openai-responses` and `anthropic-messages`. Explicit custom instances require a
-base URL. Models remain opaque IDs, not an allowlist. Omit `credential` for unauthenticated endpoints. Options are the
-[supported typed options](inference.md), not arbitrary JSON. Multi-protocol instances use `protocols` and `prefer` as
-described in [configuration](index.md#providers-and-models). Do not combine the expanded and singular route forms.
+Supported protocols are `openai-chat`, `openai-responses` and `anthropic-messages`. Custom accounts require an explicit
+base URL. With discovery off, exactly the declared `models` are selectable and executable; omitted or empty means none.
+With discovery on, a successful account listing is intersected with optional `models`; omission applies no filter and
+`[]` permits none. Public catalog entries, defaults and metadata/routing keys never expand availability.
+See [availability and discovery](models.md#account-model-availability).
 
-Custom instances reuse supported protocols and generic secrets/tokens. Configuration cannot implement a new protocol,
-OAuth issuer, refresh grant or provider-specific browser flow.
+Omit `credential` for unauthenticated endpoints. Options are [typed protocol settings](inference.md), not arbitrary JSON.
+Multi-protocol accounts use `protocols` and `prefer` as described in [configuration](index.md#providers-and-models).
+Do not combine expanded and singular route forms. Configuration cannot implement a new protocol, OAuth issuer,
+refresh grant or browser flow.
 
 ## Login and credential sources
 
@@ -73,53 +92,42 @@ bee auth status
 bee auth logout work
 ```
 
-An existing instance name wins over a type name. If no instance exists but the name identifies a native type, login
-proposes an instance of that same name/type and active-profile membership. Custom names must be configured first.
-Declaration changes publish after successful authentication. Status and ordinary inference do not create declarations
-or import environment credentials.
+An omitted login/logout target resolves only when exactly one account is active; root/profile defaults and recency are
+irrelevant. Explicit targets may name configured disabled accounts. Authenticating an existing account does not change
+its `enabled` setting or profile membership.
 
-For an environment-backed instance, plain explicit login validates its credential fields, stores them for the instance
-and changes user configuration to `credential = { store = true }`. Subsequent requests use the stored generation even
-if the environment changes or disappears. `--with-token` explicitly imports stdin instead. Missing environment values
-fail without trying another source. Remove higher-priority environment/membership overrides before switching authority.
-Browser/device options use native acquisition instead of environment import.
+An existing account ID wins over a provider name. If none exists and the name is a native provider, successful first-use
+login can create `[accounts.NAME]` with `provider = "NAME"`, enabled by default. A newly created account may be appended
+to an explicitly restricted active profile's `accounts`, subject to effective-layer/origin checks. Higher-priority
+membership overrides may require editing their source first. Custom names must be configured first. Login writes no
+default model. Status and ordinary inference do not create declarations or import environment credentials.
 
-OpenRouter's browser flow produces an API key. ChatGPT uses verified OAuth registration and renewable tokens; GitHub
-supports device OAuth and static user tokens. API-key/OAuth methods are distinct from acquisition and sources. Cloud
-ADC stays externally owned; Bee renews supported ADC without importing or modifying shared ADC. No-auth endpoints
-need no credential entry.
+For an environment-backed account, explicit login validates and stores the complete credential generation, then changes
+user configuration to `credential = { store = true }`. Subsequent requests use stored authority even if the environment
+changes or disappears. `--with-token` imports stdin instead; missing environment values fail without another source.
+Higher-priority credential-source overrides must be resolved before authority can switch. Browser/device options use
+native acquisition. Publication preserves comments, unrelated concurrent edits and no-op reauthentication behavior.
 
-Native definitions declare required/optional fields, accepted shapes, ownership and secrecy. Secrets belong in private
-credential storage or environment bindings. `settings` holds private provider configuration, for example Google Cloud
-`settings = { project = "resource-project", location = "global" }`. The existing `google_cloud` table remains supported;
-do not use both forms. Account/gateway IDs are potentially sensitive even when not secret. Settings are excluded from
-ordinary Debug, public model metadata and ACP selectors. New provider integrations build on these declarations.
+OpenRouter browser sign-in produces an API key. ChatGPT uses verified OAuth registration and renewable tokens; GitHub
+supports device OAuth and explicit user tokens. Cloud ADC stays externally owned: Bee renews supported ADC without
+importing or modifying it. Native authentication, headers and trusted targets remain active with `discovery = false`;
+the boolean controls listing, independently of compiled-in native capabilities.
 
-Credential files use version 3 with typed material and integration bindings. Existing v1/v2 entries remain readable and
-migrate on a locked write, preserving unrelated providers, MCP audiences, host registration and logout revisions.
-Legacy tokens do not prove their acquisition history. Refresh, expiry and revocation remain provider-owned;
-incompatible material requires reauthentication. API-key logout removes Bee's copy, not the remote key. Stored authority
-never falls back to an environment key after logout or rejection.
+Native definitions declare field shapes, ownership and secrecy. Secrets belong in private storage or environment
+bindings. `settings` holds provider-specific configuration, such as Google Cloud project/location; the `google_cloud`
+table is also supported, but the two forms cannot be combined. Private settings never enter ordinary Debug, public
+model metadata or ACP selectors. Scalars and arrays replace provider defaults; headers, model maps and protocol tables
+merge per key, while `credential` replaces whole.
 
-Configuration and credentials are separate atomic files. If credentials publish but configuration publication fails,
-login reports partial success and asks you to review configuration and repeat login. It does not blindly restore or
-delete credentials another process may have changed. Success output follows configuration commit; browser prompts
+Credential files read v1/v2 material and write v3 typed material under a lock, preserving unrelated entries, MCP
+audiences, host registration and logout revisions. Older tokens do not prove their acquisition history. Refresh,
+expiry and revocation remain provider-owned; incompatible material requires reauthentication. API-key logout removes
+Bee's copy, not the remote key. Stored authority never falls back to an environment key after logout or rejection.
+
+Configuration and credentials are separately atomic files. If credentials publish but configuration publication fails,
+login reports partial success and asks you to review configuration and repeat login. It never blindly restores or
+deletes credentials another process may have changed. Success output follows configuration commit; browser prompts
 remain live during authorization.
 
-## Migrating configuration
-
-The old `preset` key and top-level `[presets]`/`[login_flows]` sections are rejected, including in overridden layers.
-Diagnostics identify the file and structural key without echoing values.
-
-1. Replace native `preset = "openai"` with `type = "openai"`, retaining the instance name and overrides.
-2. Inline custom preset endpoints/settings into instances using `type = "custom"` and explicit URLs.
-3. Move shipped-preset overrides into the affected instances; configuration cannot override registry entries.
-4. Remove custom login-flow definitions. Use a supported native flow or import an API token.
-5. Remove explicit `auth` and `discovery` integration selectors. Select the matching native `type` instead: for example,
-   a protocol-defined Copilot instance using `auth = "github"` or `discovery = "github"` becomes `type = "github"`.
-   Control automatic listing with `discover_models`; custom instances cannot borrow native integration authority.
-6. Retain instance names/profile memberships to preserve credential and session identity. Automatic model choices bound
-   to the old authority representation can require explicit confirmation once after migration.
-
-Bare protocol-defined connections retain their implicit-custom meaning; explicit `type = "custom"` is preferred for
-new configuration. No auth-profile migration or credential renaming is required.
+See [ADR-027](adr/027-provider-registry-and-instance-authentication.md) for registry and native-runtime rationale and
+[ADR-028](adr/028-account-model-availability-and-selection.md) for the current account contract.

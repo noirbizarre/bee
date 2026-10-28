@@ -6,9 +6,10 @@ use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::{Value, json};
 
 use super::{Audience, Credential, FileStore, Secret};
+use crate::account::Account as Profile;
 use crate::error::{Error, Result};
 use crate::http::LoginHttp;
-use crate::provider::{CredentialSource, Profile};
+use crate::provider::CredentialSource;
 
 /// Existing public client used by OpenCode, not a Bee-owned app registration.
 pub const CLIENT_ID: &str = "Ov23li8tweQw6odWQebz";
@@ -246,7 +247,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let store = FileStore::new(root.path().join("credentials.json"));
         let profile =
-            crate::test_support::configured_providers("[providers.copilot]\ntype='github'")
+            crate::test_support::configured_providers("[accounts.copilot]\nprovider='github'")
                 .get("copilot")
                 .unwrap()
                 .clone();
@@ -275,7 +276,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let store = FileStore::new(root.path().join("unused-credentials.json"));
         let profile = crate::test_support::configured_providers(
-            "[providers.github]\ntype='github'\ncredential={env='TOKEN'}",
+            "[accounts.github]\nprovider='github'\ncredential={env='TOKEN'}",
         )
         .get("github")
         .unwrap()

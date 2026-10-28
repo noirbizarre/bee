@@ -173,7 +173,7 @@ fn defaults(
     let mut table = Table::new();
     table.insert("display_name".into(), Value::String(label.into()));
     if let Some(catalog) = catalog {
-        table.insert("catalog_provider".into(), Value::String(catalog.into()));
+        table.insert("catalog".into(), Value::String(catalog.into()));
     }
     if let Some(env) = env {
         table.insert(
@@ -212,9 +212,8 @@ fn defaults(
     table
 }
 
-fn native(mut table: Table, integration: &str, discover: bool, login: Option<&str>) -> Table {
-    table.insert("discovery".into(), Value::String(integration.into()));
-    table.insert("discover_models".into(), Value::Boolean(discover));
+fn native(mut table: Table, discover: bool, login: Option<&str>) -> Table {
+    table.insert("discovery".into(), Value::Boolean(discover));
     if let Some(login) = login {
         table.insert(
             "credential".into(),
@@ -282,7 +281,6 @@ pub fn definitions() -> &'static [Definition] {
                                 ("openai-responses", "https://openrouter.ai/api/v1"),
                             ],
                         ),
-                        "openrouter",
                         true,
                         Some("openrouter"),
                     )
@@ -301,7 +299,6 @@ pub fn definitions() -> &'static [Definition] {
                             None,
                             &[("openai-responses", "https://api.openai.com/v1")],
                         ),
-                        "chatgpt",
                         true,
                         Some("chatgpt"),
                     )
@@ -324,7 +321,6 @@ pub fn definitions() -> &'static [Definition] {
                                 ("openai-chat", "https://api.githubcopilot.com"),
                             ],
                         ),
-                        "github",
                         true,
                         Some("github"),
                     );
@@ -369,7 +365,6 @@ pub fn definitions() -> &'static [Definition] {
                                 ),
                             ],
                         ),
-                        "opencode",
                         false,
                         None,
                     )
@@ -398,7 +393,6 @@ pub fn definitions() -> &'static [Definition] {
                                 ),
                             ],
                         ),
-                        "opencode-go",
                         true,
                         None,
                     )
@@ -437,25 +431,8 @@ pub fn definitions() -> &'static [Definition] {
                             "https://generativelanguage.googleapis.com/v1beta/openai",
                         )],
                     );
-                    table.insert("discover_models".into(), Value::Boolean(true));
+                    table.insert("discovery".into(), Value::Boolean(true));
                     table
-                },
-            },
-            Definition {
-                id: "google",
-                label: "Google AI Studio",
-                methods: &[AuthMethod::ApiKey],
-                fields: KEY_FIELDS,
-                defaults: || {
-                    defaults(
-                        "Google AI Studio",
-                        Some("google"),
-                        Some("GEMINI_API_KEY"),
-                        &[(
-                            "openai-chat",
-                            "https://generativelanguage.googleapis.com/v1beta/openai",
-                        )],
-                    )
                 },
             },
             Definition {
@@ -611,9 +588,9 @@ mod tests {
             .with_variable("EXTRA", "secondary-secret");
         let path = env.global_config_path().unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, "provider='one'\n[providers.one]\ntype='fixture-gateway'\nsettings={account='private-account-one',gateway='private-gateway-one'}\ncredential={env='FIRST',fields={secondary='EXTRA'}}\n[providers.two]\ntype='fixture-gateway'\nsettings={account='private-account-two',gateway='private-gateway-two'}\ncredential={env='SECOND',fields={secondary='EXTRA'}}").unwrap();
+        std::fs::write(&path, "[accounts.one]\nprovider='fixture-gateway'\nsettings={account='private-account-one',gateway='private-gateway-one'}\nmetadata={display_name='private-metadata-one'}\nmodel_metadata={'private-model-one'={display_name='private-model-label-one'}}\ncredential={env='FIRST',fields={secondary='EXTRA'}}\n[accounts.two]\nprovider='fixture-gateway'\nsettings={account='private-account-two',gateway='private-gateway-two'}\nmetadata={display_name='private-metadata-two'}\ncredential={env='SECOND',fields={secondary='EXTRA'}}").unwrap();
         let config = crate::config::Config::load(&env, root.path()).unwrap();
-        let instances = crate::provider::Providers::from_config(&config).unwrap();
+        let instances = crate::account::Accounts::from_config(&config).unwrap();
         let store = crate::auth::FileStore::new(root.path().join("credentials.json"));
         for name in ["one", "two"] {
             let plan = crate::config::persist::prepare(&env, root.path(), name).unwrap();
@@ -621,6 +598,14 @@ mod tests {
             let Material::ApiKey { fields } = credential.material() else {
                 panic!("static secret material expected")
             };
+            assert_eq!(
+                credential.secret().expose(),
+                if name == "one" {
+                    "first-key"
+                } else {
+                    "second-key"
+                }
+            );
             assert_eq!(fields["secondary"].expose(), "secondary-secret");
             assert!(!format!("{credential:?}").contains("secondary-secret"));
             store.put(Audience::Provider(name), &credential).unwrap();
@@ -635,6 +620,24 @@ mod tests {
             instances.get("two").unwrap().settings()
         );
         assert!(!format!("{instances:?}").contains("private-account"));
+        for debug in [
+            format!("{config:?}"),
+            format!("{instances:?}"),
+            format!("{env:?}"),
+            format!("{:?}", store.get(Audience::Provider("one")).unwrap()),
+        ] {
+            for private in [
+                "private-account",
+                "private-gateway",
+                "private-metadata",
+                "private-model",
+                "first-key",
+                "second-key",
+                "secondary-secret",
+            ] {
+                assert!(!debug.contains(private), "{debug}");
+            }
+        }
         let one = crate::auth::resolve(instances.get("one").unwrap(), &env, &store, 0)
             .unwrap()
             .unwrap();

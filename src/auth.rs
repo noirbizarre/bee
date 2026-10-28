@@ -29,9 +29,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value};
 
+use crate::account::{Account as Profile, Accounts as Providers};
 use crate::config::Environment;
 use crate::error::{Error, Result};
-use crate::provider::{CredentialSource, Profile, Protocol, Providers};
+use crate::provider::{CredentialSource, Protocol};
 
 pub mod chatgpt;
 pub mod copilot;
@@ -144,7 +145,7 @@ impl Credential {
         if self
             .provider_type
             .as_deref()
-            .is_some_and(|kind| kind != profile.provider_type())
+            .is_some_and(|kind| kind != profile.provider())
         {
             return Err(Error::ProviderInvalid {
                 path: "<credential store>".into(),
@@ -152,7 +153,7 @@ impl Credential {
                 reason: "stored credential belongs to a different provider type; explicitly authenticate this instance again",
             });
         }
-        let definition = crate::provider::registry::definition(profile.provider_type())
+        let definition = crate::provider::registry::definition(profile.provider())
             .expect("validated provider type");
         if !definition.methods.contains(&self.method()) {
             return Err(Error::ProviderInvalid {
@@ -1176,11 +1177,25 @@ pub fn status(
         };
         statuses.push(ProfileStatus {
             profile: name.to_owned(),
-            default: providers.default_name() == Some(name),
+            default: providers
+                .configured_model()
+                .is_some_and(|model| model.account == name),
             status,
         });
     }
     Ok(statuses)
+}
+
+/// Authentication can address configured accounts outside active profile membership.
+///
+/// # Errors
+///
+/// Returns configuration/profile validation errors before exposing an auth target.
+pub fn configured_accounts(config: &crate::config::Config) -> Result<Providers> {
+    let mut accounts = Providers::from_config(config)?;
+    // Validate the ordinary scoped view first; auth must not bypass invalid profile configuration.
+    accounts.accounts = Providers::connections(config)?;
+    Ok(accounts)
 }
 
 /// The profile `bee auth` was asked about.
@@ -1254,7 +1269,7 @@ pub fn store_secret_guarded(
     if secret.is_empty() {
         return Err(Error::AuthEmptyToken);
     }
-    let credential = Credential::new(Secret::new(secret)).for_provider(profile.provider_type());
+    let credential = Credential::new(Secret::new(secret)).for_provider(profile.provider());
     credential.validate_for(profile)?;
     store.put_guarded(Audience::Provider(profile.name()), &credential, generation)
 }

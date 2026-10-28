@@ -103,15 +103,15 @@ pub(super) fn empty_listing(profile: &Profile) -> EndpointListing {
         .login_spec()
         .is_some_and(crate::provider::signin::LoginSpec::is_chatgpt);
     let openrouter = profile
-        .discovery()
+        .integration()
         .is_some_and(|integration| integration.preference_filtered);
     EndpointListing {
-        native: profile.discovery().is_some() || chatgpt,
+        native: profile.integration().is_some() || chatgpt,
         provenance: if chatgpt {
             "official_integration"
         } else if openrouter
             || profile
-                .discovery()
+                .integration()
                 .and_then(Integration::opencode_root)
                 .is_some()
         {
@@ -135,7 +135,7 @@ pub(super) async fn discover(
     credential: Option<&Credential>,
 ) -> Result<EndpointListing, Error> {
     if profile
-        .discovery()
+        .integration()
         .is_some_and(|integration| integration.account_target)
     {
         let credential = credential.ok_or(Error::Unauthorized)?;
@@ -168,9 +168,9 @@ pub(super) async fn discover(
         .login_spec()
         .is_some_and(crate::provider::signin::LoginSpec::is_chatgpt);
     let openrouter = profile
-        .discovery()
+        .integration()
         .is_some_and(|integration| integration.preference_filtered);
-    let opencode = profile.discovery().and_then(Integration::opencode_root);
+    let opencode = profile.integration().and_then(Integration::opencode_root);
     if let Some(root) = opencode {
         // A proxy override must not redirect its private headers to the official service.
         if profile.endpoints().iter().any(|endpoint| {
@@ -376,7 +376,7 @@ fn copilot_listing(profile: &Profile, bytes: &[u8]) -> Result<EndpointListing, E
         if let Some(name) = &entry.metadata.display_name {
             listing.display_names.insert(id.into(), name.clone());
         }
-        // An explicitly unsupported route remains evidence for manual-selection errors, not an automatic choice.
+        // Hidden and unsupported models retain routing facts without gaining selectable membership.
         if automatic
             && entry.protocols.as_ref().is_none_or(|protocols| {
                 profile
@@ -397,11 +397,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn copilot_non_picker_models_retain_routes_and_context_for_explicit_selection() {
-        let profile = crate::test_support::configured_providers("[providers.work]\ntype='github'")
-            .get("work")
-            .unwrap()
-            .clone();
+    fn copilot_hidden_models_retain_route_facts_without_gaining_selectable_membership() {
+        let profile =
+            crate::test_support::configured_providers("[accounts.work]\nprovider='github'")
+                .get("work")
+                .unwrap()
+                .clone();
         let listing = copilot_listing(&profile, br#"{"data":[
             {"id":"hidden-model","model_picker_enabled":false,"supported_endpoints":["/chat/completions"],"capabilities":{"limits":{"max_context_window_tokens":32000}}},
             {"id":"picker-model","model_picker_enabled":true,"supported_endpoints":["/responses"]}
@@ -409,6 +410,9 @@ mod tests {
         assert_eq!(listing.models, ["picker-model"]);
         let mut snapshot = Snapshot::default();
         snapshot.endpoints.insert("work".into(), listing);
+        snapshot.endpoints.get_mut("work").unwrap().fetched_at = Some(1000);
+        assert_eq!(snapshot.available_ids(&profile), ["picker-model"]);
+        assert!(snapshot.check_available(&profile, "hidden-model").is_err());
         let selection = snapshot.resolve(&profile, "hidden-model");
         assert_eq!(selection.protocol, Protocol::OpenAiChat);
         assert_eq!(selection.window, Some(32000));
@@ -421,7 +425,7 @@ mod tests {
 
     #[test]
     fn copilot_explicit_routes_override_native_facts_but_cannot_violate_them() {
-        let profile = crate::test_support::configured_providers("[providers.work]\ntype='github'\nmodel_protocols={multi='openai-chat',conflict='openai-responses'}\ncontext_window=64000").get("work").unwrap().clone();
+        let profile = crate::test_support::configured_providers("[accounts.work]\nprovider='github'\nmodel_protocols={multi='openai-chat',conflict='openai-responses'}\ncontext_window=64000").get("work").unwrap().clone();
         let listing = copilot_listing(&profile, br#"{"data":[
             {"id":"multi","supported_endpoints":["/responses","/chat/completions"],"capabilities":{"limits":{"max_context_window_tokens":32000}}},
             {"id":"conflict","supported_endpoints":["/chat/completions"]},

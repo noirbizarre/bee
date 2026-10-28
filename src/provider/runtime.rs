@@ -3,7 +3,7 @@
 use futures::future::BoxFuture;
 use reqwest::header::{HeaderMap, HeaderValue};
 
-use super::Instance;
+use crate::account::Account as Instance;
 use crate::auth::Secret;
 use crate::llm::Error;
 

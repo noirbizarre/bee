@@ -5,6 +5,10 @@
 Accepted. Provider instances and compiled-in types now follow
 [ADR-027](027-provider-registry-and-instance-authentication.md).
 
+Configuration and advisory model selection below are superseded by
+[ADR-028](028-account-model-availability-and-selection.md). Current accounts use `[accounts.ID]` and `provider`, with
+qualified root/profile defaults and strict account availability; the examples and first-model defaults below are historical.
+
 ## Context
 
 Bee must reach any endpoint (a commercial API, a gateway, a local server) and any

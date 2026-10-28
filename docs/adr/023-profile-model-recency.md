@@ -4,6 +4,11 @@
 
 Accepted. Extends ADR-007, ADR-018, ADR-019 and ADR-022.
 
+Default resolution and advisory/explicit-selection exceptions are superseded by
+[ADR-028](028-account-model-availability-and-selection.md). Current defaults are qualified root/profile preferences;
+all selections and inference enforce account availability, with no native-order default. Successful account-bound recency,
+private persistence and warning-only preference-write failure remain applicable. Conflicting rules below are historical.
+
 ## Context
 
 Profiles already have layered configured model defaults and durable sessions retain their own selections. Neither

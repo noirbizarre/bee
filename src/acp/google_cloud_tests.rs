@@ -20,7 +20,7 @@ fn setup(root: &std::path::Path) -> (Providers, crate::config::Environment) {
     let config = root.join("config.toml");
     let adc = root.join("adc.json");
     std::fs::write(&adc, json!({"type":"authorized_user","client_id":"client","client_secret":"private-client","refresh_token":"private-refresh"}).to_string()).unwrap();
-    std::fs::write(&config, "provider='work'\n[providers.work]\ntype='google-cloud'\nmodel='google/gemini-2.5-flash'\ngoogle_cloud={project='fixture-project'}").unwrap();
+    std::fs::write(&config, "model='work/google/gemini-2.5-flash'\n[accounts.work]\nprovider='google-cloud'\nmodels=['google/gemini-2.5-flash']\ngoogle_cloud={project='fixture-project'}").unwrap();
     let env = crate::config::Environment::new(None, Some(root.into()), Some(config))
         .with_variable("GOOGLE_APPLICATION_CREDENTIALS", adc.to_str().unwrap());
     let providers =

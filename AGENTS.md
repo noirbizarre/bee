@@ -36,16 +36,23 @@ GitHub.com Copilot supports device OAuth or explicit environment GitHub user tok
 validated account API targets and native per-model endpoint/context declarations independent of public catalog hints.
 Pending interactions are turn-owned; cleanup precedes terminal idle and direct-close responses.
 Each native backend preserves its own continuation and tool-result semantics.
-Compiled-in provider types and named instances replace presets (ADR-027). Instances own credentials and private
-provider fields; user profiles group references. Generic API-key/OAuth material reads legacy stores and writes v3.
+Compiled-in providers own implementations; configured accounts under `[accounts.ID]` use `provider = "NAME"` and own
+credentials/private fields (ADRs 027–028). Generic API-key/OAuth material reads v1/v2 stores and writes v3.
 Explicit environment login imports credentials and publishes stored authority; native turn runtimes own renewal/checks.
 `bee providers list/show` inspect definitions independently of public Models.dev discovery.
 Google Cloud uses official Vertex AI Chat compatibility with configured Gemini models, project/location routing and
 renewable authorized-user, service-account-key or attached-account ADC, separate from AI Studio API keys and billing.
-Optional Models.dev discovery enriches selection without blocking inference; public cache and account-specific endpoint
-listings stay separate. Explicit configuration wins over opted-in catalog protocol hints/context budgets, frozen per turn.
-Named profiles scope connection references, model preferences and durable sessions; existing connections migrate into
-the default profile in memory. Selector precedence is global, BEE_PROFILE, BEE_CONFIG file, then project configuration.
+Models.dev only enriches available models; public cache and private account listings stay separate. Discovery off permits
+exactly declared raw `models`; discovery on permits successful selectable listing intersected with optional `models`
+(omitted: no filter; empty: none). Pending/first failure permits none; same-account last-good stale results may survive
+transient failure, while authorization loss clears visibility. Selection and inference both enforce availability.
+Accounts default enabled. Profiles independently inherit that baseline unless `accounts` replaces it, including explicitly
+listed disabled accounts. `[profiles.default]` overrides only itself. Root/profile `model` is an optional qualified
+`account/raw-model` reference, split once; lists/maps/wire requests retain raw IDs. An excluded root default is dormant;
+an explicit out-of-scope profile default errors. One ACP picker aggregates active accounts with qualified IDs and
+account/model display labels. No first account/model, native ordering or public catalog creates a default.
+Explicit configuration wins over opted-in catalog hints/context budgets, frozen per turn after availability checks.
+Selector precedence is global, BEE_PROFILE, BEE_CONFIG file, then project configuration.
 New sessions prefer the profile's account-bound last-used model, recorded after committed successful inference;
 configured defaults remain layered preferences. Private runtime state survives restart, and unavailable automatic
 choices require explicit selection before crossing accounts. Preference-write failures warn without undoing answers.
@@ -71,6 +78,14 @@ checks is a comment, and it will be violated.
    never contents — enforced by `tests/config.rs`, `tests/provider.rs`,
    `tests/auth.rs` and `tests/cli.rs`. That covers the credential file, the
    authorization code, the PKCE verifier and the key a provider returns.
+4. **Availability is account-bound and gates both selection and inference.** Public metadata, selected/default IDs,
+   routing/context-map keys and endpoint observations cannot expand the configured/discovered set. Pending/first-failed
+   discovery grants none; authorization loss clears private visibility. Account/model and authority checks must precede
+   each frozen production turn — covered by account/model/selection and native integration suites.
+5. **Defaults and authentication never pick an arbitrary account.** There is no first-account/model default. Recency
+   records only committed success and cannot silently cross accounts. Omitted login/logout requires exactly one active
+   account; explicit existing-account authentication cannot enable it or mutate profile membership — covered by
+   configuration/profile, selection and CLI/onboarding suites.
 
 ## Layout
 
@@ -87,13 +102,16 @@ src/
 ├── selection.rs profile-scoped recent models, account continuity and private preference persistence
 ├── history.rs  private durable sessions, ordered JSONL journals and successful-context projections, free of the SDK
 ├── config.rs   layered XDG configuration (ADR-006), free of the SDK
-├── provider.rs provider profiles from the configuration (ADR-007), free of the SDK
-├── profile.rs  named grouping profiles over connections and model defaults (ADR-022), free of the SDK
+├── account.rs  configured Account/Accounts, account parsing and qualified ModelRef (ADR-028), free of the SDK
+├── account/cache.rs account-specific prompt-cache configuration parsing
+├── provider.rs compiled-in registry and protocol/endpoint helpers (ADR-027), free of the SDK
+├── profile.rs  independent account membership and optional qualified defaults (ADR-028), free of the SDK
 ├── auth.rs     credential sources, transactional 0600 store and secret handling (ADR-008), free of the SDK
 ├── auth/chatgpt.rs official local/OSS ChatGPT OAuth, verified identity, renewal and revocation (ADR-020)
 ├── login.rs    the `pkce-key` browser sign-in, driven by a `LoginSpec`, free of the SDK
 ├── provider/   compiled-in registry, declared fields, trusted sign-ins and prepared native runtimes (ADR-027)
-├── models.rs   optional catalog/cache, endpoint discovery and metadata provenance, free of the SDK
+├── provider/runtime.rs model runtime, renewal, native headers and authority checks
+├── models.rs   account availability, optional public catalog/cache and metadata provenance, free of the SDK
 ├── http.rs     the one HTTP seam, so flows are tested against a fake
 ├── llm.rs      SDK-free inference types, errors and protocol dispatch
 ├── llm/        native wire adapters
@@ -114,10 +132,10 @@ tests/
 ├── session.rs  the session and prompt lifecycle, in-process
 ├── cancel.rs   cancellation, failed turns and error mapping, in-process
 ├── config.rs   the configuration layers, merge rules and errors, in-process
-├── provider.rs provider profiles, validation and secret handling, in-process
-├── selection.rs provider and model selection over ACPv2, in-process
+├── provider.rs provider protocols, validation and secret handling, in-process
+├── selection.rs qualified account/model selection over ACPv2, in-process
 ├── auth.rs     credentials, the store and the sign-in flows, in-process
-├── registry.rs native defaults, custom instances and removed-configuration migration diagnostics, in-process
+├── registry.rs complete native inventory, custom accounts and configuration diagnostics, in-process
 ├── mcp.rs      the MCP-over-ACP spike (ADR-002)
 └── mcp_integration.rs production model/MCP cycles, failures and lifecycle isolation (ADR-015)
 ```

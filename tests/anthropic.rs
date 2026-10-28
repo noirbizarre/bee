@@ -233,12 +233,11 @@ async fn native_options_override_the_common_limit_and_default_version() {
     let server = Server::start(vec![Response::json(answer("okay"))]);
     let path = bee::config::project_config_path(root.path());
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, format!("[providers.test]\nmodel='opaque'\nmax_output_tokens=100\n[providers.test.protocols.anthropic-messages]\nbase_url='{}'\noptions={{version='2023-06-01',max_tokens=55}}", server.url)).unwrap();
+    std::fs::write(path, format!("model='test/opaque'\n[accounts.test]\nprovider='custom'\nmodels=['opaque']\nmax_output_tokens=100\n[accounts.test.protocols.anthropic-messages]\nbase_url='{}'\noptions={{version='2023-06-01',max_tokens=55}}", server.url)).unwrap();
     let env = bee::config::Environment::new(None, None, None);
-    let profiles = bee::provider::Providers::from_config(
-        &bee::config::Config::load(&env, root.path()).unwrap(),
-    )
-    .unwrap();
+    let profiles =
+        bee::account::Accounts::from_config(&bee::config::Config::load(&env, root.path()).unwrap())
+            .unwrap();
     let model = Model::new(profiles.get("test").unwrap().clone(), "opaque".into(), None).unwrap();
     model.step(&[], &[], &mut |_| {}).await.unwrap();
     let request = server.request();

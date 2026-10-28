@@ -300,7 +300,7 @@ fn standard_plan_messages_survive_process_restart_without_reexecuting_model_work
             terminal,
         ]);
         let config = format!(
-            "[providers.test]\nmodel='test'\nprotocols={{openai-chat={{base_url='{}'}}}}",
+            "model='test/test'\n[accounts.test]\nprovider='custom'\nmodels=['test']\nprotocols={{openai-chat={{base_url='{}'}}}}",
             server.url
         );
         let mut first = Agent::configured_with_state(&config, Some(&state));
@@ -381,7 +381,7 @@ fn a_new_process_restores_native_identity_transcript_selection_and_tool_context_
         support::Response::json(support::chat_text("continued")),
     ]);
     let config = format!(
-        "[providers.test]\nmodel='test'\nprotocols={{openai-chat={{base_url='{}'}}}}",
+        "model='test/test'\n[accounts.test]\nprovider='custom'\nmodels=['test','custom-model']\nprotocols={{openai-chat={{base_url='{}'}}}}",
         server.url
     );
     let mut first = Agent::configured_with_state(&config, Some(&state));
@@ -389,7 +389,7 @@ fn a_new_process_restores_native_identity_transcript_selection_and_tool_context_
     first
         .send(&json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":root.path()}}));
     let session = first.recv()["result"]["sessionId"].clone();
-    first.send(&json!({"jsonrpc":"2.0","id":3,"method":"session/set_config_option","params":{"sessionId":session,"configId":"model","type":"id","value":"custom-model"}}));
+    first.send(&json!({"jsonrpc":"2.0","id":3,"method":"session/set_config_option","params":{"sessionId":session,"configId":"model","type":"id","value":"test/custom-model"}}));
     let selected = first.recv();
     assert!(selected.get("result").is_some(), "{selected}");
     let prompt = json!([{"type":"text","text":"remember this"},{"type":"resource_link","uri":"file:///reference","name":"reference"}]);
@@ -462,7 +462,7 @@ fn opaque_prompts_replay_after_restart_without_entering_current_or_later_model_i
         support::Response::json(support::chat_text("continued answer")),
     ]);
     let config = format!(
-        "[providers.test]\nmodel='test'\nprotocols={{openai-chat={{base_url='{}'}}}}",
+        "model='test/test'\n[accounts.test]\nprovider='custom'\nmodels=['test']\nprotocols={{openai-chat={{base_url='{}'}}}}",
         server.url
     );
     let opaque = json!({"type":"_private_card","text":"opaque-text-sentinel","payload":[null,{"command":"opaque-command-sentinel"}],"_meta":{"vendor/key":"opaque-meta-sentinel"}});
@@ -566,7 +566,7 @@ fn profile_ownership_isolates_history_and_models_across_process_restarts() {
         support::Response::json(support::chat_text("work continued")),
     ]);
     let shared = format!(
-        "[providers.shared]\nprotocols={{openai-chat={{base_url='{}'}}}}\nmodel='base'\n[profiles.work]\nconnections=['shared']\n[profiles.work.models.shared]\nmodel='work-model'\n[profiles.personal]\nconnections=['shared']\n[profiles.personal.models.shared]\nmodel='personal-model'\n",
+        "[accounts.shared]\nprovider='custom'\nprotocols={{openai-chat={{base_url='{}'}}}}\nmodels=['base','work-model','personal-model','saved-work-model']\n[profiles.work]\naccounts=['shared']\nmodel='shared/work-model'\n[profiles.personal]\naccounts=['shared']\nmodel='shared/personal-model'\n",
         server.url
     );
     let work = format!("profile='work'\n{shared}");
@@ -576,7 +576,7 @@ fn profile_ownership_isolates_history_and_models_across_process_restarts() {
     first
         .send(&json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":root.path()}}));
     let session = first.recv()["result"]["sessionId"].clone();
-    first.send(&json!({"jsonrpc":"2.0","id":3,"method":"session/set_config_option","params":{"sessionId":session,"configId":"model","type":"id","value":"saved-work-model"}}));
+    first.send(&json!({"jsonrpc":"2.0","id":3,"method":"session/set_config_option","params":{"sessionId":session,"configId":"model","type":"id","value":"shared/saved-work-model"}}));
     assert!(first.recv().get("result").is_some());
     first.send(&json!({"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"text","text":"work context"}]}}));
     first.until_idle();
@@ -648,19 +648,19 @@ fn profile_ownership_isolates_history_and_models_across_process_restarts() {
 fn a_removed_selected_connection_cannot_fall_back_on_resume() {
     let root = tempfile::tempdir().unwrap();
     let state = root.path().join("state");
-    let connections = "[providers.one]\ntype='openai'\n[providers.two]\ntype='openai'\n";
+    let connections = "[accounts.one]\nprovider='openai'\ndiscovery=false\nmodels=['chosen']\n[accounts.two]\nprovider='openai'\ndiscovery=false\nmodels=['chosen']\n";
     let config = format!(
-        "profile='work'\n[profiles.work]\nconnections=['one','two']\nprovider='one'\n{connections}"
+        "profile='work'\n[profiles.work]\naccounts=['one','two']\nmodel='one/chosen'\n{connections}"
     );
     let mut first = Agent::configured_with_state(&config, Some(&state));
     first.initialize(1);
     first
         .send(&json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":root.path()}}));
     let session = first.recv()["result"]["sessionId"].clone();
-    first.send(&json!({"jsonrpc":"2.0","id":3,"method":"session/set_config_option","params":{"sessionId":session,"configId":"provider","type":"id","value":"two"}}));
+    first.send(&json!({"jsonrpc":"2.0","id":3,"method":"session/set_config_option","params":{"sessionId":session,"configId":"model","type":"id","value":"two/chosen"}}));
     assert!(first.recv().get("result").is_some());
     assert!(first.finish().0.success());
-    let narrowed = format!("profile='work'\n[profiles.work]\nconnections=['one']\n{connections}");
+    let narrowed = format!("profile='work'\n[profiles.work]\naccounts=['one']\n{connections}");
     let mut second = Agent::configured_with_state(&narrowed, Some(&state));
     second.initialize(1);
     second.send(&json!({"jsonrpc":"2.0","id":2,"method":"session/resume","params":{"sessionId":session,"cwd":root.path(),"replayFrom":{"type":"start"}}}));
@@ -672,6 +672,57 @@ fn a_removed_selected_connection_cannot_fall_back_on_resume() {
             .contains("outside the active profile")
     );
     assert!(second.finish().0.success());
+}
+
+#[test]
+fn qualified_choices_preserve_account_identity_and_raw_wire_suffixes_across_restart() {
+    let root = tempfile::tempdir().unwrap();
+    let state = root.path().join("state");
+    let first_endpoint = support::Server::start(Vec::new());
+    let second_endpoint = support::Server::start(vec![
+        support::Response::json(support::chat_text("first answer")),
+        support::Response::json(support::chat_text("resumed answer")),
+    ]);
+    let config = |models: &str| {
+        format!(
+            "[accounts.first]\nprovider='custom'\nmodels=['vendor/model']\nprotocols.openai-chat.base_url='{}'\n[accounts.second]\nprovider='custom'\nmodels={models}\nprotocols.openai-chat.base_url='{}'",
+            first_endpoint.url, second_endpoint.url
+        )
+    };
+    let mut agent = Agent::configured_with_state(&config("['vendor/model']"), Some(&state));
+    agent.initialize(1);
+    agent
+        .send(&json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":root.path()}}));
+    let created = agent.recv();
+    let session = created["result"]["sessionId"].clone();
+    let wire = created.to_string();
+    assert!(wire.contains("first/vendor/model") && wire.contains("second/vendor/model"));
+    assert!(wire.contains("Choose a model"));
+    agent.send(&json!({"jsonrpc":"2.0","id":3,"method":"session/set_config_option","params":{"sessionId":session,"configId":"model","type":"id","value":"second/vendor/model"}}));
+    assert!(agent.recv().get("result").is_some());
+    agent.send(&json!({"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"text","text":"hello"}]}}));
+    agent.until_idle();
+    assert_eq!(second_endpoint.request().body["model"], "vendor/model");
+    assert!(agent.finish().0.success());
+
+    let mut resumed = Agent::configured_with_state(&config("['vendor/model']"), Some(&state));
+    resumed.initialize(1);
+    resumed.resume(&session, root.path(), true);
+    resumed.send(&json!({"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"text","text":"continue"}]}}));
+    resumed.until_idle();
+    assert_eq!(second_endpoint.request().body["model"], "vendor/model");
+    assert!(resumed.finish().0.success());
+
+    let mut excluded = Agent::configured_with_state(&config("[]"), Some(&state));
+    excluded.initialize(1);
+    excluded.resume(&session, root.path(), true);
+    excluded.send(&json!({"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"text","text":"cannot infer"}]}}));
+    let stopped = excluded.until_idle();
+    assert_eq!(
+        stopped.last().unwrap()["params"]["update"]["stopReason"],
+        "error"
+    );
+    assert!(excluded.finish().0.success());
 }
 
 #[test]
@@ -727,7 +778,7 @@ fn storage_failure_after_acceptance_emits_one_error_idle_and_preserves_committed
         support::Response::json(support::chat_text("recovered")),
     ]);
     let config = format!(
-        "[providers.test]\nmodel='test'\nprotocols={{openai-chat={{base_url='{}'}}}}",
+        "model='test/test'\n[accounts.test]\nprovider='custom'\nmodels=['test']\nprotocols={{openai-chat={{base_url='{}'}}}}",
         server.url
     );
     let mut agent = Agent::configured_with_state(&config, Some(&state));
@@ -801,7 +852,7 @@ fn repeated_replay_is_bounded_without_deleting_history_or_preventing_state_only_
         "retained answer",
     ))]);
     let config = format!(
-        "[history]\nreplay_max_bytes=2048\n[providers.test]\nmodel='test'\nprotocols={{openai-chat={{base_url='{}'}}}}",
+        "model='test/test'\n[history]\nreplay_max_bytes=2048\n[accounts.test]\nprovider='custom'\nmodels=['test']\nprotocols={{openai-chat={{base_url='{}'}}}}",
         server.url
     );
     let mut agent = Agent::configured(&config);
@@ -877,7 +928,7 @@ fn unsuccessful_partial_answers_survive_restart_without_entering_inference_conte
         support::Response::json(support::chat_text("recovered")),
     ]);
     let config = format!(
-        "[providers.test]\nmodel='test'\nprotocols={{openai-chat={{base_url='{}'}}}}",
+        "model='test/test'\n[accounts.test]\nprovider='custom'\nmodels=['test']\nprotocols={{openai-chat={{base_url='{}'}}}}",
         server.url
     );
     let mut agent = Agent::configured_with_state(&config, Some(&state));
@@ -984,7 +1035,7 @@ fn pending_inference_can_be_stopped_over_stdio_and_the_session_recovers(#[case] 
         support::Response::json(support::chat_text("recovered")),
     ]);
     let mut agent = Agent::configured(&format!(
-        "[providers.test]\nmodel='test'\n[providers.test.protocols.openai-chat]\nbase_url='{}'",
+        "model='test/test'\n[accounts.test]\nprovider='custom'\nmodels=['test']\n[accounts.test.protocols.openai-chat]\nbase_url='{}'",
         http.url
     ));
     // Client interaction support does not trigger a form or login by itself:
@@ -1073,7 +1124,7 @@ fn resume_cursors_preserve_wire_order_and_reject_invalid_requests_without_reopen
         "previous answer",
     ))]);
     let mut agent = Agent::configured(&format!(
-        "[providers.test]\nmodel='test'\n[providers.test.protocols.openai-chat]\nbase_url='{}'",
+        "model='test/test'\n[accounts.test]\nprovider='custom'\nmodels=['test']\n[accounts.test.protocols.openai-chat]\nbase_url='{}'",
         server.url
     ));
     agent.initialize(1);
@@ -1148,7 +1199,7 @@ fn bash_output_is_captured_without_corrupting_the_protocol_stream() {
         ),
     ]);
     let mut agent = Agent::configured(&format!(
-        "[tools.bash]\ntimeout_ms=1000\n[providers.test]\nmodel='test'\n[providers.test.protocols.openai-chat]\nbase_url='{}'",
+        "model='test/test'\n[tools.bash]\ntimeout_ms=1000\n[accounts.test]\nprovider='custom'\nmodels=['test']\n[accounts.test.protocols.openai-chat]\nbase_url='{}'",
         server.url
     ));
     agent.initialize(1);
@@ -1222,7 +1273,7 @@ fn every_file_change_operation_is_serialized_as_standard_v2_diff_content() {
     responses.push(support::Response::json(support::chat_text("done")));
     let server = support::Server::start(responses);
     let mut agent = Agent::configured(&format!(
-        "[providers.test]\nmodel='test'\nprotocols={{openai-chat={{base_url='{}'}}}}",
+        "model='test/test'\n[accounts.test]\nprovider='custom'\nmodels=['test']\nprotocols={{openai-chat={{base_url='{}'}}}}",
         server.url
     ));
     agent.initialize(1);
@@ -1315,7 +1366,7 @@ fn unapproved_stdio_commands_never_run_and_close_follows_request_cleanup(
         support::Response::json(support::chat_text("declined")),
     ]);
     let mut agent = Agent::configured(&format!(
-        "[providers.test]\nmodel='test'\nprotocols={{openai-chat={{base_url='{}'}}}}",
+        "model='test/test'\n[accounts.test]\nprovider='custom'\nmodels=['test']\nprotocols={{openai-chat={{base_url='{}'}}}}",
         server.url
     ));
     agent.initialize(1);
@@ -1397,7 +1448,7 @@ fn configured_turn_limits_reach_real_stdio_inference() {
         json!({"choices":[{"index":0,"message":{"tool_calls":[{"id":"a","type":"function","function":{"name":"list","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}),
     )]);
     let mut agent = Agent::configured(&format!(
-        "[agent]\nmax_steps = 1\n[providers.test]\nmodel = 'test'\n[providers.test.protocols.openai-chat]\nbase_url = '{}'",
+        "model='test/test'\n[agent]\nmax_steps = 1\n[accounts.test]\nprovider='custom'\nmodels=['test']\n[accounts.test.protocols.openai-chat]\nbase_url = '{}'",
         server.url
     ));
     agent.initialize(1);
@@ -1484,7 +1535,7 @@ fn context_truncation_reports_committed_history_and_failures_leave_it_intact_ove
         .unwrap();
     let window = report.estimated_input + report.reserved_output + 400;
     let mut agent = Agent::configured(&format!(
-        "[providers.test]\nmodel='test'\nmax_output_tokens=20\ncontext_window={window}\n[providers.test.protocols.openai-chat]\nbase_url='{}'",
+        "model='test/test'\n[accounts.test]\nprovider='custom'\nmodels=['test']\nmax_output_tokens=20\ncontext_window={window}\n[accounts.test.protocols.openai-chat]\nbase_url='{}'",
         server.url
     ));
     agent.initialize(1);
@@ -1625,8 +1676,12 @@ fn an_unconfigured_prompt_over_stdio_is_accepted_and_reports_an_actionable_failu
     assert!(accepted.is_some_and(|response| response["result"]["messageId"].is_string()));
     assert_eq!(states[0]["state"], "running");
     assert_eq!(states[1]["stopReason"], "error");
-    assert!(states[1].to_string().contains("configure a connection"));
-    assert!(states[1].to_string().contains("bee auth login openrouter"));
+    assert!(
+        states[1]
+            .to_string()
+            .contains("choose an available account-qualified model")
+    );
+    assert!(states[1].to_string().contains("over ACP before prompting"));
     let (status, stderr) = agent.finish();
     assert!(status.success(), "exit status was {status}");
     assert_eq!(stderr, "", "a prompt writes nothing to stderr");

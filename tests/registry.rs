@@ -1,9 +1,10 @@
-//! Provider identity, defaults and configuration migration contracts.
+//! Provider inventory, account isolation and strict configuration contracts.
 
 mod support;
 
+use bee::account::{Accounts as Providers, CredentialSource, Protocol};
 use bee::config::{Config, Environment};
-use bee::provider::{CredentialSource, Protocol, Providers, registry};
+use bee::provider::registry;
 
 fn load(text: &str) -> bee::Result<Providers> {
     let root = tempfile::tempdir().unwrap();
@@ -21,13 +22,33 @@ fn every_registered_type_has_unique_identity_and_resolves_its_native_defaults() 
         if definition.id == "custom" {
             continue;
         }
-        let providers = load(&format!("[providers.account]\ntype='{}'", definition.id)).unwrap();
+        let providers = load(&format!("[accounts.account]\nprovider='{}'", definition.id)).unwrap();
         let instance = providers.get("account").unwrap();
-        assert_eq!(instance.provider_type(), definition.id);
+        assert_eq!(instance.provider(), definition.id);
         assert_eq!(instance.name(), "account");
         assert_eq!(instance.display_name(), Some(definition.label));
         assert!(!instance.endpoints().is_empty());
     }
+    assert_eq!(
+        ids.into_iter().collect::<Vec<_>>(),
+        [
+            "anthropic",
+            "chatgpt",
+            "custom",
+            "deepseek",
+            "github",
+            "google-aistudio",
+            "google-cloud",
+            "groq",
+            "mistral",
+            "ollama",
+            "openai",
+            "opencode",
+            "opencode-go",
+            "openrouter",
+            "xai"
+        ]
+    );
 }
 
 #[test]
@@ -41,14 +62,13 @@ fn native_defaults_preserve_protocol_preferences_and_environment_sources() {
         ),
         ("deepseek", Protocol::OpenAiChat, "DEEPSEEK_API_KEY"),
         ("google-aistudio", Protocol::OpenAiChat, "GEMINI_API_KEY"),
-        ("google", Protocol::OpenAiChat, "GEMINI_API_KEY"),
         ("groq", Protocol::OpenAiChat, "GROQ_API_KEY"),
         ("mistral", Protocol::OpenAiChat, "MISTRAL_API_KEY"),
         ("xai", Protocol::OpenAiResponses, "XAI_API_KEY"),
         ("opencode", Protocol::OpenAiChat, "OPENCODE_API_KEY"),
         ("opencode-go", Protocol::OpenAiChat, "OPENCODE_GO_API_KEY"),
     ] {
-        let providers = load(&format!("[providers.account]\ntype='{id}'")).unwrap();
+        let providers = load(&format!("[accounts.account]\nprovider='{id}'")).unwrap();
         let instance = providers.get("account").unwrap();
         assert_eq!(instance.protocol(), protocol, "{id}");
         assert_eq!(
@@ -61,13 +81,13 @@ fn native_defaults_preserve_protocol_preferences_and_environment_sources() {
 
 #[test]
 fn instances_of_one_type_keep_independent_credentials_models_and_headers() {
-    let providers = load("provider='personal'\n[providers.personal]\ntype='openai'\ncredential={env='PERSONAL'}\nmodel='private/model.v2'\nheaders={x-account='one'}\n[providers.work]\ntype='openai'\ncredential={store=true}\nmodel='arbitrary-work-model'\nheaders={x-account='two'}").unwrap();
+    let providers = load("model='personal/private/model.v2'\n[accounts.personal]\nprovider='openai'\ncredential={env='PERSONAL'}\nmodels=['private/model.v2']\nheaders={x-account='one'}\n[accounts.work]\nprovider='openai'\ncredential={store=true}\nmodels=['arbitrary-work-model']\nheaders={x-account='two'}").unwrap();
     let personal = providers.get("personal").unwrap();
     let work = providers.get("work").unwrap();
-    assert_eq!(personal.provider_type(), work.provider_type());
+    assert_eq!(personal.provider(), work.provider());
     assert_ne!(personal.credential(), work.credential());
     assert_ne!(personal.headers(), work.headers());
-    assert_ne!(personal.model(), work.model());
+    assert_ne!(personal.models(), work.models());
 }
 
 #[test]
@@ -148,13 +168,6 @@ fn native_protocol_destinations_preserve_vendor_and_offering_boundaries() {
             )],
         ),
         (
-            "google",
-            vec![(
-                "openai-chat",
-                "https://generativelanguage.googleapis.com/v1beta/openai",
-            )],
-        ),
-        (
             "groq",
             vec![
                 ("openai-chat", "https://api.groq.com/openai/v1"),
@@ -173,7 +186,7 @@ fn native_protocol_destinations_preserve_vendor_and_offering_boundaries() {
             ],
         ),
     ] {
-        let providers = load(&format!("[providers.account]\ntype='{id}'")).unwrap();
+        let providers = load(&format!("[accounts.account]\nprovider='{id}'")).unwrap();
         let actual: Vec<_> = providers
             .get("account")
             .unwrap()
@@ -194,7 +207,7 @@ fn native_shorthand_keeps_registered_destinations_and_options_without_redirectin
     ] {
         for options in ["", "options={max_tokens_field='max_completion_tokens'}"] {
             let providers = load(&format!(
-                "[providers.account]\ntype='{id}'\nprotocol='openai-chat'\n{options}"
+                "[accounts.account]\nprovider='{id}'\nprotocol='openai-chat'\n{options}"
             ))
             .unwrap();
             let instance = providers.get("account").unwrap();
@@ -202,8 +215,8 @@ fn native_shorthand_keeps_registered_destinations_and_options_without_redirectin
             assert_eq!(instance.endpoints().len(), 1);
         }
     }
-    assert!(load("[providers.account]\ntype='ollama'\nprotocol='openai-responses'").is_err());
-    let providers = load("[providers.account]\ntype='ollama'\nprotocol='openai-responses'\nbase_url='http://localhost:11434/v1'").unwrap();
+    assert!(load("[accounts.account]\nprovider='ollama'\nprotocol='openai-responses'").is_err());
+    let providers = load("[accounts.account]\nprovider='ollama'\nprotocol='openai-responses'\nbase_url='http://localhost:11434/v1'").unwrap();
     assert_eq!(
         providers.get("account").unwrap().base_url(),
         "http://localhost:11434/v1"
@@ -221,7 +234,7 @@ fn invalid_display_names_are_rejected_without_echoing_configured_values() {
     ] {
         let value = serde_json::to_string(&value).unwrap();
         let error = load(&format!(
-            "[providers.account]\ntype='openai'\ndisplay_name={value}"
+            "[accounts.account]\nprovider='openai'\ndisplay_name={value}"
         ))
         .unwrap_err();
         let output = format!("{error:?} {error}");
@@ -232,7 +245,7 @@ fn invalid_display_names_are_rejected_without_echoing_configured_values() {
 
 #[test]
 fn instance_methods_describe_supported_material_not_the_configured_acquisition_flow() {
-    let providers = load("[providers.account]\ntype='github'\ncredential={store=true}").unwrap();
+    let providers = load("[accounts.account]\nprovider='github'\ncredential={store=true}").unwrap();
     assert_eq!(
         providers.get("account").unwrap().auth_methods(),
         &[registry::AuthMethod::ApiKey, registry::AuthMethod::OAuth]
@@ -244,42 +257,46 @@ fn instance_methods_describe_supported_material_not_the_configured_acquisition_f
 }
 
 #[test]
-fn custom_shorthand_normalizes_to_supported_protocols_without_a_model_allowlist() {
-    let providers = load("[providers.gateway]\ntype='custom'\nprotocol='openai-chat'\nbase_url='https://gateway.example/v1/'\nmodel='private/anything.v3'\ncredential={store=true}\nheaders={x-private='private-header-sentinel'}\noptions={max_tokens_field='max_completion_tokens'}").unwrap();
+fn custom_shorthand_preserves_routing_without_expanding_declared_models() {
+    let providers = load("model='gateway/private/anything.v3'\n[accounts.gateway]\nprovider='custom'\nprotocol='openai-chat'\nbase_url='https://gateway.example/v1/'\ndiscovery=false\nmodels=['private/anything.v3']\ncredential={store=true}\nheaders={x-private='private-header-sentinel'}\noptions={max_tokens_field='max_completion_tokens'}").unwrap();
     let instance = providers.get("gateway").unwrap();
-    assert_eq!(instance.provider_type(), "custom");
+    assert_eq!(instance.provider(), "custom");
     assert_eq!(instance.base_url(), "https://gateway.example/v1");
     assert_eq!(
         instance.endpoint_for_model("unlisted/model").protocol(),
         Protocol::OpenAiChat
     );
     assert!(!format!("{instance:?}").contains("private-header-sentinel"));
+    assert_eq!(instance.models(), ["private/anything.v3"]);
 }
 
 #[test]
 fn explicit_custom_configuration_cannot_accidentally_target_a_public_default() {
     for text in [
-        "type='custom'\nprotocol='openai-chat'",
-        "type='custom'\nprotocols={openai-chat={}}",
-        "type='custom'\nprotocol='openai-chat'\nbase_url='https://gateway.example'\nprotocols={openai-chat={}}",
-        "type='custom'\nbase_url='https://gateway.example'",
+        "provider='custom'\nprotocol='openai-chat'",
+        "provider='custom'\nprotocols={openai-chat={}}",
+        "provider='custom'\nprotocol='openai-chat'\nbase_url='https://gateway.example'\nprotocols={openai-chat={}}",
+        "provider='custom'\nbase_url='https://gateway.example'",
+        "provider='custom'\nprefer=['openai-chat']\nprotocols={openai-chat={base_url='https://gateway.example'},anthropic-messages={}}",
     ] {
-        assert!(load(&format!("[providers.test]\n{text}")).is_err());
+        assert!(load(&format!("[accounts.test]\n{text}")).is_err());
     }
 }
 
 #[test]
-fn removed_configuration_has_actionable_value_free_migration_diagnostics() {
+fn removed_configuration_has_value_free_diagnostics() {
     for text in [
         "[providers.account]\npreset='secret-sentinel'",
         "[presets.secret-sentinel]\nprotocols={openai-chat={}}",
         "[login_flows.secret-sentinel]\nkind='secret-sentinel'",
-        "[providers.account]\ntype='secret-sentinel'",
+        "[accounts.account]\nprovider='secret-sentinel'",
+        "[accounts.account]\nprovider='google'",
+        "[accounts.account]\nprovider='grok'",
     ] {
         let error = load(text).unwrap_err();
         let output = format!("{error:?}\n{error}");
         assert!(!output.contains("secret-sentinel"), "{output}");
-        assert!(output.contains("type"), "{output}");
+        assert!(output.contains("invalid provider setting"), "{output}");
     }
 }
 
@@ -290,7 +307,7 @@ fn a_higher_layer_cannot_hide_obsolete_configuration() {
     std::fs::create_dir_all(global.parent().unwrap()).unwrap();
     std::fs::write(&global, "[providers.work]\npreset='openai'").unwrap();
     let selected = root.path().join("selected.toml");
-    std::fs::write(&selected, "[providers.work]\ntype='openai'").unwrap();
+    std::fs::write(&selected, "[accounts.work]\nprovider='openai'").unwrap();
     let env = Environment::new(Some(root.path().into()), None, Some(selected));
     assert!(Config::load(&env, root.path()).is_err());
 }
@@ -298,13 +315,13 @@ fn a_higher_layer_cannot_hide_obsolete_configuration() {
 #[test]
 fn native_oauth_and_adc_keep_their_target_restrictions() {
     for text in [
-        "type='chatgpt'\nheaders={x-extra='unsafe'}",
-        "type='chatgpt'\ncredential={store=true,login='openrouter'}",
-        "type='custom'\nprotocol='openai-responses'\nbase_url='https://api.openai.com/v1'\ncredential={store=true,login='chatgpt'}",
-        "type='chatgpt'\nprotocols.openai-responses.base_url='https://untrusted.example'",
-        "type='github'\nprotocols.openai-chat.base_url='https://untrusted.example'",
-        "type='google-cloud'\nheaders={x-extra='unsafe'}",
+        "provider='chatgpt'\nheaders={x-extra='unsafe'}",
+        "provider='chatgpt'\ncredential={store=true,login='openrouter'}",
+        "provider='custom'\nprotocol='openai-responses'\nbase_url='https://api.openai.com/v1'\ncredential={store=true,login='chatgpt'}",
+        "provider='chatgpt'\nprotocols.openai-responses.base_url='https://untrusted.example'",
+        "provider='github'\nprotocols.openai-chat.base_url='https://untrusted.example'",
+        "provider='google-cloud'\nheaders={x-extra='unsafe'}",
     ] {
-        assert!(load(&format!("[providers.account]\n{text}")).is_err());
+        assert!(load(&format!("[accounts.account]\n{text}")).is_err());
     }
 }

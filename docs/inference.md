@@ -1,17 +1,28 @@
 # Inference and smoke tests
 
 Bee implements text and function-calling Chat Completions, Responses and Anthropic Messages.
-A profile's exact `model_protocols` mapping wins, followed by Copilot native endpoint declarations when available,
+An account's exact `model_protocols` mapping wins, followed by Copilot native endpoint declarations when available,
 explicitly enabled catalog hints, then its preferred
 protocol; failures never trigger
-protocol fallback. Any opaque
-model ID is accepted without a catalog lookup, but the endpoint must support that model and the selected protocol.
+protocol fallback. Selection and inference require account model availability: with `discovery = false`, exactly declared
+raw `models` are available; with discovery on, successful selectable results are intersected with optional `models`.
+Omitted filters permit all listed IDs and `[]` permits none. Pending/first failed discovery permits no models;
+same-account last-good stale results can survive transient failures, but authorization loss clears visibility.
+Public catalog metadata never expands availability. The endpoint can still reject an available model or protocol.
 
-For example, an instance using `type = "openai"` can set
+For example, an account using `provider = "openai"` can set
 `model_protocols = { "YOUR_CHAT_MODEL_ID" = "openai-chat" }` while keeping Responses as its preference.
 The effective session-selected or default model ID controls dispatch, endpoint URL/options and authentication headers
 together. The provider's credential, custom headers and common limits are shared. See
-[provider configuration](index.md#providers-and-models) for validation and layer/type-default merge rules.
+[account configuration](index.md#providers-and-models) for validation and provider-default merge rules.
+
+Root/profile defaults and the unified ACP picker use qualified `<account-id>/<raw-model-id>` references. Split only on
+the first slash: `work/vendor/model` sends `vendor/model`, retaining vendor prefixes and case. Account-local routing,
+context and metadata maps use raw IDs. Before every production prompt, Bee authenticates/renews the selected account,
+checks profile membership and authority, awaits required availability and native route/context facts, and freezes the turn.
+Explicit, configured, recent and resumed choices all pass this gate. No candidate means choose a model; Bee does not
+authenticate an arbitrary account or select the first model. Account changes discard native continuation even for an
+identical raw model ID. See [model availability](models.md#account-model-availability).
 
 ## Request settings and supported subset
 
@@ -41,7 +52,7 @@ after side effects.
 
 ## Google AI Studio requests
 
-The `google-aistudio` type uses Google's official
+The `google-aistudio` provider uses Google's official
 [OpenAI compatibility endpoint](https://ai.google.dev/gemini-api/docs/openai) for the Gemini Developer API. Inference
 posts to `https://generativelanguage.googleapis.com/v1beta/openai/chat/completions` using the selected exact model ID,
 API-key bearer authentication, streamed text, function tools and the configured output cap. See
@@ -55,7 +66,7 @@ per response. Unknown extension fields are not replayed.
 
 Signed snapshots belong to private successful context, survive durable resume, and are never assistant-visible text or
 tool input. Context estimates count the replayed request once, including signatures; oldest-whole-turn eviction removes
-complete exchanges. Changing provider/model or protocol drops native state through the usual portable-history path.
+complete exchanges. Changing account/model or protocol drops native state through the usual portable-history path.
 Configure model-specific context capacities or opt into catalog budgets rather than assume every Gemini model has the
 same window. Reasoning can consume the output budget, so a low cap may leave little visible answer text.
 
@@ -65,15 +76,15 @@ project/model dependent and separate from Google AI subscription quotas.
 
 ## Google Cloud requests
 
-The `google-cloud` type uses renewable OAuth bearer tokens from supported ADC. The official global target is
+The `google-cloud` provider uses renewable OAuth bearer tokens from supported ADC. The official global target is
 `https://aiplatform.googleapis.com/v1/projects/{project}/locations/global/endpoints/openapi/chat/completions`.
 Regional targets use `{location}-aiplatform.googleapis.com` and a matching location path. The selected model remains an
 exact `google/...` ID. Requests use the same text/function-calling, signed-call continuation and streaming usage behavior
 described [above](#google-ai-studio-requests), with configured system instructions and output caps.
 
-Prepare embedded inference with `auth::google_cloud::Session::prepare(profile, environment).await`, then attach it to
-`llm::Model` using `with_google_cloud_session`. Production ACP does this automatically. Cloud models reject inference
-without a matching prepared session. Credentials refresh before each step when near expiry; account/source and target
+Prepared native runtimes in `provider/runtime` own Cloud renewal, headers and authority checks. Production ACP prepares
+the selected account automatically. Cloud models reject inference without a matching prepared runtime.
+Credentials refresh before each step when near expiry; account/source and target
 identity remain pinned across token rotation. Automatic remembered choices are checked against resolved ADC authority
 before inference, including asynchronously resolved metadata identities. Tokens are not persisted by Bee.
 
@@ -88,7 +99,7 @@ No unverified caching fields are added. See [setup, supported ADC types and bill
 
 ## ChatGPT plan requests
 
-The `chatgpt` type uses the public `POST https://api.openai.com/v1/responses` endpoint with a renewable OAuth bearer
+The `chatgpt` provider uses the public `POST https://api.openai.com/v1/responses` endpoint with a renewable OAuth bearer
 token. It sends full client-managed history, `store: false`, `stream: true`, encrypted reasoning continuation, and
 function tools grouped in the `bee` namespace. Client-hosted MCP tools remain client-executed function tools.
 Only `response.completed` establishes success; late usage-limit failures and incomplete/interrupted streams fail the
@@ -108,7 +119,7 @@ See [setup and logout](index.md#use-your-chatgpt-plan).
 
 ## GitHub Copilot requests
 
-The `github` type sends a GitHub user bearer token directly to the account's validated Copilot API host.
+The `github` provider sends a GitHub user bearer token directly to the account's validated Copilot API host.
 It uses the existing Chat Completions, Responses and Messages adapters, with exact native model endpoint declarations
 below explicit `model_protocols` configuration. Authentication does not depend on model discovery being enabled.
 The default base is `https://api.githubcopilot.com`; account metadata can select its exact individual, business or
@@ -127,8 +138,8 @@ Default cache settings add no unverified Copilot cache controls; recognized retu
 
 Stored authority is rechecked before every model step. Logout or replacement stops the turn rather than switching
 accounts. Environment credentials remain captured from the explicitly selected source. Authentication rejection never
-replays inference or changes protocol, and invalidates private model visibility. Embedded callers prepare
-`auth::copilot::Session` and attach it with `Model::with_copilot_session` before inference.
+replays inference or changes protocol, and invalidates private model visibility. Prepared native runtimes in
+`provider/runtime` own Copilot authority checks, renewal and headers.
 
 See [setup](index.md#use-github-copilot) and [ADR-024](adr/024-github-copilot-authentication.md) for consent identity,
 token lifecycle and the direct-wire compatibility basis.
@@ -147,7 +158,7 @@ eviction can legitimately invalidate a prefix. Bee does not suppress fresh guida
 
 Audited against the linked official contracts on 2026-10-26. This is Bee's intentionally supported subset, not a promise
 that every endpoint implementing a wire protocol accepts every option. URL overrides are checked as the actual endpoint,
-regardless of provider type or instance name. Optional catalog prices and metadata are not capability evidence.
+regardless of provider or account name. Optional catalog prices and metadata are not capability evidence.
 
 | Endpoint / adapter | Keys and native request controls in Bee | Usage preserved / limitations |
 | --- | --- | --- |
@@ -185,18 +196,21 @@ fails before HTTP with `bee::llm::cache`; Bee never retries after stripping it o
 
 ### Stable keys and OpenAI controls
 
-The automatic `bee-v1-...` key hashes the grouping profile, connection name, effective endpoint, protocol, authentication
+The automatic `bee-v1-...` key hashes the grouping profile, account name, effective endpoint, protocol, authentication
 route class and model. It contains no credentials, prompt content, paths, timestamps or session/request IDs. The same
-scope survives model reconstruction, credential refresh, resume and process restart; changing scope/connection/model
+scope survives model reconstruction, credential refresh, resume and process restart; changing scope/account/model
 changes the key. Keys group routing/accounting, not authentication or account isolation. Hashing does not make a key an
 anonymity guarantee. Embedded `Model` callers can set a stable grouping scope with `with_cache_scope` (default `default`).
 
 ```toml
-[providers.openai]
-type = "openai"
-model = "gpt-6.1-sol"
+model = "openai/gpt-6.1-sol"
 
-[providers.openai.protocols.openai-responses.options]
+[accounts.openai]
+provider = "openai"
+discovery = false
+models = ["gpt-6.1-sol"]
+
+[accounts.openai.protocols.openai-responses.options]
 # Omit this table for the default automatic key; explicit values are 1–64 bytes.
 prompt_cache_key = { mode = "explicit", value = "my-application-v1" }
 # Paid writes and TTL selection are opt-in. Provider defaults remain active without this table.
@@ -235,11 +249,14 @@ and `o4-mini`. Retention support is independent of `store = false`; organization
 ### Anthropic policies
 
 ```toml
-[providers.claude]
-type = "anthropic"
-model = "claude-sonnet-4-6"
+model = "claude/claude-sonnet-4-6"
 
-[providers.claude.protocols.anthropic-messages.options]
+[accounts.claude]
+provider = "anthropic"
+discovery = false
+models = ["claude-sonnet-4-6"]
+
+[accounts.claude.protocols.anthropic-messages.options]
 cache_control = { policy = "stable-prefix-and-automatic", ttl = "5m" }
 ```
 
@@ -287,7 +304,7 @@ Unknown settings, invalid types and nonpositive budgets fail at startup; layers 
 These turn budgets are separate from per-request timeouts, token limits and response-size bounds.
 
 Successful conversation context is durably retained across close/resume and production process restarts. Cancelled,
-failed and refused turns may already have visible text but are excluded from future context. Changing provider/model
+failed and refused turns may already have visible text but are excluded from future context. Changing account/model
 preserves portable text and drops protocol-specific continuation. Explicit or opted-in catalog context windows bound
 history as described below. A separate visible transcript retains accepted user messages and assistant partials,
 even from unsuccessful turns, independently of context eviction. See [session history and replay](sessions.md).
@@ -334,7 +351,10 @@ failed, cancelled, refused and context-exhausted turns are not.
 Context capacity is explicit configuration by default, never inferred from a model name:
 
 ```toml
-[providers.work]
+[accounts.work]
+provider = "openai"
+discovery = false
+models = ["small-model"]
 context_window = 32768
 model_context_windows = { "small-model" = 8192 }
 ```
@@ -342,14 +362,14 @@ model_context_windows = { "small-model" = 8192 }
 Copilot's account-native total capacity can supply a fallback below both explicit settings. An explicitly enabled
 [catalog context window](models.md#optional-protocol-hints-and-context-budgets) applies below that native capacity.
 Budgets and protocol hints freeze before the model/tool loop; Copilot's final snapshot is account-bound after credential
-resolution. Stale validated facts remain usable with visible provenance. Explicit model/protocol mappings do not wait
-for optional discovery; Copilot may await a first native listing to resolve an otherwise unspecified model route.
+resolution. Stale validated facts remain usable with visible provenance. Public enrichment is optional, but explicit
+model/protocol mappings do not bypass account availability checks or required native route facts.
 
-Both settings accept positive 32-bit integers on provider instances. An exact, case-sensitive model entry overrides
-the profile fallback. Quote model IDs containing TOML punctuation. The map merges per model across configuration
-layers and type defaults; an empty map does not clear inherited entries. Without an applicable limit, capacity is unknown:
-Bee estimates occupancy but does not truncate or invent a context window. A profile fallback applies to every unmapped
-model selected in that profile, so configure it appropriately for those models.
+Both settings accept positive 32-bit integers on accounts. An exact, case-sensitive raw model entry overrides
+the account fallback. Quote model IDs containing TOML punctuation. The map merges per model across configuration
+layers and provider defaults; an empty map does not clear inherited entries. Without an applicable limit, capacity is unknown:
+Bee estimates occupancy but does not truncate or invent a context window. An account fallback applies to every unmapped
+model selected on that account, so configure it appropriately for those models. Context-map keys never grant availability.
 
 Before **every model request**, including requests following tool execution, Bee requires:
 
@@ -413,20 +433,23 @@ See [ADR-014](adr/014-conversation-context-and-token-limits.md) for the design d
 
 Save this configuration as `.config/bee.toml` and use an ACPv2 client to launch `bee` from its containing workspace,
 supplying your own key and a model that
-supports Chat Completions. The example deliberately selects Chat even if the type's default is Responses:
+supports Chat Completions. The example deliberately selects Chat even if the provider's default is Responses:
 
 ```toml
-[providers.smoke]
-type = "openai"
+model = "smoke/YOUR_CHAT_MODEL_ID"
+
+[accounts.smoke]
+provider = "openai"
 prefer = ["openai-chat"]
-model = "YOUR_CHAT_MODEL_ID"
+discovery = false
+models = ["YOUR_CHAT_MODEL_ID"]
 timeout_ms = 120000
 ```
 
 1. Supply `OPENAI_API_KEY` in the client's launch environment. Alternatively, on Unix add
-   `credential = { store = true }` under `[providers.smoke]`, then run `bee auth login smoke --with-token`
+   `credential = { store = true }` under `[accounts.smoke]`, then run `bee auth login smoke --with-token`
    with the token supplied through standard input. Plain explicit login imports the configured environment key and
-   switches the instance to stored authority. Remove higher-priority credential-source overrides before switching.
+   switches the account to stored authority. Remove higher-priority credential-source overrides before switching.
 2. Initialize, create a session and prompt for a short answer. Expect running, streamed text, then idle/end-turn.
 3. Ask a follow-up referring to the answer. Check that context is retained.
 4. Submit a longer prompt and cancel after output begins. Expect exactly one cancelled idle and no later chunks.
@@ -438,9 +461,13 @@ timeout_ms = 120000
 For a third-party/local compatible server, repeat using its documented base URL and model. For example:
 
 ```toml
-[providers.local]
-model = "YOUR_LOCAL_MODEL_ID"
-[providers.local.protocols.openai-chat]
+model = "local/YOUR_LOCAL_MODEL_ID"
+
+[accounts.local]
+provider = "ollama"
+discovery = false
+models = ["YOUR_LOCAL_MODEL_ID"]
+[accounts.local.protocols.openai-chat]
 base_url = "http://127.0.0.1:11434/v1"
 ```
 
@@ -452,19 +479,26 @@ every server or model. Live tests require user-supplied credentials and are not 
 Repeat the text, follow-up and cancellation checks above with an OpenAI model supporting Responses:
 
 ```toml
-[providers.smoke]
-type = "openai"
-model = "YOUR_RESPONSES_MODEL_ID"
+model = "smoke/YOUR_RESPONSES_MODEL_ID"
+
+[accounts.smoke]
+provider = "openai"
+discovery = false
+models = ["YOUR_RESPONSES_MODEL_ID"]
 ```
 
-The OpenAI type prefers Responses, so no preference override is needed. For a compatible gateway, use its documented
+The OpenAI provider prefers Responses, so no preference override is needed. For a compatible gateway, use its documented
 Responses base URL and credentials explicitly:
 
 ```toml
-[providers.compatible]
-model = "YOUR_RESPONSES_MODEL_ID"
+model = "compatible/YOUR_RESPONSES_MODEL_ID"
+
+[accounts.compatible]
+provider = "custom"
+discovery = false
+models = ["YOUR_RESPONSES_MODEL_ID"]
 credential = { env = "COMPATIBLE_API_KEY" }
-[providers.compatible.protocols.openai-responses]
+[accounts.compatible.protocols.openai-responses]
 base_url = "https://YOUR_COMPATIBLE_HOST/v1"
 ```
 
@@ -476,13 +510,16 @@ Some compatible endpoints do not support stateless encrypted reasoning; those fa
 Supply your own `ANTHROPIC_API_KEY` in the ACP client's launch environment and choose a Messages-compatible model:
 
 ```toml
-[providers.smoke]
-type = "anthropic"
-model = "YOUR_ANTHROPIC_MODEL_ID"
+model = "smoke/YOUR_ANTHROPIC_MODEL_ID"
+
+[accounts.smoke]
+provider = "anthropic"
+discovery = false
+models = ["YOUR_ANTHROPIC_MODEL_ID"]
 max_output_tokens = 4096
 ```
 
-Repeat the short answer, follow-up and cancellation checks against the official endpoint. The type uses
+Repeat the short answer, follow-up and cancellation checks against the official endpoint. The provider uses
 `https://api.anthropic.com`; Bee appends `/v1/messages` and applies the required protocol headers. Do not enable thinking
 or server tools for this subset. A Messages-compatible gateway may override this protocol's base URL without changing
 its provider name or authentication source. Validate such gateways separately against their own documented contract.

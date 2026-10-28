@@ -352,30 +352,15 @@ impl Config {
                 read_layer(&path, required)?
             };
             if let Some(table) = table {
-                // Inspect each layer before merging: overrides must not hide removed syntax.
-                for key in ["presets", "login_flows"] {
+                // Unsupported selectors must not become silently ignored account choices.
+                for key in ["provider", "providers", "presets", "login_flows"] {
                     if table.contains_key(key) {
                         return Err(Error::ProviderInvalid {
                             path: path.display().to_string(),
                             key: key.into(),
-                            reason: "removed configuration: use provider instances with `type`; custom endpoints use type = custom; configurable login flows are no longer supported",
+                            reason: "unsupported configuration key; configure accounts with a provider implementation and an optional qualified model",
                         });
                     }
-                }
-                if table
-                    .get("providers")
-                    .and_then(Value::as_table)
-                    .is_some_and(|instances| {
-                        instances
-                            .values()
-                            .any(|instance| instance.get("preset").is_some())
-                    })
-                {
-                    return Err(Error::ProviderInvalid {
-                        path: path.display().to_string(),
-                        key: "providers.<instance>.preset".into(),
-                        reason: "removed configuration: replace preset with a registered provider type; use type = custom for custom endpoints",
-                    });
                 }
                 if let Some(value) = table.get("permissions") {
                     // Trust follows the selected layer, even when BEE_CONFIG names the project file.
@@ -548,7 +533,7 @@ fn merge(
         match base.get_mut(&key) {
             Some(existing)
                 if existing.is_table()
-                    && prefix.starts_with("providers.")
+                    && prefix.starts_with("accounts.")
                     && key == "credential"
                     && value.as_table().is_some_and(|table| {
                         table
@@ -599,7 +584,7 @@ fn merge(
 // Model IDs are configuration values expressed as keys; exposing their origin
 // paths would bypass the normal protection against printing configuration values.
 fn diagnostic_key(key: &str) -> &str {
-    if key.starts_with("providers.") || key.starts_with("presets.") {
+    if key.starts_with("accounts.") {
         for field in [
             ".model_protocols",
             ".model_metadata",

@@ -806,7 +806,7 @@ mod tests {
     #[test]
     fn remembered_account_binding_survives_oauth_token_renewal_but_not_registration_replacement() {
         let profile =
-            crate::test_support::configured_providers("[providers.account]\ntype='chatgpt'")
+            crate::test_support::configured_providers("[accounts.account]\nprovider='chatgpt'")
                 .get("account")
                 .unwrap()
                 .clone();
@@ -1013,7 +1013,7 @@ mod tests {
         let (_root, store) = store();
         install(&store, true);
         let profile =
-            crate::test_support::configured_providers("[providers.account]\ntype='chatgpt'")
+            crate::test_support::configured_providers("[accounts.account]\nprovider='chatgpt'")
                 .get("account")
                 .unwrap()
                 .clone();

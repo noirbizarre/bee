@@ -13,8 +13,8 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::account::{Account as Profile, Accounts as Providers};
 use crate::auth::CredentialStore;
-use crate::provider::{Profile, Providers};
 
 /// Private correlation data must never become diagnostic or protocol metadata.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,13 +54,13 @@ impl Reason {
     pub(crate) fn message(self) -> &'static str {
         match self {
             Self::ConnectionRemoved => {
-                "The recent model's connection is outside this profile. Choose a provider and model explicitly."
+                "The recent model's account is outside this profile. Choose an account-qualified model explicitly."
             }
             Self::CredentialsUnavailable => {
-                "The recent model's credentials are unavailable or authorization was rejected. Sign in and choose a provider/model explicitly."
+                "The recent model's credentials are unavailable or authorization was rejected. Sign in and choose an account-qualified model explicitly."
             }
             Self::AccountChanged => {
-                "The recent model's account or connection target changed. Choose a provider and model explicitly to confirm the account."
+                "The recent model's account or connection target changed. Choose an account-qualified model explicitly to confirm the account."
             }
             Self::ModelUnavailable => {
                 "The recent model is no longer listed for this account. Choose an available model explicitly."
@@ -282,7 +282,7 @@ impl Reference {
         digest.update(b"bee-model-account-v1\0");
         // A type/target change cannot inherit remembered authority from a compatible endpoint.
         digest.update(
-            serde_json::to_vec(&(profile.provider_type(), profile.settings()))
+            serde_json::to_vec(&(profile.provider(), profile.settings()))
                 .expect("serializable provider authority"),
         );
         if profile.is_copilot() {
@@ -368,17 +368,20 @@ pub(crate) fn unavailable(
     profile: &Profile,
     model: &str,
 ) -> Option<Reason> {
-    let listing = snapshot.endpoints.get(profile.name())?;
-    if listing.error == Some(crate::models::Error::Unauthorized) {
+    let listing = snapshot.endpoints.get(profile.name());
+    if listing.is_some_and(|listing| listing.error == Some(crate::models::Error::Unauthorized)) {
         return Some(Reason::CredentialsUnavailable);
     }
-    // Only current complete account listings constrain automatic reuse, never explicit/custom selections.
-    if listing.error.is_none()
-        && !listing.stale
-        && listing
-            .fetched_at
-            .is_some_and(|at| crate::auth::unix_now().saturating_sub(at) <= 300)
-        && !listing.models.iter().any(|id| id == model)
+    if profile
+        .model_filter()
+        .is_some_and(|models| !models.iter().any(|id| id == model))
+    {
+        // A changed explicit filter is authoritative even before the next network observation.
+        return Some(Reason::ModelUnavailable);
+    }
+    // Pending evidence must not permanently invalidate recency; the prompt gate still denies inference.
+    if (!profile.discovery() || listing.is_some_and(|listing| listing.fetched_at.is_some()))
+        && snapshot.check_available(profile, model).is_err()
     {
         return Some(Reason::ModelUnavailable);
     }
@@ -424,9 +427,11 @@ fn resolve_visible(
     }
     if let Some(reason) = unavailable(snapshot, profile, &reference.model) {
         if reason == Reason::ModelUnavailable
-            && providers.default_name() == Some(profile.name())
-            && let Some(model) = profile.default_model()
-            && unavailable(snapshot, profile, model).is_none()
+            && let Some(reference) = providers
+                .configured_model()
+                .filter(|reference| reference.account == profile.name())
+            && let model = reference.model.as_str()
+            && snapshot.check_available(profile, model).is_ok()
         {
             let mut fallback = Reference::new(profile, model.into(), credential);
             fallback.fallback = true;

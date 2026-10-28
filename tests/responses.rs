@@ -253,7 +253,7 @@ async fn provider_errors_on_the_preferred_protocol_do_not_trigger_fallback() {
     let profiles = support::providers(
         "openai-responses",
         &server.url,
-        "prefer=['openai-responses','openai-chat']\n[providers.test.protocols.openai-chat]\nbase_url='http://127.0.0.1:1'",
+        "prefer=['openai-responses','openai-chat']\n[accounts.test.protocols.openai-chat]\nbase_url='http://127.0.0.1:1'",
     );
     let model = Model::new(profiles.get("test").unwrap().clone(), "opaque".into(), None).unwrap();
     assert_eq!(

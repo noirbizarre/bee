@@ -50,10 +50,10 @@ pub enum Command {
     /// Inspect the built-in provider integrations without configuration or credentials.
     #[command(subcommand)]
     Providers(ProvidersCommand),
-    /// Discover model IDs and metadata without making the catalog an allowlist.
+    /// List available account models or browse public model metadata.
     #[command(subcommand)]
     Models(ModelsCommand),
-    /// Manage the credentials of provider connections.
+    /// Manage account credentials.
     #[command(subcommand)]
     Auth(AuthCommand),
 }
@@ -65,7 +65,7 @@ pub enum ProvidersCommand {
     List,
     /// Show supported authentication and declared fields for one provider type.
     Show {
-        /// Provider type, as used in instance configuration.
+        /// Compiled provider ID, as referenced by an account's provider field.
         provider_type: String,
     },
 }
@@ -73,31 +73,31 @@ pub enum ProvidersCommand {
 /// `bee models ...`.
 #[derive(Debug, Subcommand)]
 pub enum ModelsCommand {
-    /// Browse the public catalog's providers, independently of configured connections.
+    /// Browse the public catalog's providers, independently of configured accounts.
     Providers {
         /// Print structured metadata and freshness rather than a table.
         #[arg(long)]
         json: bool,
     },
-    /// Show model suggestions, automatically discovering supported native connections.
+    /// List available models across active accounts, with automatic account discovery.
     List {
-        /// Connection in the active profile; its default connection when omitted.
-        #[arg(value_name = "CONNECTION", conflicts_with = "catalog_provider")]
+        /// Account in the active profile; all active accounts when omitted.
+        #[arg(value_name = "ACCOUNT", conflicts_with = "catalog")]
         profile: Option<String>,
-        /// Browse a Models.dev provider rather than a configured connection.
-        #[arg(long, conflicts_with = "endpoint")]
-        catalog_provider: Option<String>,
-        /// Force connection discovery, including generic OpenAI-compatible endpoints.
+        /// Browse a Models.dev provider independently of configured accounts.
+        #[arg(long, value_name = "ID", conflicts_with = "endpoint")]
+        catalog: Option<String>,
+        /// Refresh endpoint metadata without expanding declared account availability.
         #[arg(long)]
         endpoint: bool,
         /// Print per-field provenance and freshness as JSON.
         #[arg(long)]
         json: bool,
     },
-    /// Refresh a connection's native catalogue, or the public catalogue when omitted.
+    /// Refresh an account's native catalogue, or the public catalogue when omitted.
     Refresh {
-        /// Connection in the active profile; omitted refreshes Models.dev.
-        #[arg(value_name = "CONNECTION")]
+        /// Account in the active profile; omitted refreshes Models.dev.
+        #[arg(value_name = "ACCOUNT")]
         profile: Option<String>,
         /// Print structured refresh status.
         #[arg(long)]
@@ -108,26 +108,26 @@ pub enum ModelsCommand {
 /// `bee auth ...`.
 #[derive(Debug, Subcommand)]
 pub enum AuthCommand {
-    /// Authenticate an instance, creating it when its name identifies a native provider type.
+    /// Authenticate an account, creating it when its name identifies a native provider.
     ///
     /// Without flags, imports declared environment credentials or runs native browser/device login.
-    /// Explicit environment login switches the instance to stored authority.
+    /// Explicit environment login switches the account to stored authority.
     /// With `--with-token`, reads an API token from standard input.
     Login(LoginArgs),
-    /// Forget the credential Bee stored for a connection.
+    /// Forget the credential Bee stored for an account.
     ///
     /// API keys stay valid with the provider until revoked there. ChatGPT
     /// logout also attempts renewable-session revocation, retaining registration.
     Logout {
-        /// Connection in the active profile; its default connection if omitted.
-        #[arg(value_name = "CONNECTION")]
+        /// Configured account; may be omitted only with exactly one active account.
+        #[arg(value_name = "ACCOUNT")]
         profile: Option<String>,
     },
-    /// Show where each active connection's credential comes from and whether it is
+    /// Show where each active account's credential comes from and whether it is
     /// available. Never prints a credential.
     Status {
-        /// Only this connection in the active profile.
-        #[arg(value_name = "CONNECTION")]
+        /// Only this configured account, including disabled accounts.
+        #[arg(value_name = "ACCOUNT")]
         profile: Option<String>,
     },
 }
@@ -135,8 +135,8 @@ pub enum AuthCommand {
 /// The arguments of `bee auth login`.
 #[derive(Debug, Args)]
 pub struct LoginArgs {
-    /// Connection in the active profile; its default connection if omitted.
-    #[arg(value_name = "CONNECTION")]
+    /// Configured account or native provider name; omitted requires one active account.
+    #[arg(value_name = "ACCOUNT")]
     pub profile: Option<String>,
 
     /// Read an API token from standard input instead of signing in.

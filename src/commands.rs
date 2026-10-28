@@ -8,12 +8,12 @@
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::time::Duration;
 
+use bee::account::{Account as Profile, Accounts as Providers};
 use bee::auth::{self, CredentialStore, FileStore, Status, StoreState};
 use bee::config::{Config, Environment};
 use bee::error::{Error, Result};
 use bee::http::{Http, UreqHttp};
 use bee::login;
-use bee::provider::{Profile, Providers};
 
 use crate::cli::{AuthCommand, LoginArgs};
 
@@ -96,7 +96,7 @@ pub fn run_providers(command: crate::cli::ProvidersCommand) -> Result<()> {
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn acquire_environment(
-    plan: &bee::config::persist::LoginConnection,
+    plan: &bee::config::persist::LoginAccount,
     env: &Environment,
     instance: &Profile,
     store: &dyn CredentialStore,
@@ -133,26 +133,42 @@ pub struct Context<'a> {
 
 /// Run `bee auth` against the real process: its environment, configuration,
 /// credential file, network and terminal.
-pub fn run_auth(command: AuthCommand) -> Result<()> {
+pub fn run_auth(mut command: AuthCommand) -> Result<()> {
     let env = Environment::from_process();
     let project_dir = std::env::current_dir().map_err(|source| Error::Io {
         path: ".".to_owned(),
         source,
     })?;
     let config = Config::load(&env, &project_dir)?;
-    let configured = Providers::from_config(&config)?;
+    let active = Providers::from_config(&config)?;
+    if let AuthCommand::Login(args) = &mut command
+        && args.profile.is_none()
+    {
+        // Freeze the sole active target before onboarding exposes all configured accounts.
+        args.profile = Some(chosen(&active, None)?.name().to_owned());
+    }
+    let explicit = match &command {
+        AuthCommand::Login(args) => args.profile.as_deref(),
+        AuthCommand::Logout { profile } | AuthCommand::Status { profile } => profile.as_deref(),
+    };
+    // Only explicit IDs may address disabled or out-of-profile accounts.
+    let configured = if explicit.is_some() {
+        auth::configured_accounts(&config)?
+    } else {
+        active
+    };
     let onboarding = match &command {
         AuthCommand::Login(args) => args
             .profile
             .as_deref()
-            .or_else(|| configured.default_name())
+            .or_else(|| configured.only_name())
             .map(|name| bee::config::persist::prepare(&env, &project_dir, name))
             .transpose()?,
         _ => None,
     };
     let providers = onboarding
         .as_ref()
-        .map_or(&configured, |plan| plan.providers());
+        .map_or(&configured, |plan| plan.accounts());
     let discovery =
         bee::models::Service::production(bee::models::Settings::from_config(&config)?, &env);
     let store = FileStore::from_environment(&env)?;
@@ -181,7 +197,7 @@ pub fn run_auth(command: AuthCommand) -> Result<()> {
             AuthCommand::Login(args) => args
                 .profile
                 .as_deref()
-                .or_else(|| providers.default_name())
+                .or_else(|| providers.only_name())
                 .expect("planned instance"),
             _ => unreachable!(),
         };
@@ -189,7 +205,7 @@ pub fn run_auth(command: AuthCommand) -> Result<()> {
             plan.check(&env, &project_dir)?;
         }
         store.put_guarded(auth::Audience::Provider(name), &credential, generation)?;
-        writeln!(pending_output, "Stored environment credentials for `{name}`; this instance now uses Bee's credential store.").map_err(write_error)?;
+        writeln!(pending_output, "Stored environment credentials for `{name}`; this account now uses Bee's credential store.").map_err(write_error)?;
     } else {
         execute(
             command,
@@ -225,7 +241,7 @@ pub fn execute(command: AuthCommand, context: &mut Context<'_>) -> Result<()> {
         AuthCommand::Login(args) => {
             login(&args, context)?;
             let profile = chosen(context.providers, args.profile.as_deref())?;
-            if profile.discover_models()
+            if profile.discovery()
                 && let Some(discovery) = context.discovery
             {
                 discovery.invalidate_endpoint(profile.name());
@@ -255,13 +271,15 @@ pub fn execute(command: AuthCommand, context: &mut Context<'_>) -> Result<()> {
     }
 }
 
-/// The profile named, or the default one.
+/// Credential mutations require a named account or exactly one active account.
 fn chosen<'a>(providers: &'a Providers, name: Option<&str>) -> Result<&'a Profile> {
-    match name.or_else(|| providers.default_name()) {
+    match name.or_else(|| providers.only_name()) {
         Some(name) => auth::profile(providers, name),
-        // Nothing named and nothing configured: report it as an unknown
-        // profile, which lists what is defined (nothing) and so says what to do.
-        None => auth::profile(providers, "<default>"),
+        None => Err(Error::ProviderInvalid {
+            path: "<command line>".into(),
+            key: "account".into(),
+            reason: "specify an account ID; omitted login/logout requires exactly one active account",
+        }),
     }
 }
 
@@ -275,11 +293,7 @@ fn write_error(source: io::Error) -> Error {
 fn login(args: &LoginArgs, context: &mut Context<'_>) -> Result<()> {
     let profile = chosen(context.providers, args.profile.as_deref())?;
     if profile.credential().is_none() {
-        return writeln!(
-            context.err,
-            "This provider instance requires no credential."
-        )
-        .map_err(write_error);
+        return writeln!(context.err, "This account requires no credential.").map_err(write_error);
     }
     // Before opening a browser: signing in to something that cannot be stored
     // would waste the user's time and then throw the key away.
@@ -479,7 +493,7 @@ fn status(name: Option<&str>, context: &mut Context<'_>) -> Result<()> {
         .filter(|status| name.is_none_or(|name| status.profile == name))
         .collect();
     if statuses.is_empty() {
-        return writeln!(context.out, "No provider profiles are configured.").map_err(write_error);
+        return writeln!(context.out, "No active accounts are configured.").map_err(write_error);
     }
     let width = statuses
         .iter()
@@ -576,7 +590,7 @@ mod tests {
         let env = Environment::new(Some(root.path().join("config")), None, None)
             .with_variable("OPENAI_API_KEY", "old-environment-account");
         let plan = bee::config::persist::prepare(&env, root.path(), "openai").unwrap();
-        let instance = plan.providers().get("openai").unwrap();
+        let instance = plan.accounts().get("openai").unwrap();
         let store = FileStore::new(root.path().join("credentials.json"));
         let (credential, generation) = acquire_environment(&plan, &env, instance, &store)
             .unwrap()
@@ -630,7 +644,7 @@ mod tests {
         {
             let mut context = Context {
                 env: &env,
-                providers: plan.providers(),
+                providers: plan.accounts(),
                 store: &store,
                 http: &KeyGiver,
                 login_http: &Device,
@@ -744,7 +758,7 @@ mod tests {
                 }),
                 &mut Context {
                     env: &env,
-                    providers: plan.providers(),
+                    providers: plan.accounts(),
                     store: &store,
                     http: &KeyGiver,
                     login_http: &bee::http::AsyncLoginHttp,
@@ -800,7 +814,7 @@ mod tests {
             std::fs::create_dir_all(project_config_path(&project).parent().unwrap()).unwrap();
             std::fs::write(
                 project_config_path(&project),
-                "[providers.or]\ntype = \"openrouter\"\n",
+                "[accounts.or]\nprovider = \"openrouter\"\n",
             )
             .unwrap();
             let env = Environment::new(None, Some(dir.path().join("home")), None);
@@ -1076,7 +1090,7 @@ mod tests {
         use std::sync::atomic::Ordering;
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("config.toml");
-        std::fs::write(&path, "[providers.account]\ntype='chatgpt'").unwrap();
+        std::fs::write(&path, "[accounts.account]\nprovider='chatgpt'").unwrap();
         let env = Environment::new(None, Some(root.path().into()), Some(path));
         let providers = Providers::from_config(&Config::load(&env, root.path()).unwrap()).unwrap();
         let store = FileStore::from_environment(&env).unwrap();

@@ -193,11 +193,14 @@ fn an_empty_bee_config_counts_as_unset() {
 #[test]
 fn bee_config_selects_an_intermediate_file() {
     let sandbox = Sandbox::new();
-    write(&sandbox.selected(), "model = \"from-selected\"");
+    write(&sandbox.selected(), "model = \"work/from-selected\"");
 
     let config = sandbox.load(&sandbox.env_with_selected()).unwrap();
 
-    assert_eq!(config.get("model").unwrap().as_str(), Some("from-selected"));
+    assert_eq!(
+        config.get("model").unwrap().as_str(),
+        Some("work/from-selected")
+    );
     assert_eq!(config.origin("model"), Some(sandbox.selected().as_path()));
 }
 
@@ -245,37 +248,43 @@ fn nested_tables_merge_key_by_key() {
     let sandbox = Sandbox::new();
     write(
         &sandbox.global(),
-        "[provider]\nname = \"global\"\nretries = 3\n[provider.limits]\ntokens = 100",
+        "[accounts.work]\nprovider='openai'\ndisplay_name='Global'\ntimeout_ms=300\n[accounts.work.model_context_windows]\nsmall=1000",
     );
     write(
         &sandbox.project(),
-        "[provider]\nname = \"project\"\n[provider.limits]\nrequests = 5",
+        "[accounts.work]\ndisplay_name='Project'\n[accounts.work.model_context_windows]\nlarge=5000",
     );
 
     let config = sandbox.load(&sandbox.env()).unwrap();
 
     assert_eq!(
-        config.get("provider.name").unwrap().as_str(),
-        Some("project")
+        config.get("accounts.work.display_name").unwrap().as_str(),
+        Some("Project")
     );
     assert_eq!(
-        config.get("provider.retries").unwrap().as_integer(),
-        Some(3)
+        config.get("accounts.work.timeout_ms").unwrap().as_integer(),
+        Some(300)
     );
     assert_eq!(
-        config.get("provider.limits.tokens").unwrap().as_integer(),
-        Some(100)
+        config
+            .get("accounts.work.model_context_windows.small")
+            .unwrap()
+            .as_integer(),
+        Some(1000)
     );
     assert_eq!(
-        config.get("provider.limits.requests").unwrap().as_integer(),
-        Some(5)
+        config
+            .get("accounts.work.model_context_windows.large")
+            .unwrap()
+            .as_integer(),
+        Some(5000)
     );
     assert_eq!(
-        config.origin("provider.retries"),
+        config.origin("accounts.work.timeout_ms"),
         Some(sandbox.global().as_path())
     );
     assert_eq!(
-        config.origin("provider.limits.requests"),
+        config.origin("accounts.work.model_context_windows.large"),
         Some(sandbox.project().as_path())
     );
 }

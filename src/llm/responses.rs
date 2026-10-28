@@ -434,10 +434,10 @@ mod tests {
         let project = root.path().join("project");
         let path = crate::config::project_config_path(&project);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, format!("[providers.subscription]\ntype='chatgpt'\nmodel='account-model'\ncontext_window=10000\nmax_output_tokens=2000\n[providers.subscription.protocols.openai-responses.options]\n{options}")).unwrap();
+        std::fs::write(&path, format!("model='subscription/account-model'\n[accounts.subscription]\nprovider='chatgpt'\nmodels=['account-model']\ndiscovery=false\ncontext_window=10000\nmax_output_tokens=2000\n[accounts.subscription.protocols.openai-responses.options]\n{options}")).unwrap();
         let config =
             crate::config::Config::load(&crate::config::Environment::default(), &project).unwrap();
-        let providers = crate::provider::Providers::from_config(&config).unwrap();
+        let providers = crate::account::Accounts::from_config(&config).unwrap();
         Model::new(
             providers.get("subscription").unwrap().clone(),
             "account-model".into(),

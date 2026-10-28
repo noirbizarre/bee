@@ -12,8 +12,9 @@ use std::fmt;
 
 use serde_json::Value;
 
+use crate::account::Account as Profile;
 use crate::auth::Secret;
-use crate::provider::{Profile, Protocol};
+use crate::provider::Protocol;
 
 /// A normalized, safe-to-display inference failure. Never stores wire values.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, miette::Diagnostic)]
@@ -304,7 +305,7 @@ impl Model {
         };
         if model
             .profile
-            .discovery()
+            .integration()
             .and_then(crate::models::Integration::opencode_root)
             .is_some()
         {
@@ -412,7 +413,7 @@ impl Model {
         )?;
         if self
             .profile
-            .discovery()
+            .integration()
             .and_then(crate::models::Integration::opencode_root)
             .is_some()
         {
@@ -474,7 +475,7 @@ pub(crate) fn request_headers(
         );
     }
     let opencode = profile
-        .discovery()
+        .integration()
         .and_then(crate::models::Integration::opencode_root)
         .is_some();
     if profile.is_copilot() || opencode {

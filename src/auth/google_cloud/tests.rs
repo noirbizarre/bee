@@ -12,7 +12,7 @@ const REFRESH: &str = "fixture-cloud-refresh-secret";
 const KEY: &str = include_str!("../../../tests/fixtures/oidc-test-key.pem");
 
 fn profile(extra: &str) -> Profile {
-    configured_providers(&format!("[providers.work]\ntype='google-cloud'\nmodel='google/gemini-2.5-flash'\ngoogle_cloud={{project='resource-project',location='global'}}\n{extra}"))
+    configured_providers(&format!("model='work/google/gemini-2.5-flash'\n[accounts.work]\nprovider='google-cloud'\nmodels=['google/gemini-2.5-flash']\ngoogle_cloud={{project='resource-project',location='global'}}\n{extra}"))
         .get("work").unwrap().clone()
 }
 
@@ -135,7 +135,7 @@ async fn replacement_credentials_and_changed_targets_cannot_inherit_an_automatic
         "project='resource-project',quota_project='other-quota'",
     ] {
         let other = configured_providers(&format!(
-            "[providers.work]\ntype='google-cloud'\ngoogle_cloud={{{settings}}}"
+            "[accounts.work]\nprovider='google-cloud'\ngoogle_cloud={{{settings}}}"
         ));
         assert!(!reference.matches(other.get("work").unwrap(), Some(&credential)));
         assert!(session.check(other.get("work").unwrap()).is_err());
@@ -254,7 +254,7 @@ async fn explicit_adc_precedes_local_adc_and_explicit_quota_project_precedes_adc
         .env
         .clone()
         .with_variable("CLOUDSDK_CONFIG", local.to_str().unwrap());
-    let profile = configured_providers("[providers.work]\ntype='google-cloud'\ngoogle_cloud={project='resource-project',quota_project='explicit-quota'}").get("work").unwrap().clone();
+    let profile = configured_providers("[accounts.work]\nprovider='google-cloud'\ngoogle_cloud={project='resource-project',quota_project='explicit-quota'}").get("work").unwrap().clone();
     let session = Session::with_http(&profile, &env, Arc::new(Fixture::new()))
         .await
         .unwrap();
@@ -440,7 +440,7 @@ async fn embedded_cloud_inference_requires_a_prepared_matching_session() {
         model.step(&[], &[], &mut |_| {}).await,
         Err(crate::llm::Error::GoogleCloud(_))
     ));
-    let providers = configured_providers("[providers.work]\ntype='google-cloud'");
+    let providers = configured_providers("[accounts.work]\nprovider='google-cloud'");
     let error = Session::with_http(
         providers.get("work").unwrap(),
         &Environment::new(None, None, None),
