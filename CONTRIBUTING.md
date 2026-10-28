@@ -27,8 +27,10 @@ mise exec -- cargo nextest run
 mise exec -- mbx doctor
 ```
 
-These commands and the existing mise tasks use mbx even in a coding agent's
-non-interactive environment. Plain `cargo` in a terminal needs effective mise
+**Mise tasks have mbx built in:** `mise build`, `mise test`, and their explicit
+forms `mise run build` and `mise run test` already route Cargo through mbx; no
+extra `mbx` prefix is needed. The explicit commands above also work in a coding
+agent's non-interactive environment. Plain `cargo` in a terminal needs effective mise
 activation or shims; calling `~/.cargo/bin/cargo` directly bypasses wrapping.
 Installing mbx alone does not enable wrapping. Doctor can warn about a missing
 standalone Cargo shim with native integration; actual build summaries establish
@@ -43,9 +45,18 @@ For the local trial, an uncommitted `.cargo/config.toml` clears an inherited
 compiler wrapper so mbx can cache; it leaves global Cargo settings, build jobs
 and linker flags intact. Other checkouts can opt into the same project-only
 `[build] rustc-wrapper = ""` override after inspecting their existing wrapper.
-An environment-selected `RUSTC_WRAPPER` (including CI's sccache) still wins.
-CI workflows and their cache backends have not been migrated to mbx, and remote
-cache sharing is not configured by this local setup.
+An environment-selected `RUSTC_WRAPPER` still wins and prevents mbx caching.
+
+CI uses `jdx/mr-boxington-action` instead of sccache and rust-cache. Its default
+GitHub `target` payload includes Cargo outputs and registry/git downloads, so
+an additional rust-cache action is unnecessary. Successful main pushes populate
+the cache; same-repository pull requests also save in their own PR scope so
+later runs can reuse the trial cache. Fork pull requests only restore.
+Cross-build jobs retain their
+container-produced target outputs through that payload, while native builds
+also use mbx compiler caching. Publication jobs use `backend: local`, without
+restoring or saving shared compiler outputs. No separate remote cache service
+or local-to-CI cache connection is configured.
 
 Local compiler actions, eligible links, build-script executions and C/C++
 compilations are cached by default. Compilation scheduling, in-flight

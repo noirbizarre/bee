@@ -23,10 +23,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
       - uses: jdx/mise-action@v4
         with:
           cache: true
+      - uses: jdx/mr-boxington-action@v1
+        with:
+          cache-key-suffix: compatibility
+          save-on-pull-request: true
       - name: Install the TCK Python runtime
         run: uv python install 3.14
       - name: Build the agent from the pinned dependencies
