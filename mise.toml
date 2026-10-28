@@ -239,3 +239,29 @@ description = "Run the pinned official ACPv2 TCK with a local fixture provider"
 depends = ["build"]
 raw_args = true
 run = "uv run --no-project python tests/compatibility.py target/debug/bee"
+
+# Opt into the optional upstream Mr Boxington feature without changing the
+# template-owned defaults above. Honor CI's per-job toolchain before stable.
+[tools.rust]
+version = "stable"
+components = ["rustfmt", "clippy"]
+mr_boxington = true
+
+[tools.mr-boxington]
+version = "1.28.0"
+
+[env]
+# Keep the install request lockable while respecting explicit Rust selections
+# and the default dtolnay installs in GitHub Actions (it exports no variable).
+RUSTUP_TOOLCHAIN = """
+{%- if env.RUSTUP_TOOLCHAIN | default(value='', boolean=true) -%}
+{{ env.RUSTUP_TOOLCHAIN }}
+{%- elif env.GITHUB_ACTIONS | default(value='') == 'true' -%}
+{{ exec(command='rustup default') | trim | split(pat=' ') | first }}
+{%- else -%}
+stable
+{%- endif -%}
+"""
+# The trial must not collect caches or move/adopt existing build outputs.
+MBX_GC_AUTO = "0"
+MBX_TARGET_VIEWS = "0"

@@ -25,6 +25,7 @@ homebrew_tap = "noirbizarre/homebrew-tap"
 keywords = "acp,agent,llm,runtime,cli"
 kind = "library-and-binary"
 man_pages = false
+mbx = true
 msrv = true
 msrv_version = "1.88"
 owner = "noirbizarre"
