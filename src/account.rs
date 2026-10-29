@@ -1036,6 +1036,10 @@ impl Reader<'_> {
             None => Vec::new(),
             Some(value) => self.headers(&format!("{key}.headers"), value)?,
         };
+        if definition.id == "ovh" && self.boolean(table, &key, "discovery")? {
+            // OVH's public catalog does not establish this account's inference authority.
+            return Err(self.invalid(&key, "OVHcloud AI Endpoints requires discovery disabled; declare available raw model IDs in models"));
+        }
         if definition.id == "cloudflare" {
             let account_id = table["settings"]["account_id"]
                 .as_str()

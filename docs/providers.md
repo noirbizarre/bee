@@ -20,7 +20,7 @@ bee providers show google-cloud
 These commands inspect definitions independently of configuration, credentials and public Models.dev discovery.
 `bee models providers` instead browses Models.dev. The complete compiled-in inventory is `openai`, `anthropic`,
 `openrouter`, `chatgpt`, `github`, `ollama`, `opencode`, `opencode-go`, `deepseek`, `google-aistudio`, `google-cloud`,
-`groq`, `mistral`, `scaleway`, `xai`, `cloudflare` and generic `custom`. Groq uses `groq` and `GROQ_API_KEY`;
+`groq`, `mistral`, `scaleway`, `xai`, `cloudflare`, `ovh` and generic `custom`. Groq uses `groq` and `GROQ_API_KEY`;
 Grok models belong to `xai`, using `XAI_API_KEY`. DeepSeek uses `DEEPSEEK_API_KEY`, and Mistral uses `MISTRAL_API_KEY`.
 See [provider setup and credentials](index.md#authentication) for endpoints, protocols and vendor-specific facts.
 
@@ -198,6 +198,63 @@ Unsupported explicit prompt-cache controls fail before HTTP. See the official
 
 `bee auth logout scw-work` removes only Bee's stored key for that account, without revoking the remote key or falling
 back to an environment credential. Revoke or rotate the key in Scaleway's console when needed.
+
+## OVHcloud AI Endpoints
+
+The `ovh` provider targets [OVHcloud AI Endpoints][ovh-start], using project-bound API access keys and the shared
+`https://oai.endpoints.kepler.ai.cloud.ovh.net/v1` endpoint. Create a Public Cloud project with a payment method,
+then open **AI & Machine Learning → AI Endpoints → API keys** in the OVHcloud Control Panel and create an access key.
+Keys can have an expiration date; revoke them in the same panel. Shared-project users need the documented project/IAM
+permissions to create keys. These are AI Endpoints keys, not OVH management API application/consumer credentials.
+
+The access key carries the project association; inference needs no separate project ID, account ID or region setting.
+OVH documents the service infrastructure in Gravelines, France. Bee uses the shared service URL, with Chat Completions
+preferred and Responses available explicitly on compatible models.
+
+```toml
+model = "ovh-work/gpt-oss-20b"
+
+[accounts.ovh-work]
+provider = "ovh"
+discovery = false
+models = ["gpt-oss-20b"]
+context_window = 32000
+
+[accounts.ovh-personal]
+provider = "ovh"
+credential = { env = "PERSONAL_OVH_TOKEN" }
+models = ["gpt-oss-20b"]
+context_window = 32000
+
+[profiles.ovh]
+accounts = ["ovh-work", "ovh-personal"]
+model = "ovh-work/gpt-oss-20b"
+```
+
+Set `OVH_AI_ENDPOINTS_ACCESS_TOKEN` for direct environment authentication of `ovh-work`; `ovh-personal` reads its
+separate binding. The example context budget is explicit and conservative; choose one appropriate to your model.
+The documented `gpt-oss-20b` is an example, not a built-in default. Declare the exact model IDs you intend to use.
+Activate the example profile with `BEE_PROFILE=ovh`, or select a qualified account/model through ACP.
+
+```sh
+bee auth login ovh-work
+bee auth login ovh-personal --with-token
+bee auth status ovh-work
+bee auth logout ovh-work
+```
+
+The first login imports the configured environment key; `--with-token` reads one key line from stdin. First-use
+`bee auth login ovh --with-token` can also create a stored-key account, after which you must declare its models.
+Keys go into Bee's private credential store, not TOML. Stored accounts work without the original environment and do
+not fall back to it after rejection or logout. Existing-account login preserves profile membership and model defaults.
+Each account's credentials are independent. Logout removes only Bee's copy; revoke a key remotely in the OVH panel.
+
+Discovery cannot be enabled and endpoint enumeration is unsupported. OVH's [public catalog][ovh-catalog] describes
+models and capabilities, but does not establish account access or select a default. Verify current model capabilities
+there; see [OVH request restrictions](inference.md#ovhcloud-ai-endpoints-requests) for Responses limitations.
+
+[ovh-start]: https://docs.ovhcloud.com/en/guides/public-cloud/ai-machine-learning/ai-endpoints-getting-started.md
+[ovh-catalog]: https://docs.ovhcloud.com/en/guides/public-cloud/ai-machine-learning/ai-endpoints-catalog-api.md
 
 ## Cloudflare AI Gateway
 

@@ -210,6 +210,10 @@ impl InferenceHttp {
                     "https://api.openai.com/v1/responses" => "/responses",
                     "https://api.openai.com/v1/chat/completions" => "/chat/completions",
                     "https://api.anthropic.com/v1/messages" => "/v1/messages",
+                    "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1/chat/completions" => {
+                        "/v1/chat/completions"
+                    }
+                    "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1/responses" => "/v1/responses",
                     _ => ["/responses", "/chat/completions", "/v1/messages"]
                         .into_iter()
                         .find(|suffix| {

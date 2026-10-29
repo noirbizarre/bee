@@ -50,6 +50,10 @@ prefix and Workers AI models retain `@cf/author/model`. Native routing keys do n
 depends on the selected protocol. See [Cloudflare setup](providers.md#cloudflare-ai-gateway) and
 [request restrictions](inference.md#cloudflare-ai-gateway-requests).
 
+OVHcloud AI Endpoints also requires explicit raw `models` and discovery disabled. Endpoint list/refresh operations
+are unsupported for `ovh`. Its separate public catalog is metadata only and cannot grant account availability.
+See [OVH setup](providers.md#ovhcloud-ai-endpoints) for independent project-bound credentials and model selection.
+
 ## ACP and CLI
 
 The ACP picker combines available models across **all active accounts**. Machine values are qualified

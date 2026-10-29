@@ -71,6 +71,31 @@ fn scaleway_rejects_invalid_settings_and_authority_overrides_without_echoing_val
 }
 
 #[test]
+fn ovh_accounts_keep_independent_keys_and_explicit_models_without_inventing_project_settings() {
+    let providers = load("[accounts.work]\nprovider='ovh'\nmodels=['gpt-oss-20b']\n[accounts.personal]\nprovider='ovh'\ncredential={env='PERSONAL_OVH_TOKEN'}\nprotocol='openai-responses'\nmodels=['gpt-oss-120b']").unwrap();
+    let work = providers.get("work").unwrap();
+    let personal = providers.get("personal").unwrap();
+    assert!(!work.discovery());
+    assert!(work.settings().is_empty());
+    assert_ne!(work.credential(), personal.credential());
+    assert_ne!(work.models(), personal.models());
+    assert!(providers.configured_model().is_none());
+    assert_eq!(personal.protocol(), Protocol::OpenAiResponses);
+    assert_eq!(
+        personal.base_url(),
+        "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1"
+    );
+    for invalid in [
+        "discovery=true",
+        "settings={project='private-project'}",
+        "protocol='anthropic-messages'",
+    ] {
+        let error = load(&format!("[accounts.work]\nprovider='ovh'\n{invalid}")).unwrap_err();
+        assert!(!format!("{error:?} {error}").contains("private-project"));
+    }
+}
+
+#[test]
 fn cloudflare_accounts_derive_private_protocol_targets_without_discovery_or_defaults() {
     let providers = load("[accounts.work]\nprovider='cloudflare'\nsettings={account_id='work-account',gateway_id='work-gateway'}\nmodels=['anthropic/model']\n[accounts.personal]\nprovider='cloudflare'\nsettings={account_id='personal-account',gateway_id='personal-gateway'}\ncredential={env='PERSONAL_CLOUDFLARE_TOKEN'}").unwrap();
     let work = providers.get("work").unwrap();
@@ -180,6 +205,7 @@ fn every_registered_type_has_unique_identity_and_resolves_its_native_defaults() 
             "opencode",
             "opencode-go",
             "openrouter",
+            "ovh",
             "scaleway",
             "xai"
         ]
@@ -200,6 +226,7 @@ fn native_defaults_preserve_protocol_preferences_and_environment_sources() {
         ("groq", Protocol::OpenAiChat, "GROQ_API_KEY"),
         ("mistral", Protocol::OpenAiChat, "MISTRAL_API_KEY"),
         ("scaleway", Protocol::OpenAiChat, "SCW_SECRET_KEY"),
+        ("ovh", Protocol::OpenAiChat, "OVH_AI_ENDPOINTS_ACCESS_TOKEN"),
         ("xai", Protocol::OpenAiResponses, "XAI_API_KEY"),
         ("opencode", Protocol::OpenAiChat, "OPENCODE_API_KEY"),
         ("opencode-go", Protocol::OpenAiChat, "OPENCODE_GO_API_KEY"),
@@ -308,6 +335,19 @@ fn native_protocol_destinations_preserve_vendor_and_offering_boundaries() {
             vec![
                 ("openai-chat", "https://api.groq.com/openai/v1"),
                 ("openai-responses", "https://api.groq.com/openai/v1"),
+            ],
+        ),
+        (
+            "ovh",
+            vec![
+                (
+                    "openai-chat",
+                    "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1",
+                ),
+                (
+                    "openai-responses",
+                    "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1",
+                ),
             ],
         ),
         (

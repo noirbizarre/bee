@@ -536,6 +536,33 @@ pub fn definitions() -> &'static [Definition] {
                 },
             },
             Definition {
+                id: "ovh",
+                label: "OVHcloud AI Endpoints",
+                methods: &[AuthMethod::ApiKey],
+                fields: KEY_FIELDS,
+                defaults: || {
+                    native(
+                        defaults(
+                            "OVHcloud AI Endpoints",
+                            None,
+                            Some("OVH_AI_ENDPOINTS_ACCESS_TOKEN"),
+                            &[
+                                (
+                                    "openai-chat",
+                                    "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1",
+                                ),
+                                (
+                                    "openai-responses",
+                                    "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1",
+                                ),
+                            ],
+                        ),
+                        false,
+                        None,
+                    )
+                },
+            },
+            Definition {
                 id: "mistral",
                 label: "Mistral",
                 methods: &[AuthMethod::ApiKey],

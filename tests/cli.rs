@@ -107,13 +107,21 @@ fn scaleway_missing_keys_and_browser_options_fail_before_publishing_configuratio
     }
 }
 
-#[test]
+#[rstest::rstest]
+#[case(
+    "cloudflare",
+    "settings={account_id='work-account',gateway_id='work-gateway'}\n"
+)]
+#[case("ovh", "")]
 #[cfg(unix)] // Production credential storage deliberately requires Unix private-file guarantees.
-fn cloudflare_environment_login_is_account_bound_and_logout_never_falls_back_to_environment() {
+fn native_environment_login_is_account_bound_and_logout_never_falls_back_to_environment(
+    #[case] provider: &str,
+    #[case] settings: &str,
+) {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("xdg/bee/config.toml");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(&path, "[accounts.work]\nprovider='cloudflare'\nsettings={account_id='work-account',gateway_id='work-gateway'}\ncredential={env='WORK_TOKEN'}\n[accounts.personal]\nprovider='cloudflare'\nsettings={account_id='personal-account',gateway_id='personal-gateway'}\ncredential={env='PERSONAL_TOKEN'}\n").unwrap();
+    std::fs::write(&path, format!("[accounts.work]\nprovider='{provider}'\n{settings}credential={{env='WORK_TOKEN'}}\n[accounts.personal]\nprovider='{provider}'\n{settings}credential={{env='PERSONAL_TOKEN'}}\n")).unwrap();
     for (account, variable, token) in [
         ("work", "WORK_TOKEN", "private-work-token"),
         ("personal", "PERSONAL_TOKEN", "private-personal-token"),
@@ -141,6 +149,40 @@ fn cloudflare_environment_login_is_account_bound_and_logout_never_falls_back_to_
         .stdout(predicate::str::contains("no stored credential"));
     isolated(root.path())
         .args(["auth", "status", "personal"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("stored credential present"));
+}
+
+#[test]
+#[cfg(unix)]
+fn ovh_stdin_login_rejects_empty_tokens_and_preserves_existing_account_membership() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("xdg/bee/config.toml");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let original = "[accounts.work]\nprovider='ovh'\nenabled=false\nmodels=['gpt-oss-20b']\n[profiles.default]\naccounts=[]\n";
+    std::fs::write(&path, original).unwrap();
+    isolated(root.path())
+        .args(["auth", "login", "work", "--with-token"])
+        .write_stdin("\n")
+        .assert()
+        .failure()
+        .stdout(predicate::str::is_empty());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    assert!(!root.path().join("data/bee/credentials.json").exists());
+    isolated(root.path())
+        .args(["auth", "login", "work", "--with-token"])
+        .write_stdin("private-ovh-token\n")
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("private-ovh-token").not());
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(!text.contains("private-ovh-token"));
+    assert!(text.contains("enabled=false"));
+    assert!(text.contains("accounts=[]"));
+    isolated(root.path())
+        .args(["auth", "status", "work"])
         .assert()
         .success()
         .stdout(predicate::str::contains("stored credential present"));

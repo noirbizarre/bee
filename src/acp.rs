@@ -36,6 +36,8 @@ mod google_cloud_tests;
 #[cfg(all(test, unix))]
 mod oauth_tests;
 #[cfg(test)]
+mod ovh_tests;
+#[cfg(test)]
 mod scaleway_tests;
 
 #[cfg(all(test, unix))]

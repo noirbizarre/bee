@@ -271,6 +271,7 @@ Shipped providers, with the variable each reads its key from:
 | `groq` | Groq | `openai-chat`, `openai-responses` | `GROQ_API_KEY` |
 | `mistral` | Mistral | `openai-chat` | `MISTRAL_API_KEY` |
 | `scaleway` | Scaleway | `openai-chat` (serverless Generative APIs) | `SCW_SECRET_KEY` |
+| `ovh` | OVHcloud AI Endpoints | `openai-chat`, `openai-responses` | `OVH_AI_ENDPOINTS_ACCESS_TOKEN` |
 | `xai` | xAI | `openai-responses`, `openai-chat` | `XAI_API_KEY` |
 | `ollama` | Ollama | `openai-chat`, local server | none |
 
@@ -296,6 +297,15 @@ Run `bee auth login scaleway` to import `SCW_SECRET_KEY` or paste a key interact
 optional `settings.project_id` scopes its URL to a project UUID. Optional `settings.region` accepts only Paris (`fr-par`)
 and uses the same global host. Declare Chat models and their context budgets; discovery is opt-in.
 See [Scaleway setup, named accounts and permissions](providers.md#scaleway-generative-apis).
+
+### Use OVHcloud AI Endpoints
+
+Create a project-bound AI Endpoints access key in the OVHcloud Control Panel, then configure `provider = "ovh"` and
+explicit raw `models`. Bee reads `OVH_AI_ENDPOINTS_ACCESS_TOKEN`; `bee auth login ACCOUNT` imports that binding into
+private storage, or use `bee auth login ACCOUNT --with-token` to read a key from stdin. The shared inference endpoint
+needs no project/region fields. Chat is preferred; Responses is explicitly selectable and model-dependent. Discovery
+must remain disabled. See [setup and multiple accounts](providers.md#ovhcloud-ai-endpoints) and
+[request restrictions](inference.md#ovhcloud-ai-endpoints-requests).
 
 ### Use Cloudflare AI Gateway
 
