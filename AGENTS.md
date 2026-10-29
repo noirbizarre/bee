@@ -9,8 +9,8 @@ A minimal, headless Rust agent runtime implementing ACPv2.
 Bee is the agent side of an ACPv2 connection: the agentic loop and LLM provider
 integration, usable with any ACPv2 client. It is **not** an orchestration
 platform, has no UI of its own, and is not tied to Hive or any one client. MCP
-servers come from ACP client attachments or project `.agents/mcp.toml` and
-single-server `.agents/mcp.d/*.toml`, with Claude `.mcp.json` fallback. Direct
+servers come from ACP client attachments or project `.agents/mcp.toml`,
+with Claude `.mcp.json` fallback. Direct
 stdio/Streamable HTTP connections are session-owned, with separate default-ask
 launch/connect and tool-call policy. Configuration never launches servers;
 cancelled/retired owners drain before terminal idle. Client-hosted ACP MCP retains

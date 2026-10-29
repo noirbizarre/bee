@@ -11,8 +11,8 @@ is the project root; without a marker, the session's working directory is the ro
 through the session directory. It does not search above the project root. This traversal is independent of configuration
 loading of `.config/bee.toml`, which still uses the launch directory only.
 `.agents/` is Bee's canonical project agent-resource directory.
-[Project MCP configuration](mcp.md) uses the same root boundary and separate
-`.agents/mcp.toml`/`.agents/mcp.d/` sources; `.agents/skills/` is reserved for standard Agent Skills.
+[Project MCP configuration](mcp.md) uses the same root boundary and a separate
+`.agents/mcp.toml` source; `.agents/skills/` is reserved for standard Agent Skills.
 
 `~/.agents/AGENTS.md` supplies additional user instructions alongside the built-in system prompt. Without a usable home
 directory, user-level discovery is disabled; Windows falls back from absent or empty `HOME` to `USERPROFILE`.

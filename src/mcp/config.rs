@@ -394,7 +394,7 @@ fn read(path: &Path, root: &Path) -> Result<String, Error> {
     if content.len() > super::MAX_BYTES {
         return Err(error(
             path,
-            "MCP source exceeds 1 MiB; split or simplify definitions",
+            "MCP source exceeds 1 MiB; simplify definitions",
         ));
     }
     Ok(content)
@@ -420,155 +420,75 @@ pub fn discover(cwd: &Path, environment: &Environment) -> Result<Vec<Definition>
             "cannot resolve project root; use an accessible session directory",
         )
     })?;
-    let mut paths = Vec::new();
-    let aggregate = root.join(".agents/mcp.toml");
-    if present(&aggregate)? {
-        paths.push(aggregate);
+    let canonical = root.join(".agents/mcp.toml");
+    // One canonical source makes fallback independent of unrelated resource files.
+    let claude = !present(&canonical)?;
+    let path = if claude {
+        root.join(".mcp.json")
+    } else {
+        canonical
+    };
+    if !present(&path)? {
+        return Ok(Vec::new());
     }
-    let fragments = root.join(".agents/mcp.d");
-    if present(&fragments)?
-        && !fragments
-            .canonicalize()
-            .map_err(|_| {
-                error(
-                    &fragments,
-                    "cannot resolve MCP drop-in directory; fix access or symlinks",
-                )
-            })?
-            .starts_with(&root)
-    {
-        return Err(error(
-            &fragments,
-            "MCP drop-in directory escapes the project root; move it inside the project",
-        ));
-    }
-    match std::fs::read_dir(&fragments) {
-        Ok(entries) => {
-            for (index, entry) in entries.enumerate() {
-                if index >= 256 {
-                    return Err(error(
-                        &fragments,
-                        "MCP drop-in directory exceeds 256 entries; remove unrelated files",
-                    ));
-                }
-                let path = entry
-                    .map_err(|_| error(&fragments, "cannot enumerate MCP drop-ins; check access"))?
-                    .path();
-                if path.extension().is_some_and(|e| e == "toml") {
-                    paths.push(path);
-                }
-                if paths.len() > 32 {
-                    return Err(error(
-                        &fragments,
-                        "too many MCP sources; use at most 32 files",
-                    ));
-                }
-            }
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => {
-            return Err(error(
-                &fragments,
-                "cannot read MCP drop-in directory; check access",
-            ));
-        }
-    }
-    paths.sort();
-    let claude = paths.is_empty();
-    if claude {
-        let path = root.join(".mcp.json");
-        if present(&path)? {
-            paths.push(path);
-        }
-    }
-    let mut definitions: BTreeMap<String, Definition> = BTreeMap::new();
-    let mut bytes = 0;
-    for path in paths {
-        let content = read(&path, &root)?;
-        bytes += content.len();
-        if bytes > super::MAX_BYTES {
+    let mut definitions = Vec::new();
+    let content = read(&path, &root)?;
+    let servers = if claude {
+        let Unique(mut value) = serde_json::from_str(&content).map_err(|_| {
+            error(
+                &path,
+                "invalid Claude JSON or duplicate keys; use a unique mcpServers object",
+            )
+        })?;
+        if value
+            .as_object()
+            .is_none_or(|v| v.len() != 1 || !v.contains_key("mcpServers"))
+        {
             return Err(error(
                 &path,
-                "combined MCP sources exceed 1 MiB; simplify definitions",
+                "Claude fallback requires only a mcpServers envelope",
             ));
         }
-        let servers = if claude {
-            let Unique(mut value) = serde_json::from_str(&content).map_err(|_| {
+        serde_json::from_value::<BTreeMap<String, Raw>>(value["mcpServers"].take()).map_err(
+            |_| {
                 error(
                     &path,
-                    "invalid Claude JSON or duplicate keys; use a unique mcpServers object",
+                    "invalid Claude server fields; use supported stdio or HTTP settings",
                 )
-            })?;
-            if value
-                .as_object()
-                .is_none_or(|v| v.len() != 1 || !v.contains_key("mcpServers"))
-            {
-                return Err(error(
-                    &path,
-                    "Claude fallback requires only a mcpServers envelope",
-                ));
-            }
-            serde_json::from_value::<BTreeMap<String, Raw>>(value["mcpServers"].take()).map_err(
-                |_| {
-                    error(
-                        &path,
-                        "invalid Claude server fields; use supported stdio or HTTP settings",
-                    )
-                },
-            )?
-        } else {
-            toml::from_str::<File>(&content)
+            },
+        )?
+    } else {
+        toml::from_str::<File>(&content)
                 .map_err(|_| {
                     error(
                         &path,
-                        "invalid MCP TOML; use unique servers tables and supported fields",
+                        "invalid or duplicate MCP TOML definition; use unique servers tables and supported fields",
                     )
                 })?
                 .servers
-        };
-        if !claude && path.parent() == Some(fragments.as_path()) && servers.len() != 1 {
+    };
+    for (id, raw) in servers {
+        if id.is_empty()
+            || id.len() > 128
+            || !id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+        {
             return Err(error(
                 &path,
-                "each MCP drop-in must define exactly one servers entry",
+                "invalid server identifier; use 1-128 ASCII letters, digits, dots, underscores or hyphens",
             ));
         }
-        for (id, raw) in servers {
-            if id.is_empty()
-                || id.len() > 128
-                || !id
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
-            {
-                return Err(error(
-                    &path,
-                    "invalid server identifier; use 1-128 ASCII letters, digits, dots, underscores or hyphens",
-                ));
-            }
-            if let Some(previous) = definitions.get(&id) {
-                // Both source paths are safe locators; never quote arbitrary configuration keys.
-                return Err(Error {
-                    path: PathBuf::from(format!(
-                        "{} (also {})",
-                        path.display(),
-                        previous.source.display()
-                    )),
-                    reason: "duplicate server identifier; declare each server once",
-                });
-            }
-            let transport = normalize(raw, &root, environment, &path, claude)?;
-            definitions.insert(
-                id.clone(),
-                Definition {
-                    id,
-                    root: root.clone(),
-                    source: path.clone(),
-                    transport,
-                },
-            );
-            if definitions.len() > 32 {
-                return Err(error(&path, "too many MCP servers; configure at most 32"));
-            }
+        let transport = normalize(raw, &root, environment, &path, claude)?;
+        definitions.push(Definition {
+            id,
+            root: root.clone(),
+            source: path.clone(),
+            transport,
+        });
+        if definitions.len() > 32 {
+            return Err(error(&path, "too many MCP servers; configure at most 32"));
         }
     }
-    Ok(definitions.into_values().collect())
+    Ok(definitions)
 }

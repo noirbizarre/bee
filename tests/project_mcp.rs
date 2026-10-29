@@ -6,7 +6,7 @@ use bee::{
 
 fn project() -> tempfile::TempDir {
     let root = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(root.path().join(".agents/mcp.d")).unwrap();
+    std::fs::create_dir_all(root.path().join(".agents")).unwrap();
     root
 }
 fn http(id: &str) -> String {
@@ -14,11 +14,19 @@ fn http(id: &str) -> String {
 }
 
 #[test]
-fn canonical_toml_aggregate_and_sorted_single_server_drop_ins_compose() {
+fn canonical_toml_defines_all_servers_and_ignores_unrelated_resource_files() {
     let root = project();
-    std::fs::write(root.path().join(".agents/mcp.toml"), http("a")).unwrap();
-    std::fs::write(root.path().join(".agents/mcp.d/z.toml"), http("z")).unwrap();
-    std::fs::write(root.path().join(".agents/mcp.d/b.toml"), http("b")).unwrap();
+    std::fs::write(
+        root.path().join(".agents/mcp.toml"),
+        format!("{}{}{}", http("z"), http("a"), http("b")),
+    )
+    .unwrap();
+    std::fs::create_dir(root.path().join(".agents/mcp.d")).unwrap();
+    std::fs::write(
+        root.path().join(".agents/mcp.d/ignored.toml"),
+        "invalid = [",
+    )
+    .unwrap();
     // JSON is deliberately not a canonical Bee source.
     std::fs::write(root.path().join(".agents/mcp.json"), "not JSON").unwrap();
     let definitions = discover(root.path(), &Environment::default()).unwrap();
@@ -32,7 +40,7 @@ fn canonical_toml_aggregate_and_sorted_single_server_drop_ins_compose() {
 }
 
 #[test]
-fn canonical_files_suppress_claude_fallback_even_when_empty_or_invalid() {
+fn the_canonical_file_suppresses_claude_fallback_even_when_empty_or_invalid() {
     let root = project();
     std::fs::write(
         root.path().join(".mcp.json"),
@@ -57,34 +65,37 @@ fn canonical_files_suppress_claude_fallback_even_when_empty_or_invalid() {
 }
 
 #[test]
-fn duplicates_name_both_sources_without_echoing_identifiers() {
+fn duplicate_server_tables_are_rejected_without_echoing_identifiers() {
     let root = project();
     std::fs::write(
         root.path().join(".agents/mcp.toml"),
-        http("private_sentinel"),
-    )
-    .unwrap();
-    std::fs::write(
-        root.path().join(".agents/mcp.d/second.toml"),
-        http("private_sentinel"),
+        format!("{}{}", http("private_sentinel"), http("private_sentinel")),
     )
     .unwrap();
     let error = discover(root.path(), &Environment::default()).unwrap_err();
     let message = error.to_string();
     assert!(message.contains("duplicate"));
-    assert!(message.contains("mcp.toml") && message.contains("second.toml"));
+    assert!(message.contains("mcp.toml"));
     assert!(!format!("{error:?} {error}").contains("private_sentinel"));
 }
 
 #[test]
-fn each_drop_in_has_exactly_one_definition() {
+fn unrelated_server_files_do_not_suppress_claude_fallback() {
     let root = project();
-    std::fs::write(root.path().join(".agents/mcp.d/empty.toml"), "").unwrap();
-    assert!(
-        discover(root.path(), &Environment::default())
-            .unwrap_err()
-            .to_string()
-            .contains("exactly one")
+    std::fs::create_dir(root.path().join(".agents/mcp.d")).unwrap();
+    std::fs::write(
+        root.path().join(".agents/mcp.d/ignored.toml"),
+        "invalid = [",
+    )
+    .unwrap();
+    std::fs::write(
+        root.path().join(".mcp.json"),
+        r#"{"mcpServers":{"fallback":{"type":"http","url":"https://example.test"}}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        discover(root.path(), &Environment::default()).unwrap()[0].id,
+        "fallback"
     );
 }
 

@@ -10,22 +10,19 @@ The project root is the nearest ancestor of the session cwd containing a `.git`
 directory or worktree marker file. Without one, the session cwd is the root.
 Bee reads:
 
-1. `<root>/.agents/mcp.toml`, containing zero or more servers.
-2. `<root>/.agents/mcp.d/*.toml`, sorted, immediate children only, with exactly
-   one server per file. Filenames are arbitrary; the explicit `servers.KEY`
-   determines the stable identifier.
-3. `<root>/.mcp.json` as a Claude compatibility fallback **only when no canonical
-   TOML files exist**. Its envelope is `mcpServers`.
+1. `<root>/.agents/mcp.toml`, containing all project servers. Each `servers.KEY`
+   determines a stable server identifier.
+2. `<root>/.mcp.json` as a Claude compatibility fallback **only when the canonical
+   TOML file is absent**. Its envelope is `mcpServers`.
 
-Canonical files compose a single set. There is no override order: duplicate
-identifiers fail with both source locations. An empty canonical file suppresses
-fallback; malformed or unreadable canonical files never trigger fallback. An
-empty drop-in directory does not suppress it. `.agents/mcp.json` is not a Bee
-configuration source. Identifiers use 1–128 ASCII letters, digits, `.`, `_` or `-`.
+Duplicate identifiers are errors. An empty canonical file suppresses fallback;
+malformed or unreadable canonical configuration never triggers fallback.
+`.agents/mcp.json` is not a Bee configuration source. Identifiers use 1–128 ASCII
+letters, digits, `.`, `_` or `-`.
 
-Files must be regular UTF-8 files resolving inside the project root, with at most
-32 canonical files, 256 directory entries, 32 combined project/client servers and
-1 MiB of combined source text. Config symlinks escaping the root are rejected.
+The selected source must be a regular UTF-8 file resolving inside the project root,
+with at most 32 combined project/client servers and 1 MiB of source text.
+Config symlinks escaping the root are rejected.
 Checks do not isolate against concurrent filesystem replacement.
 
 ## TOML configuration
@@ -51,13 +48,12 @@ url = "https://mcp.example.test/mcp"
 Authorization = { env = "DOCS_MCP_AUTHORIZATION" }
 ```
 
-The same `servers` envelope is used in a one-server drop-in, such as
-`.agents/mcp.d/docs.toml`. Transport type is required. Unknown fields and fields
-belonging to another transport are errors.
+All servers belong in this file under the `servers` envelope. Transport type is
+required. Unknown fields and fields belonging to another transport are errors.
 
 Stdio commands are executables, not shell commands. Bee resolves bare names on
 its injected PATH before approval; relative executable paths and `cwd` resolve
-against the project root, including for drop-ins. Default cwd is the project
+against the project root. Default cwd is the project
 root. Arguments are literal strings. No shell, tilde, command substitution or
 dotenv expansion occurs.
 

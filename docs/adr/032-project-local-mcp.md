@@ -8,8 +8,8 @@ ADR-015, while retaining its client-hosted authorization contract.
 
 ## Context
 
-Issue #19 needs portable project-local definitions, independently configured
-servers, secret references and explicit consent. Issue #70 tracks the direct
+Issue #19 needs portable project-local server definitions, secret references
+and explicit consent. Issue #70 tracks the direct
 stdio/HTTP attachment runtime needed to execute those definitions. Parsing files
 alone would provide no usable server. The current typed SDK response union also
 loses extensions and explicit-null error data if round-tripped through its types.
@@ -18,8 +18,8 @@ loses extensions and explicit-null error data if round-tripped through its types
 
 - Use `.agents/` for project agent resources; reserve `.agents/skills/` for
   standard Agent Skills. Share the nearest-Git-marker root rule with instructions.
-- Use TOML-only `.agents/mcp.toml` and single-server `.agents/mcp.d/*.toml`, with
-  a `servers` envelope. Use `.mcp.json`/`mcpServers` only as whole-project fallback.
+- Use TOML-only `.agents/mcp.toml` with a `servers` envelope for all project servers.
+  Use `.mcp.json`/`mcpServers` only as whole-project fallback.
   Reject duplicate IDs rather than assembling executable settings by precedence.
 - Normalize definitions without launching anything. Resolve explicit whole-value
   env references, freeze private effective settings, redact Debug/diagnostics,
@@ -45,9 +45,9 @@ must handle the connection permission-subject extension. Sessions can keep
 healthy processes alive between prompts; history is not authorization to restore
 them after restart.
 
-A single TOML convention avoids speculative format proliferation; Claude JSON
+A single TOML source avoids speculative format proliferation; Claude JSON
 is a concrete compatibility exception. Strict duplicate errors prevent silent
-shadowing at the cost of requiring users to resolve conflicting files. There is
+shadowing at the cost of requiring users to resolve conflicting definitions. There is
 no registry, UI, filesystem watcher, MCP OAuth or generic plugin framework.
 
 See [MCP configuration](../mcp.md), `tests/project_mcp.rs`,

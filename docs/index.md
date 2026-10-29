@@ -28,8 +28,8 @@ using each session's working directory.
 Client-hosted MCP tools are discovered and invoked through ACPv2's `session.mcp.acp` transport alongside the native
 catalog. The client supplies server attachments and enforces permissions. See [tools](tools.md) for the contracts,
 execution context and supported MCP subset.
-Bee also supports [project-local MCP definitions](mcp.md) in `.agents/mcp.toml`
-and single-server `.agents/mcp.d/*.toml`, plus direct stdio/Streamable HTTP
+Bee also supports [project-local MCP definitions](mcp.md) in `.agents/mcp.toml`,
+plus direct stdio/Streamable HTTP
 attachments. Direct connections and tool calls require separate consent by default.
 Native Bash and mutation calls request client permission by default; read-only tools
 run directly. [Ordered permission rules](tools.md#native-permission-rules) can allow,
