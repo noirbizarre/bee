@@ -105,7 +105,8 @@ clap = { version = "4", features = ["derive", "env", "wrap_help"] }
 # from `cargo update`. Only the `acp` boundary imports this crate; see ADR-001.
 #
 # `stdio` is the SDK's native stdin/stdout transport (ADR-003).
-agent-client-protocol = { version = "=3.5.0", features = ["stdio", "unstable_protocol_v2", "unstable_mcp_over_acp"] }
+# `process` owns local outbound delegates, including child guards and stderr draining.
+agent-client-protocol = { version = "=3.5.0", features = ["stdio", "process", "unstable_protocol_v2", "unstable_mcp_over_acp"] }
 
 # SDK task cancellation and stream combinators. Tokio supplies model I/O's
 # reactor in the binary; the ACP transport itself stays runtime-agnostic.
@@ -175,9 +176,6 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 rsa = { version = "0.9", features = ["pem"] }
 # Human interaction deadlines are tested without waiting five real minutes.
 tokio = { version = "1", features = ["test-util"] }
-# Exercise the official client against a subprocess without adding process
-# launching support to Bee's production SDK dependency.
-agent-client-protocol = { version = "=3.5.0", features = ["process"] }
 # The client side of the MCP-over-ACP spike (tests/mcp.rs, ADR-002). The SDK core
 # has no tool builder, so a test client needs this companion crate to host a tool.
 # Exact pin and the same two features as the SDK, for the same reason: the draft

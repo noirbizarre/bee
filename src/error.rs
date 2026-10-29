@@ -151,6 +151,10 @@ pub enum Error {
     #[error(transparent)]
     #[diagnostic(transparent)]
     Tool(#[from] crate::tool::Error),
+    /// Outbound client errors retain classifications rather than peer-controlled text.
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    AcpClient(#[from] crate::acp::client::Error),
     /// The ACPv2 connection ended with an error.
     // Holds the SDK error's text, not the SDK error: this module must not
     // import the SDK, or an upgrade would leak out of `acp.rs` (ADR-001).

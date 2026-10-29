@@ -13,6 +13,12 @@ configuration and orchestration are the client's concern, reached through the
 ACPv2 client-agent contract. Do not propose a TUI, a web frontend, a plugin
 framework or a provider abstraction ahead of a concrete need.
 
+The library's `acp::client` boundary also controls explicitly selected `[agents.NAME]` local stdio delegates using
+the pinned SDK client/process APIs, scoped ownership, bounded prompt results and host-provided structured interactions.
+Configuration loading never launches delegates. Outbound diagnostics exclude executable settings and child stderr.
+The client requires wire-v2 sessions, negotiates form/URL modes from installed handlers, and waits for both prompt
+acceptance and foreground idle. Normal shutdown closes sessions; future-drop cleanup uses SDK process guards.
+
 Bee serves ACPv2 over stdio and implements the baseline session lifecycle
 (new, list, resume, close, prompt, cancel) with streaming Chat Completions, Responses
 and Anthropic Messages inference. Production sessions and successful context are durable, with explicit model-aware

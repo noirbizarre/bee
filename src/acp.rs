@@ -23,6 +23,7 @@ use crate::account::Accounts as Providers;
 use crate::session::{SessionError, Sessions, Settings};
 use crate::{Error, Result};
 
+pub mod client;
 mod interactions;
 mod mcp;
 mod plans;

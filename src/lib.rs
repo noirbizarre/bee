@@ -57,6 +57,7 @@ mod test_support;
 /// malformed or conflicts with another layer, a provider error if a provider
 /// profile is invalid, [`Error::AgentSetting`] if turn limits are invalid,
 /// [`Error::BashSetting`] if Bash policy is invalid,
+/// [`Error::AcpClient`] if a named delegate definition is invalid,
 /// [`Error::History`] if private durable session storage is unavailable,
 /// [`Error::Tool`] if the shipped catalog cannot register, [`Error::Io`] if the working
 /// directory cannot be determined, and [`Error::Connection`] if the connection
@@ -72,6 +73,8 @@ pub fn run() -> Result<()> {
     })?;
     let environment = config::Environment::from_process();
     let config = config::Config::load(&environment, &project_dir)?;
+    // Validate unused delegates too, without granting configuration a launch side effect.
+    let _agents = acp::client::config::Agents::from_config(&config)?;
     // Validated here for the same reason: a typo in a base URL must stop the
     // launch, not surface as a connection error on the first prompt (ADR-007).
     let providers = account::Accounts::from_config(&config)?;

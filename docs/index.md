@@ -37,6 +37,9 @@ ask or deny native operations, with project-only tightening. Form-capable client
 See the [ACP / ACPv2 compatibility matrix](compatibility.md) for the complete versioned feature inventory,
 supported subsets, planned and not-planned features, implementation evidence and pinned interoperability results.
 
+The Rust library also provides an [outbound ACPv2 client](acp-client.md) for explicitly selected named local agents,
+with scoped stdio process ownership and structured host permission/elicitation handlers.
+
 Bee loads project and nested `AGENTS.md` instructions, additive `~/.agents/AGENTS.md`, and standard Agent Skills from
 project/user `.agents/skills` directories. Additional skill roots use `[skills] extra_roots = ["/opt/team/skills"]` in the
 normal configuration hierarchy. See [project instructions and skills](instructions.md) for scope, precedence and loading.
