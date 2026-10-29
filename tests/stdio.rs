@@ -1354,7 +1354,7 @@ fn pending_inference_can_be_stopped_over_stdio_and_the_session_recovers(#[case] 
     let initialized = agent.recv();
     assert_eq!(
         initialized["result"]["capabilities"],
-        json!({"session":{"mcp":{"acp":{}}}})
+        json!({"session":{"mcp":{"acp":{},"stdio":{},"http":{}}}})
     );
     agent
         .send(&json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":root.path()}}));
@@ -1930,7 +1930,7 @@ fn an_initialize_over_stdio_is_answered_with_the_bee_identity() {
 }
 
 #[test]
-fn the_initialize_response_advertises_sessions_and_only_acp_mcp_transport() {
+fn the_initialize_response_advertises_all_implemented_mcp_transports() {
     let mut agent = Agent::spawn();
 
     let response = agent.initialize(1);
@@ -1938,7 +1938,7 @@ fn the_initialize_response_advertises_sessions_and_only_acp_mcp_transport() {
     // Capabilities promise implemented behavior, including the exact MCP transport.
     assert_eq!(
         response["result"]["capabilities"]["session"],
-        json!({"mcp":{"acp":{}}})
+        json!({"mcp":{"acp":{},"http":{},"stdio":{}}})
     );
     agent.finish();
 }

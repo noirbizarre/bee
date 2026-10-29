@@ -4,6 +4,8 @@
 
 Accepted. Extends ADR-002's feasibility spike and the tool-executor seam in ADR-012;
 updates ADR-001's single-file boundary and ADR-004's initial capability subset.
+The ACP-only transport and dev-only rmcp restrictions are superseded by
+[ADR-032](032-project-local-mcp.md); client-hosted execution retains this contract.
 
 ## Context
 

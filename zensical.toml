@@ -28,6 +28,7 @@ nav = [
   { "Profiles" = "profiles.md" },
   { "Providers" = "providers.md" },
   { "Tools" = "tools.md" },
+  { "Project MCP servers" = "mcp.md" },
   { "Session history" = "sessions.md" },
   { "Model availability and discovery" = "models.md" },
   { "ACP / ACPv2 compatibility" = "compatibility.md" },

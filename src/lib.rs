@@ -23,6 +23,7 @@ pub mod http;
 pub mod instructions;
 pub mod llm;
 pub mod login;
+pub mod mcp;
 pub mod models;
 pub mod permissions;
 mod plan;
@@ -66,7 +67,7 @@ pub fn run() -> Result<()> {
     // Loaded before the first byte of protocol traffic so a bad file fails the
     // launch with a diagnostic on stderr, where the user sees it, rather than
     // surfacing mid-session. Project configuration is read from the launch
-    // directory only; per-session loading waits for a consumer (ADR-006).
+    // directory only. Project MCP resources have their own per-session loader.
     let project_dir = std::env::current_dir().map_err(|source| Error::Io {
         path: ".".to_owned(),
         source,
@@ -86,6 +87,7 @@ pub fn run() -> Result<()> {
     let history = history::Store::from_environment(&environment)?;
     let preferences = selection::Store::open(&history)?;
     let runtime_options = acp::Runtime::new(agent::Limits::from_config(&config)?, tools)
+        .with_project_mcp(environment.clone())
         .with_permissions(permissions::Settings::from_config(&config, &environment)?)
         .with_history(history)
         .with_preferences(preferences)

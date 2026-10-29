@@ -60,7 +60,9 @@ Try “Reply with a short greeting.” Expect streamed text followed by terminal
 check retained context. Bee's launch directory controls project configuration; session `cwd` controls native tool work.
 
 The client must handle permission requests for Bash and mutations under the default policy. Form and URL elicitation
-are optional negotiated capabilities. MCP servers are configured and hosted by the client, then attached through ACP.
+are optional negotiated capabilities. MCP servers can be client-hosted ACP attachments,
+direct stdio/Streamable HTTP attachments, or [project-local definitions](mcp.md).
+Direct MCP connections and tool calls require separate approval by default.
 
 Running bare `bee` in a terminal waits for protocol input; there is no interactive `bee prompt` command. Closing stdin
 ends the connection successfully. For a credential-free client integration check, launch `bee --scenario success`;
@@ -73,7 +75,8 @@ this exercises a deterministic protocol scenario, not provider inference. See [s
   [unsupported inference features](inference.md).
 - Native tools run on the host with Bee's privileges; there is no sandbox. Bash must be installed for the Bash tool.
   Review [tool execution and permissions](tools.md) for defaults and bounds.
-- Bee does not launch MCP servers itself or implement remote MCP OAuth. Use [client-hosted ACP MCP attachments](tools.md).
+- Direct MCP supports stdio and Streamable HTTP with explicit credentials, but not remote MCP OAuth or legacy SSE.
+  See [MCP setup and consent](mcp.md).
 - The private credential store is currently Unix-only. Environment-backed API credentials and explicit Copilot tokens
   work independently of it; ChatGPT-plan OAuth requires the store.
 - Durable history is private but unencrypted, with no automatic disk expiry. See [session storage and retention](sessions.md).

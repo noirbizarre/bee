@@ -1,4 +1,4 @@
-//! Client-owned MCP tools, reached exclusively through the ACP connection.
+//! Composed client-hosted and explicitly authorized direct MCP tools.
 
 use std::collections::{BTreeMap, HashSet};
 use std::future::Future;
@@ -6,7 +6,6 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use agent_client_protocol::schema::v2;
-use agent_client_protocol::{Client, V2ConnectionTo};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -26,13 +25,15 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(120);
 pub(super) struct Server {
     id: v2::McpServerAcpId,
     name: String,
+    direct: Option<crate::mcp::config::Transport>,
 }
 
 /// This map belongs to one connection, never to a global server registry.
 #[derive(Default)]
 pub(super) struct Bindings {
     pub sessions: BTreeMap<String, Vec<Server>>,
-    next_request: u64,
+    pub next_request: u64,
+    pub direct: std::sync::Arc<crate::mcp::runtime::Manager>,
 }
 
 impl Bindings {
@@ -46,36 +47,227 @@ impl Bindings {
     }
 }
 
-pub(super) fn declarations(servers: Vec<v2::McpServer>) -> Result<Vec<Server>, &'static str> {
+/// Freeze project settings and reconcile ownership before discovering any tools.
+pub(super) async fn prepare(
+    reply: &super::Reply,
+    runtime: &super::Runtime,
+    cwd: &std::path::Path,
+) -> Result<Vec<Server>, super::TurnFailure> {
+    let manager = super::lock(&reply.mcp).direct.clone();
+    let mut servers = reply.servers.clone();
+    if let Some(environment) = &runtime.project_mcp {
+        let discovered = crate::mcp::config::discover(cwd, environment);
+        let definitions = match discovered {
+            Ok(definitions) => definitions,
+            Err(error) => {
+                manager.finish(&reply.id, true).await;
+                return Err(super::TurnFailure::new(error.to_string()));
+            }
+        };
+        for definition in definitions {
+            let id = serde_json::to_string(&("project", definition.root, &definition.id))
+                .expect("identity is JSON");
+            servers.push(Server {
+                id: id.into(),
+                name: format!("project/{}", definition.id),
+                direct: Some(definition.transport),
+            });
+        }
+    }
     if servers.len() > MAX_SERVERS {
-        return Err("too many MCP servers; attach at most 32 ACP servers");
+        return Err(super::TurnFailure::new(
+            "too many combined MCP servers; configure at most 32",
+        ));
+    }
+    let definitions = servers
+        .iter()
+        .filter_map(|server| {
+            server
+                .direct
+                .clone()
+                .map(|definition| (server.id.to_string(), definition))
+        })
+        .collect();
+    manager.reconcile(&reply.id, &definitions).await;
+    for server in &servers {
+        let Some(definition) = &server.direct else {
+            continue;
+        };
+        let entry = manager
+            .get(&reply.id, &server.id.to_string())
+            .ok_or_else(|| super::TurnFailure::new(crate::mcp::runtime::UNAVAILABLE))?;
+        if entry.ready().await {
+            continue;
+        }
+        let (action, transport, target) = match definition {
+            crate::mcp::config::Transport::Stdio { command, .. } => (
+                "mcp.launch",
+                "stdio",
+                command
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            crate::mcp::config::Transport::Http { url, .. } => (
+                "mcp.connect",
+                "http",
+                reqwest::Url::parse(url)
+                    .map(|u| u.origin().ascii_serialization())
+                    .unwrap_or_default(),
+            ),
+        };
+        let check = crate::permissions::Check::value(
+            action,
+            server.name.clone(),
+            crate::permissions::Effect::Ask,
+        );
+        let allowed = match runtime.permissions.evaluate(&[check], cwd) {
+            crate::permissions::Effect::Allow => true,
+            crate::permissions::Effect::Deny => false,
+            crate::permissions::Effect::Ask => {
+                let subject = serde_json::from_value(json!({"type":"_bee_mcp_connection", "server":server.name, "transport":transport, "target":target, "revision":entry.revision, "scope":"session"}))
+                    .map_err(|_| super::TurnFailure::new("cannot construct MCP permission subject; report this failure"))?;
+                reply
+                    .permission(
+                        subject,
+                        format!("Connect MCP server {} and discover its tools", server.name),
+                    )
+                    .await
+                    .map_err(|_| {
+                        super::TurnFailure::new(
+                            "MCP connection permission cancelled; retry the prompt",
+                        )
+                    })?
+            }
+        };
+        if !allowed {
+            return Err(super::TurnFailure::new(
+                "MCP connection permission denied; approve the server or remove its definition",
+            ));
+        }
+        if !reply.current() || manager.is_closing(&reply.id) {
+            return Err(super::TurnFailure::new(
+                "MCP connection cancelled; retry the prompt",
+            ));
+        }
+        entry.connect().await.map_err(super::TurnFailure::new)?;
+    }
+    Ok(servers)
+}
+
+/// Replacement runs off dispatch, retaining the session mutation reservation.
+pub(super) async fn replace(
+    id: &str,
+    servers: &[Server],
+    cwd: &std::path::Path,
+    project: Option<&crate::config::Environment>,
+    bindings: &super::Mutex<Bindings>,
+    sessions: &super::Mutex<super::Sessions>,
+    tasks: &super::Tasks,
+) -> Result<(), String> {
+    let manager = super::lock(bindings).direct.clone();
+    let mut definitions: BTreeMap<_, _> = servers
+        .iter()
+        .filter_map(|s| s.direct.clone().map(|t| (s.id.to_string(), t)))
+        .collect();
+    if let Some(environment) = project {
+        match crate::mcp::config::discover(cwd, environment) {
+            Ok(project) => {
+                for definition in project {
+                    let id = serde_json::to_string(&("project", definition.root, definition.id))
+                        .expect("identity is JSON");
+                    definitions.insert(id, definition.transport);
+                }
+            }
+            Err(error) => {
+                manager.closing(id);
+                super::lock(sessions).cancel(id);
+                let pending = super::lock(tasks).get(id).cloned();
+                if let Some(pending) = pending {
+                    pending.await;
+                }
+                manager.finish(id, true).await;
+                manager.reopen(id);
+                return Err(error.to_string());
+            }
+        }
+    }
+    if manager.changed(id, &definitions) {
+        manager.closing(id);
+        super::lock(sessions).cancel(id);
+        let pending = super::lock(tasks).get(id).cloned();
+        if let Some(pending) = pending {
+            pending.await;
+        }
+        manager.reconcile(id, &definitions).await;
+    }
+    manager.reopen(id);
+    Ok(())
+}
+
+pub(super) fn declarations(
+    servers: Vec<v2::McpServer>,
+    cwd: &std::path::Path,
+    environment: &crate::config::Environment,
+) -> Result<Vec<Server>, &'static str> {
+    if servers.len() > MAX_SERVERS {
+        return Err("too many MCP servers; attach at most 32 servers");
     }
     let mut ids = HashSet::new();
     servers
         .into_iter()
         .map(|server| {
-            let v2::McpServer::Acp(server) = server else {
-                return Err("unsupported MCP transport; host the server through ACP");
+            let (id, name, direct, namespace) = match server {
+                v2::McpServer::Acp(server) => (server.server_id, server.name, None, "acp"),
+                v2::McpServer::Stdio(server) => {
+                    let command = std::path::PathBuf::from(&server.command);
+                    if !command.is_absolute() || command.as_os_str().to_string_lossy().contains('\0') || server.args.iter().any(|a| a.contains('\0')) {
+                        return Err("invalid MCP executable; use an absolute path and NUL-free arguments");
+                    }
+                    let mut env = crate::mcp::config::baseline(environment);
+                    let mut keys = HashSet::new();
+                    for entry in server.env {
+                        if entry.name.is_empty() || entry.name.contains(['=', '\0']) || entry.value.contains('\0') || !keys.insert(entry.name.clone()) { return Err("invalid MCP environment; use unique valid names and NUL-free values"); }
+                        env.insert(entry.name, entry.value);
+                    }
+                    let id = serde_json::to_string(&("client", "stdio", &server.name)).expect("identity is JSON");
+                    (id.into(), server.name, Some(crate::mcp::config::Transport::Stdio { command, args: server.args, cwd: cwd.into(), env }), "stdio")
+                }
+                v2::McpServer::Http(server) => {
+                    let mut headers = BTreeMap::new();
+                    for entry in server.headers {
+                        if headers.insert(entry.name.to_ascii_lowercase(), entry.value).is_some() { return Err("duplicate MCP header; declare each header once"); }
+                    }
+                    crate::mcp::config::validate_http(&server.url, &headers)?;
+                    let id = serde_json::to_string(&("client", "http", &server.name)).expect("identity is JSON");
+                    (id.into(), server.name, Some(crate::mcp::config::Transport::Http { url: server.url, headers }), "http")
+                }
+                _ => return Err("unsupported MCP transport; use ACP, stdio or Streamable HTTP"),
             };
-            let id = server.server_id.to_string();
-            if id.is_empty() || id.len() > 1024 || server.name.len() > 1024 {
+            let text = id.to_string();
+            // Generated direct identities include a namespace and JSON escaping;
+            // opaque ACP identifiers retain their original 1024-byte ceiling.
+            let max_id_bytes = if direct.is_some() { 2048 } else { 1024 };
+            if text.is_empty() || text.len() > max_id_bytes || (direct.is_some() && name.is_empty()) || name.len() > 1024 {
                 return Err(
                     "invalid MCP server identity; use a nonempty ID and names up to 1024 bytes",
                 );
             }
-            if !ids.insert(id) {
+            if !ids.insert((namespace, text)) {
                 return Err("duplicate MCP server ID; declare each server once per session");
             }
             Ok(Server {
-                id: server.server_id,
-                name: server.name,
+                id,
+                name: format!("client/{namespace}/{name}"),
+                direct,
             })
         })
         .collect()
 }
 
 struct Route {
-    server: v2::McpServerAcpId,
+    server: Server,
     display: String,
     name: String,
     validator: jsonschema::Validator,
@@ -95,12 +287,22 @@ fn alias(server: &str, name: &str) -> String {
 }
 
 async fn request(
-    connection: &V2ConnectionTo<Client>,
-    bindings: &super::Mutex<Bindings>,
-    server: v2::McpServerAcpId,
+    reply: &super::Reply,
+    server: &Server,
     method: &str,
     mut params: Value,
 ) -> Result<v2::MessageMcpResponse, &'static str> {
+    if server.direct.is_some() {
+        let manager = super::lock(&reply.mcp).direct.clone();
+        let entry = manager
+            .get(&reply.id, &server.id.to_string())
+            .ok_or(crate::mcp::runtime::UNAVAILABLE)?;
+        let envelope = entry.request(method, params).await?;
+        return serde_json::from_value(envelope)
+            .map_err(|_| "invalid MCP response envelope; check the server implementation");
+    }
+    let connection = &reply.connection;
+    let bindings = &reply.mcp;
     let id = super::lock(bindings).request_id()?;
     params["_meta"] = json!({
         "io.modelcontextprotocol/protocolVersion": "2026-07-28",
@@ -109,7 +311,7 @@ async fn request(
     // Never retain the outer error: its data can contain credentials or arguments.
     connection
         .send_request(
-            v2::MessageMcpRequest::new(server, id, method).params(
+            v2::MessageMcpRequest::new(server.id.clone(), id, method).params(
                 params
                     .as_object()
                     .expect("internal MCP parameters are objects")
@@ -135,22 +337,17 @@ fn shallow(value: &Value, depth: usize) -> bool {
 
 impl Catalog {
     pub async fn discover(
-        connection: &V2ConnectionTo<Client>,
-        bindings: &super::Mutex<Bindings>,
+        reply: &super::Reply,
         servers: &[Server],
         native: Vec<Tool>,
     ) -> Result<Self, &'static str> {
-        tokio::time::timeout(
-            DISCOVERY_TIMEOUT,
-            Self::list(connection, bindings, servers, native),
-        )
-        .await
-        .map_err(|_| "MCP discovery timed out; check the client's servers and retry")?
+        tokio::time::timeout(DISCOVERY_TIMEOUT, Self::list(reply, servers, native))
+            .await
+            .map_err(|_| "MCP discovery timed out; check the client's servers and retry")?
     }
 
     async fn list(
-        connection: &V2ConnectionTo<Client>,
-        bindings: &super::Mutex<Bindings>,
+        reply: &super::Reply,
         servers: &[Server],
         mut definitions: Vec<Tool>,
     ) -> Result<Self, &'static str> {
@@ -166,14 +363,7 @@ impl Catalog {
                 if let Some(cursor) = &cursor {
                     params["cursor"] = Value::String(cursor.clone());
                 }
-                let response = request(
-                    connection,
-                    bindings,
-                    server.id.clone(),
-                    "tools/list",
-                    params,
-                )
-                .await?;
+                let response = request(reply, server, "tools/list", params).await?;
                 // Discovery errors fail the turn rather than advertise an incomplete catalog.
                 let v2::MessageMcpResponse::Result { result, .. } = response else {
                     return Err(
@@ -222,7 +412,23 @@ impl Catalog {
                         .map_err(
                             |_| "unsupported MCP input schema; use a valid offline object schema",
                         )?;
-                    let alias = alias(&server.id.to_string(), name);
+                    let alias = if server.direct.is_some() {
+                        // Different tuple shape keeps direct identities disjoint from opaque ACP IDs.
+                        let identity =
+                            serde_json::to_string(&("direct", server.id.to_string(), name))
+                                .expect("identity is JSON");
+                        let digest = Sha256::digest(identity.as_bytes());
+                        format!(
+                            "mcp_{}",
+                            digest
+                                .iter()
+                                .take(28)
+                                .map(|b| format!("{b:02x}"))
+                                .collect::<String>()
+                        )
+                    } else {
+                        alias(&server.id.to_string(), name)
+                    };
                     if !aliases.insert(alias.clone()) {
                         return Err(
                             "MCP tool alias collision; change the conflicting tool identity",
@@ -236,7 +442,7 @@ impl Catalog {
                     routes.insert(
                         alias,
                         Route {
-                            server: server.id.clone(),
+                            server: server.clone(),
                             display: server.name.clone(),
                             name: name.into(),
                             validator,
@@ -279,7 +485,8 @@ fn outcome(response: v2::MessageMcpResponse) -> ToolResult {
     let is_error = match &response {
         v2::MessageMcpResponse::Error { .. } => true,
         v2::MessageMcpResponse::Result { result, .. } => {
-            if !result.is_object()
+            if !shallow(result, 0)
+                || !result.is_object()
                 || result.get("isError").is_some_and(|v| !v.is_boolean())
                 || result.get("content").is_some_and(|v| !v.is_array())
                 || result.get("_meta").is_some_and(|v| !v.is_object())
@@ -288,9 +495,10 @@ fn outcome(response: v2::MessageMcpResponse) -> ToolResult {
                     "Invalid MCP tool result; check the client's server implementation.",
                 );
             }
-            if result
-                .get("resultType")
-                .is_some_and(|v| v.as_str() != Some("complete"))
+            if result.get("task").is_some()
+                || result
+                    .get("resultType")
+                    .is_some_and(|v| v.as_str() != Some("complete"))
             {
                 return failure(
                     "Unsupported MCP outcome; interactive continuation and tasks are not supported.",
@@ -314,8 +522,6 @@ fn outcome(response: v2::MessageMcpResponse) -> ToolResult {
 pub(super) struct Composite<'a> {
     pub native: super::interactions::Native<'a>,
     pub catalog: Catalog,
-    pub connection: &'a V2ConnectionTo<Client>,
-    pub bindings: &'a super::Mutex<Bindings>,
 }
 
 impl Composite<'_> {
@@ -399,14 +605,54 @@ impl Executor for Composite<'_> {
                     "Arguments do not match the MCP input schema; correct the call.",
                 ));
             }
+            if route.server.direct.is_some() {
+                let resource = format!("{}/{}", route.display, route.name);
+                let check = crate::permissions::Check::value(
+                    "mcp.call",
+                    resource,
+                    crate::permissions::Effect::Ask,
+                );
+                let effect = self
+                    .native
+                    .permissions
+                    .evaluate(&[check], self.native.inner.cwd());
+                let allowed = match effect {
+                    crate::permissions::Effect::Allow => true,
+                    crate::permissions::Effect::Deny => false,
+                    crate::permissions::Effect::Ask => {
+                        let mut subject = self
+                            .native
+                            .reply
+                            .tool_permission_subject(call, &self.description(call))?;
+                        let manager = super::lock(&self.native.reply.mcp).direct.clone();
+                        let entry = manager
+                            .get(&self.native.reply.id, &route.server.id.to_string())
+                            .ok_or(crate::llm::Error::Cancelled)?;
+                        if let v2::RequestPermissionSubject::ToolCall(tool) = &mut subject {
+                            tool.tool_call.meta = serde_json::from_value(json!({"bee/mcp":{"server":route.server.id.to_string(),"revision":entry.revision}})).map_err(|_| crate::llm::Error::Tool)?;
+                        }
+                        self.native
+                            .reply
+                            .permission(subject, format!("Call MCP tool {}", route.display))
+                            .await?
+                    }
+                };
+                if !allowed {
+                    return Ok(failure(
+                        "MCP tool permission denied; change permission policy or approve the call.",
+                    ));
+                }
+                if !self.native.reply.current() {
+                    return Err(crate::llm::Error::Cancelled);
+                }
+            }
             // Dropping this owned request cancels it; never detach or retry remote side effects.
             Ok(
                 match tokio::time::timeout(
                     CALL_TIMEOUT,
                     request(
-                        self.connection,
-                        self.bindings,
-                        route.server.clone(),
+                        self.native.reply,
+                        &route.server,
                         "tools/call",
                         json!({"name":route.name,"arguments":call.arguments}),
                     ),
@@ -504,17 +750,17 @@ mod tests {
         let acp = json!({"type":"acp","serverId":"private-sentinel","name":"tools"});
         let servers = serde_json::from_value(json!([acp, acp])).unwrap();
         assert!(
-            !declarations(servers)
+            !declarations(servers, std::path::Path::new("/"), &Default::default())
                 .err()
                 .unwrap()
                 .contains("private-sentinel")
         );
         let servers = serde_json::from_value(
-            json!([{"type":"http","name":"tools","url":"https://private-sentinel","headers":[]}]),
+            json!([{"type":"http","name":"tools","url":"http://private-sentinel","headers":[]}]),
         )
         .unwrap();
         assert!(
-            !declarations(servers)
+            !declarations(servers, std::path::Path::new("/"), &Default::default())
                 .err()
                 .unwrap()
                 .contains("private-sentinel")
