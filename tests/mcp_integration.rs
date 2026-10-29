@@ -568,7 +568,16 @@ async fn interrupted_stdio_work_is_reaped_before_terminal_idle(
                 } else {
                     root.path().join("called")
                 };
-                while !waiting.exists() {
+                loop {
+                    // Opening the marker creates an empty file before printf writes.
+                    // Wait for complete records so cancellation cannot interrupt PID
+                    // publication; blocked calls also publish the descendant's PID.
+                    if std::fs::read_to_string(&waiting).is_ok_and(|contents| {
+                        contents.ends_with('\n')
+                            && contents.lines().count() >= if initializing { 1 } else { 2 }
+                    }) {
+                        break;
+                    }
                     tokio::time::sleep(Duration::from_millis(1)).await;
                 }
                 match operation {
