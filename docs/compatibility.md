@@ -86,6 +86,17 @@ are Bee behavior, not separate ACP methods. Hive's `_hive_activity` and gateway/
 
 ## Connection, negotiation and errors
 
+### Outbound library client
+
+`bee::acp::client` uses the same pinned draft wire-v2 SDK/schema baseline to launch
+configured local stdio agents. It supports initialization, baseline session creation,
+sequential prompt acceptance/progress/idle collection, cancellation and bounded cleanup.
+Host-provided permission/form/URL handlers preserve structured protocol outcomes;
+elicitation is usable only after initialization, as enforced by the SDK. See
+[outbound client](acp-client.md) for the API, configuration, bounds and process guarantees.
+Independent stdio-peer coverage lives in `tests/acp_client.rs`; the matrix below
+continues to describe Bee's agent/server role.
+
 ### Deterministic test-agent coverage
 
 `bee --scenario <name>` is a shipped, stdio-based deterministic test-agent mode using the same ACP boundary and

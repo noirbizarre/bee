@@ -1,0 +1,11 @@
+[package]
+name = "bee-acp-client-fixture"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Independent peer: it deliberately does not depend on Bee or the ACP SDK.
+[dependencies]
+serde_json = "1"
+
+[workspace]

@@ -584,6 +584,10 @@ fn merge(
 // Model IDs are configuration values expressed as keys; exposing their origin
 // paths would bypass the normal protection against printing configuration values.
 fn diagnostic_key(key: &str) -> &str {
+    // Delegate names and environment keys are user-provided process settings too.
+    if key == "agents" || key.starts_with("agents.") {
+        return "agents";
+    }
     if key.starts_with("accounts.") {
         for field in [
             ".model_protocols",
