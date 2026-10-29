@@ -57,9 +57,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.build.target }}
-      - uses: Swatinem/rust-cache@v2
+      # Published binaries must not depend on shared compiler-output caches.
+      - uses: jdx/mr-boxington-action@v1
         with:
-          key: release-${{ matrix.build.target }}
+          version: 1.28.0
+          backend: local
       - uses: taiki-e/install-action@cross
         if: matrix.build.cross
       # Standalone Windows binaries must start without a separately installed redistributable.
@@ -76,7 +78,7 @@ jobs:
           if [ "${CROSS:-}" = true ]; then
             cross build --release --locked --target "$TARGET"
           else
-            cargo build --release --locked --target "$TARGET"
+            mbx build --release --locked --target "$TARGET"
           fi
           mkdir -p dist
           cp "target/${TARGET}/release/bee${EXT:-}" "dist/bee_${TAG}_${LABEL}${EXT:-}"

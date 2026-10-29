@@ -12,9 +12,78 @@ prek install          # the Git hooks
 mise run ci           # local checks, tests and documentation build
 ```
 
-Rust itself is not managed by mise: `rust-toolchain.toml` pins the channel, and
-rustup installs it. CI uses `dtolnay/rust-toolchain` because it needs per-job
-components and cross-compilation targets.
+Rustup provides the stable channel declared in `rust-toolchain.toml`. The
+project-specific mise configuration also selects that channel to enable native
+[Mr Boxington](https://mr-boxington.jdx.dev/setup) integration (mise 2026.9.2+).
+Explicit `RUSTUP_TOOLCHAIN` selections take precedence; in GitHub Actions the
+configuration preserves the rustup default selected by `dtolnay/rust-toolchain`.
+The mise install request stays stable so locked installs remain valid.
+
+### Build caching
+
+```bash
+mise exec -- cargo build --locked
+mise exec -- cargo nextest run
+mise exec -- mbx doctor
+```
+
+**Mise tasks have mbx built in:** `mise build`, `mise test`, and their explicit
+forms `mise run build` and `mise run test` already route Cargo through mbx; no
+extra `mbx` prefix is needed. The explicit commands above also work in a coding
+agent's non-interactive environment. Plain `cargo` in a terminal needs effective mise
+activation or shims; calling `~/.cargo/bin/cargo` directly bypasses wrapping.
+Installing mbx alone does not enable wrapping. Doctor can warn about a missing
+standalone Cargo shim with native integration; actual build summaries establish
+activation. No standalone setup or editor configuration is required.
+
+If personal environment paths put rustup's Cargo before mise's wrapper inside
+task shells, use `mise exec -- cargo ...` directly or enable
+`[settings] activate_aggressive = true` in ignored `mise.local.toml`. The local
+trial uses that checkout-only setting; global shell configuration is unchanged.
+
+For the local trial, an uncommitted `.cargo/config.toml` clears an inherited
+compiler wrapper so mbx can cache; it leaves global Cargo settings, build jobs
+and linker flags intact. Other checkouts can opt into the same project-only
+`[build] rustc-wrapper = ""` override after inspecting their existing wrapper.
+An environment-selected `RUSTC_WRAPPER` still wins and prevents mbx caching.
+
+CI uses `jdx/mr-boxington-action` instead of sccache and rust-cache. Its default
+GitHub `target` payload includes Cargo outputs and registry/git downloads, so
+an additional rust-cache action is unnecessary. Successful main pushes populate
+the cache; same-repository pull requests also save in their own PR scope so
+later runs can reuse the trial cache. Fork pull requests only restore.
+Cross-build jobs retain their
+container-produced target outputs through that payload, while native builds
+also use mbx compiler caching. Publication jobs use `backend: local`, without
+restoring or saving shared compiler outputs. No separate remote cache service
+or local-to-CI cache connection is configured.
+
+Local compiler actions, eligible links, build-script executions and C/C++
+compilations are cached by default. Compilation scheduling, in-flight
+deduplication and learned private incremental reuse are also enabled. This
+project additionally enables `[scheduler] tests = true` in `.mbx.toml` to
+coordinate concurrent nextest tests and Cargo test binaries; test outcomes are
+not cached. Queueing counts toward nextest's slow-test timeouts.
+
+For this trial, mise disables automatic garbage collection and managed target
+placement (`MBX_GC_AUTO=0`, `MBX_TARGET_VIEWS=0`) to preserve existing caches and
+outputs. If the system temporary directory exceeds its quota, use a short,
+local temporary path, for example `TMPDIR="$HOME/.cache/mbx" mise exec -- cargo
+build --locked` after the first doctor run has created that cache directory.
+
+To measure reuse, build the same source/toolchain/profile/features into two
+fresh temporary target directories with `--target-dir`, using the commands
+above and `MBX_SUMMARY=full`. Check for positive mbx hits on the second build;
+Cargo skipping fresh outputs does not count. Diagnose misses with
+`mise exec -- mbx explain --last`, then remove only those temporary targets.
+
+To undo, remove or disable `mr_boxington` in the project Rust entry first and
+run `mise reshim`. Then remove the mbx tool and its lock entry, the introduced
+Cargo wrapper override, `.mbx.toml`, and the trial environment settings. Remove
+the local `activate_aggressive` override if you added it. Remove
+the newly added mise Rust entry if returning to rustup-only ownership. Preserve
+existing Rust pins/options and unrelated lock entries; no cache deletion is
+needed.
 
 ## Tasks
 

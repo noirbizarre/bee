@@ -1,0 +1,3 @@
+[scheduler]
+# Concurrent agents and suites share permits rather than oversubscribing CPUs.
+tests = true
