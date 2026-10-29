@@ -4,6 +4,43 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0](https://github.com/noirbizarre/bee/compare/0.1.1..0.2.0) - 2026-10-29
+
+### 💫 Features
+
+- **acp** Stream displayable provider thoughts ([#120](https://github.com/noirbizarre/bee/issues/120)) - ([4b45984](https://github.com/noirbizarre/bee/commit/4b45984792980ec65ca32862f31892930998a872))
+- **provider** Add OVHcloud AI Endpoints support ([#119](https://github.com/noirbizarre/bee/issues/119)) - ([f804ea1](https://github.com/noirbizarre/bee/commit/f804ea1fde15eef51f80e8b801f5b7b29b05c82f))
+- **provider** Add Scaleway Generative APIs support ([#118](https://github.com/noirbizarre/bee/issues/118)) - ([33ba17f](https://github.com/noirbizarre/bee/commit/33ba17fe82e7d3ea770f1c1ee64193beb53fcf8b))
+- **provider** Support Cloudflare AI Gateway ([#115](https://github.com/noirbizarre/bee/issues/115)) - ([b1488df](https://github.com/noirbizarre/bee/commit/b1488df830d9b338ef7e043643bbf58e4bd06a36))
+- **provider**  🚨 **breaking** Unify provider registry, accounts and model selection ([#113](https://github.com/noirbizarre/bee/issues/113)) - ([2475a89](https://github.com/noirbizarre/bee/commit/2475a899aab27c824a411bd9bb6fa93f1ae691ca))
+- **provider** Support OpenCode Zen and Go authentication ([#112](https://github.com/noirbizarre/bee/issues/112)) - ([cbc6d2d](https://github.com/noirbizarre/bee/commit/cbc6d2daba3f9e7df56785b91ae91401a1766b4c))
+- **provider** Add Google Cloud Gemini support ([#107](https://github.com/noirbizarre/bee/issues/107)) - ([fdac420](https://github.com/noirbizarre/bee/commit/fdac4201ce0ef525040cde21aa19d4156d691690))
+- **provider** Add Google AI Studio support ([#105](https://github.com/noirbizarre/bee/issues/105)) - ([81d376b](https://github.com/noirbizarre/bee/commit/81d376b4816b9a2d4e8bee51ac46888c6a83c626))
+
+### 🐛 Bug Fixes
+
+- **ci** Forward secrets to development prerelease publisher ([#114](https://github.com/noirbizarre/bee/issues/114)) - ([98aa018](https://github.com/noirbizarre/bee/commit/98aa0182d6e2cd5a72740a210a26789f855cd711))
+
+### 🏗️ Build
+
+- **cache** Use Mr Boxington through native mise integration and GitHub actions ([#116](https://github.com/noirbizarre/bee/issues/116)) - ([c53ecd7](https://github.com/noirbizarre/bee/commit/c53ecd72e984a756fa48650dcc34f64b5462641f))
+
+### 🔧 CI
+
+- Retain Bee build profile and release documentation - ([cc204e0](https://github.com/noirbizarre/bee/commit/cc204e024713b93b7c25237f31450e1b6f5bbf29))
+
+### 🧹 Chores
+
+- **template** Update rust.tpl and track main - ([1f667f0](https://github.com/noirbizarre/bee/commit/1f667f04d5813ce5f669e3ef83464a888cdcc86d))
+- **template** Update rust.tpl to ac04185 - ([c409bc8](https://github.com/noirbizarre/bee/commit/c409bc822355ea988148c0c7c6eaf083dd4aa63f))
+- **template** Update rust.tpl to da031b9 - ([e946c09](https://github.com/noirbizarre/bee/commit/e946c09d9170dc055404b937de3acc07b7bed470))
+
+### Tpl
+
+- Render rust at main - ([020c7c4](https://github.com/noirbizarre/bee/commit/020c7c4c0292ea2aa5e780788c6809eeb0d7b6ab))
+- Render rust at ac04185746281724add56a8d45de4f167c3be214 - ([92a6850](https://github.com/noirbizarre/bee/commit/92a68502cb311d3fe522f77ce8a898ab7409e76b))
+- Render rust at da031b929b8e6e50bc276cc16f5b9ef642e6987e - ([2209906](https://github.com/noirbizarre/bee/commit/2209906b9dbb3c3d483e3e3fff8294066886274c))
+
 ## [0.1.1](https://github.com/noirbizarre/bee/compare/0.1.0..0.1.1) - 2026-10-27
 
 ### 🐛 Bug Fixes
