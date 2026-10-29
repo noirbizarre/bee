@@ -41,6 +41,11 @@ definitions and semantics were rechecked against official main
 `5aa293599e554ca3a5751f27022519dd3cd4768c` and are unchanged. It introduces no
 permission capability flag or newer version-negotiation behavior.
 
+The #72 thought implementation retains the same pinned revision. Thought payloads and lifecycle semantics
+were rechecked against official main `2325f30bff20e7133d626a47d005d922f84ca8e1` on 2026-10-29. Its explicit
+interleaving, first-observation ordering and full-snapshot replay clarifications are compatible with the pinned
+append/replacement contract. No thought-specific capability flag or newer initialization behavior is introduced.
+
 The three official tags `v1.12.0`, `schema-v1.26.0` and `schema-v2.0.0-alpha.9` resolve to
 the specification commit above. These are independent version namespaces: schema crate `1.12.0`
 does not mean wire version 1, and SDK `3.5.0` does not mean wire version 3.
@@ -196,7 +201,7 @@ All update names below are values of agent → client `session/update.sessionUpd
 | `user_message_chunk` | Planned | Bee currently echoes complete user messages only. [#81](https://github.com/noirbizarre/bee/issues/81). |
 | `agent_message_chunk` | Implemented and supported | Correlated live text chunks, with no post-idle output. [Session streaming][test-session], [cancellation tests][test-cancel]. |
 | `agent_message` | Partially supported | Full retained upserts on start replay; live output uses chunks without a separate final whole-message upsert. [Replay tests][test-session], [restart tests][test-stdio]. |
-| `agent_thought`, `agent_thought_chunk` | Planned | Provider-native reasoning continuation is not ACP thought presentation. [#72](https://github.com/noirbizarre/bee/issues/72). |
+| `agent_thought`, `agent_thought_chunk` | Implemented and supported | Text-only Responses summaries and Anthropic displayable thinking stream as chunks; start replay emits full thought replacements with stable turn/step/entity IDs. Private continuation is never displayed. Chat reasoning extensions are unsupported. [Exact provider/request subset](inference.md#displayable-reasoning-and-acp-thoughts), [retention](sessions.md#thought-retention-and-identity). Evidence: `summaries_stream_once_with_part_identity_and_keep_continuation_private` in `tests/responses.rs`, `thinking_text_is_displayable_but_signatures_and_redactions_only_continue_privately` in `tests/anthropic.rs`, and `display_thoughts_use_standard_wire_entities_and_survive_terminal_outcomes_and_restart` in `tests/stdio.rs`. |
 | `state_update`: `running`, `requires_action`, `idle` | Implemented and supported | Foreground work, pending client interactions, and terminal completion/resume snapshot. Cleanup precedes terminal idle. [Lifecycle][test-session], [interaction tests][test-interactions]. |
 | Idle reasons `end_turn`, `max_tokens`, `refusal`, `cancelled`, `error` | Implemented and supported | Provider completion/cancellation/failure map to terminal updates. Accepted failures do not become a second prompt response. [Finalization code][acp-code], [terminal-plan tests][test-plans], [failure tests][test-cancel]. |
 | Idle `max_turn_requests`, null and open stop-reason variants | Partially supported | State-only idle snapshots can omit a reason; loop-limit failures currently use `error`, not `max_turn_requests`. Bee does not produce custom reasons. [Finalization][acp-code], [limit tests][test-plans]. |

@@ -116,6 +116,92 @@ fn is_running(update: &v2::SessionUpdate) -> bool {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn memory_thought_replay_reduces_interleaved_entities_with_stable_step_and_turn_identity() {
+    let (sender, mut updates) = mpsc::unbounded_channel();
+    let client = Client.v2().on_receive_notification(
+        async move |update: v2::UpdateSessionNotification, _| {
+            sender.send(update).map_err(Error::into_internal_error)
+        },
+        agent_client_protocol::on_receive_notification!(),
+    );
+    tokio::time::timeout(
+        TIMEOUT,
+        client.connect_with(
+            bee::acp::agent_with(|reply| async move {
+                reply.thought(0, 0, 0, "first ").unwrap();
+                reply.text("answer ");
+                reply.thought(1, 0, 0, "second").unwrap();
+                reply.thought(0, 0, 0, "continued").unwrap();
+                reply.text("continued");
+                Ok(())
+            }),
+            async |connection| {
+                initialize(&connection).await?;
+                let session = new_session(&connection, dir("thoughts")).await?;
+                for turn in 1..=2 {
+                    prompt(&connection, &session, "question").await?;
+                    let live = until_idle(&mut updates).await;
+                    let ids: Vec<_> = live
+                        .iter()
+                        .filter_map(|update| match &update.update {
+                            v2::SessionUpdate::AgentThoughtChunk(chunk) => {
+                                Some(chunk.message_id.to_string())
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    assert_eq!(
+                        ids,
+                        vec![
+                            format!("thought-{turn}-0-0-0"),
+                            format!("thought-{turn}-1-0-0"),
+                            format!("thought-{turn}-0-0-0")
+                        ]
+                    );
+                }
+                for _ in 0..2 {
+                    connection
+                        .send_request(
+                            v2::ResumeSessionRequest::new(session.clone(), dir("thoughts"))
+                                .replay_from(v2::ReplayFrom::Start(v2::ReplayFromStart::new())),
+                        )
+                        .block_task()
+                        .await?;
+                    let replay = until_idle(&mut updates).await;
+                    let kinds: Vec<_> = replay
+                        .iter()
+                        .map(|u| serde_json::to_value(&u.update).unwrap()["sessionUpdate"].clone())
+                        .collect();
+                    assert_eq!(
+                        kinds,
+                        serde_json::json!([
+                            "user_message",
+                            "agent_thought",
+                            "agent_message",
+                            "agent_thought",
+                            "user_message",
+                            "agent_thought",
+                            "agent_message",
+                            "agent_thought",
+                            "state_update"
+                        ])
+                        .as_array()
+                        .unwrap()
+                        .clone()
+                    );
+                    let first = serde_json::to_value(&replay[1].update).unwrap();
+                    assert_eq!(first["content"][0]["text"], "first continued");
+                }
+                Ok(())
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn a_client_can_create_a_session_and_submit_a_prompt() {
     run(async |connection, _updates| {
         let session = new_session(&connection, dir("a")).await?;

@@ -501,6 +501,7 @@ fn a_provider_can_speak_several_protocols_each_with_its_own_url_and_options() {
             version: None,
             max_tokens: Some(2048),
             cache: Default::default(),
+            thinking: false,
         }
     );
 }
@@ -572,9 +573,64 @@ fn an_empty_responses_options_table_keeps_native_cache_defaults() {
     assert_eq!(
         *providers.get("p").unwrap().options(),
         ProtocolOptions::OpenAiResponses {
-            cache: Default::default()
+            cache: Default::default(),
+            reasoning_summary: false,
         }
     );
+}
+
+#[test]
+fn reasoning_options_are_protocol_specific_and_invalid_fields_never_echo_values() {
+    for (protocol, options) in [
+        ("openai-responses", "reasoning_summary='private-sentinel'"),
+        ("openai-responses", "reasoning_summary=123"),
+        ("openai-chat", "reasoning_summary='private-sentinel'"),
+        ("anthropic-messages", "thinking={type='private-sentinel'}"),
+        (
+            "anthropic-messages",
+            "thinking={type='adaptive',display='private-sentinel'}",
+        ),
+        (
+            "anthropic-messages",
+            "thinking={type='adaptive',budget_tokens='private-sentinel'}",
+        ),
+        ("anthropic-messages", "thinking={display='summarized'}"),
+        ("anthropic-messages", "thinking='private-sentinel'"),
+        ("openai-responses", "thinking={type='adaptive'}"),
+    ] {
+        let error = load(&format!("[accounts.p]\nprovider='custom'\n[accounts.p.protocols.{protocol}]\nbase_url='https://gateway.example'\noptions={{{options}}}")).unwrap_err();
+        let diagnostic = format!("{error:?} {error}");
+        assert!(!diagnostic.contains("private-sentinel"), "{diagnostic}");
+    }
+}
+
+#[test]
+fn higher_layers_can_reset_inherited_reasoning_request_controls() {
+    let sandbox = Sandbox::new();
+    sandbox.write(&sandbox.global(), "[accounts.p]\nprovider='custom'\nprefer=['openai-responses']\n[accounts.p.protocols.openai-responses]\nbase_url='https://api.openai.com/v1'\noptions={reasoning_summary='auto'}\n[accounts.p.protocols.anthropic-messages]\nbase_url='https://api.anthropic.com'\noptions={thinking={type='adaptive',display='summarized'}}");
+    sandbox.write(&sandbox.project(), "[accounts.p.protocols.openai-responses.options]\nreasoning_summary='default'\n[accounts.p.protocols.anthropic-messages.options]\nthinking={type='default'}");
+    let providers = sandbox.providers().unwrap();
+    let profile = providers.get("p").unwrap();
+    assert!(matches!(
+        profile
+            .endpoint(Protocol::OpenAiResponses)
+            .unwrap()
+            .options(),
+        ProtocolOptions::OpenAiResponses {
+            reasoning_summary: false,
+            ..
+        }
+    ));
+    assert!(matches!(
+        profile
+            .endpoint(Protocol::AnthropicMessages)
+            .unwrap()
+            .options(),
+        ProtocolOptions::AnthropicMessages {
+            thinking: false,
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -668,7 +724,7 @@ cache_control = {policy='disabled'}
     );
     let providers = sandbox.providers().unwrap();
     let profile = providers.get("p").unwrap();
-    let ProtocolOptions::OpenAiResponses { cache } = profile
+    let ProtocolOptions::OpenAiResponses { cache, .. } = profile
         .endpoint(Protocol::OpenAiResponses)
         .unwrap()
         .options()
@@ -768,6 +824,7 @@ max_tokens = 4096
             version: Some("2023-06-01".to_owned()),
             max_tokens: Some(4096),
             cache: Default::default(),
+            thinking: false,
         }
     );
 }

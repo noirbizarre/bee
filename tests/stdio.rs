@@ -1024,6 +1024,311 @@ fn unsuccessful_partial_answers_survive_restart_without_entering_inference_conte
     assert!(restored.finish().0.success());
 }
 
+fn thought_exchange(protocol: &str, refusal: bool) -> (String, String, Value) {
+    use support::event;
+    if protocol == "openai-responses" {
+        let reasoning = json!({"id":"private-provider-id","type":"reasoning","summary":[{"type":"summary_text","text":"visible thought"}],"encrypted_content":"private-encrypted-sentinel"});
+        let answer = json!({"id":"answer","type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}]});
+        let prefix = event(
+            "response.output_item.added",
+            json!({"type":"response.output_item.added","output_index":0,"item":{"id":"private-provider-id","type":"reasoning"}}),
+        ) + &event(
+            "response.reasoning_summary_part.added",
+            json!({"type":"response.reasoning_summary_part.added","output_index":0,"item_id":"private-provider-id","summary_index":0,"part":{"type":"summary_text","text":""}}),
+        ) + &event(
+            "response.reasoning_text.delta",
+            json!({"type":"response.reasoning_text.delta","output_index":0,"item_id":"private-provider-id","delta":"private-raw-sentinel"}),
+        ) + &event(
+            "response.reasoning_summary_text.delta",
+            json!({"type":"response.reasoning_summary_text.delta","output_index":0,"item_id":"private-provider-id","summary_index":0,"delta":"visible thought"}),
+        );
+        let mut complete =
+            json!({"status":"completed","output":[reasoning.clone(),answer.clone()]});
+        if refusal {
+            complete["status"] = "incomplete".into();
+            complete["incomplete_details"] = json!({"reason":"content_filter"});
+        }
+        let kind = if refusal {
+            "response.incomplete"
+        } else {
+            "response.completed"
+        };
+        let suffix = event(
+            "response.output_item.done",
+            json!({"type":"response.output_item.done","output_index":0,"item":reasoning}),
+        ) + &event(
+            "response.output_item.added",
+            json!({"type":"response.output_item.added","output_index":1,"item":{"id":"answer","type":"message"}}),
+        ) + &event(
+            "response.output_item.done",
+            json!({"type":"response.output_item.done","output_index":1,"item":answer}),
+        ) + &event(kind, json!({"type":kind,"response":complete}));
+        (prefix, suffix, json!({"status":"completed","output":[]}))
+    } else {
+        let prefix = event(
+            "message_start",
+            json!({"type":"message_start","message":{"type":"message","role":"assistant","content":[]}}),
+        ) + &event(
+            "content_block_start",
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}),
+        ) + &event(
+            "content_block_delta",
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"visible thought"}}),
+        );
+        let suffix = event(
+            "content_block_delta",
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"private-signature-sentinel"}}),
+        ) + &event(
+            "content_block_stop",
+            json!({"type":"content_block_stop","index":0}),
+        ) + &event(
+            "content_block_start",
+            json!({"type":"content_block_start","index":1,"content_block":{"type":"redacted_thinking","data":"private-redacted-sentinel"}}),
+        ) + &event(
+            "content_block_stop",
+            json!({"type":"content_block_stop","index":1}),
+        ) + &event(
+            "content_block_start",
+            json!({"type":"content_block_start","index":2,"content_block":{"type":"text","text":"answer"}}),
+        ) + &event(
+            "content_block_stop",
+            json!({"type":"content_block_stop","index":2}),
+        ) + &event(
+            "message_delta",
+            json!({"type":"message_delta","delta":{"stop_reason":if refusal { "refusal" } else { "end_turn" }}}),
+        ) + &event("message_stop", json!({"type":"message_stop"}));
+        (
+            prefix,
+            suffix,
+            json!({"type":"message","role":"assistant","content":[{"type":"text","text":"next"}],"stop_reason":"end_turn"}),
+        )
+    }
+}
+
+#[rstest::rstest]
+fn production_tool_steps_and_new_turns_get_distinct_thought_message_ids(
+    #[values("openai-responses", "anthropic-messages")] protocol: &str,
+) {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("note.txt"), "tool-result").unwrap();
+    let thought = if protocol == "openai-responses" {
+        json!({"id":"private-provider-id","type":"reasoning","summary":[{"type":"summary_text","text":"visible"}],"encrypted_content":"private-encrypted-sentinel"})
+    } else {
+        json!({"type":"thinking","thinking":"visible","signature":"private-signature-sentinel"})
+    };
+    let (first, second) = if protocol == "openai-responses" {
+        (
+            json!({"status":"completed","output":[thought.clone(),{"type":"function_call","id":"read-item","call_id":"read-call","name":"read","arguments":"{\"path\":\"note.txt\"}"}]}),
+            json!({"status":"completed","output":[thought,{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}]}),
+        )
+    } else {
+        (
+            json!({"type":"message","role":"assistant","content":[thought.clone(),{"type":"tool_use","id":"read-call","name":"read","input":{"path":"note.txt"}}],"stop_reason":"tool_use"}),
+            json!({"type":"message","role":"assistant","content":[thought,{"type":"text","text":"done"}],"stop_reason":"end_turn"}),
+        )
+    };
+    let server = support::Server::start(vec![
+        support::Response::json(first),
+        support::Response::json(second.clone()),
+        support::Response::json(second),
+    ]);
+    let mut agent = Agent::configured(&format!(
+        "model='test/test'\n[accounts.test]\nprovider='custom'\nmodels=['test']\n[accounts.test.protocols.{protocol}]\nbase_url='{}'",
+        server.url
+    ));
+    agent.initialize(1);
+    agent
+        .send(&json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":root.path()}}));
+    let session = agent.recv()["result"]["sessionId"].clone();
+    let mut wire = Vec::new();
+    for (id, expected) in [
+        (3, vec!["thought-1-0-0-0", "thought-1-1-0-0"]),
+        (4, vec!["thought-2-0-0-0"]),
+    ] {
+        agent.send(&json!({"jsonrpc":"2.0","id":id,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"text","text":"work"}]}}));
+        let updates = agent.until_idle_approving_tools();
+        assert_eq!(
+            updates.last().unwrap()["params"]["update"]["stopReason"],
+            "end_turn"
+        );
+        let ids: Vec<_> = updates
+            .iter()
+            .filter(|m| m["params"]["update"]["sessionUpdate"] == "agent_thought_chunk")
+            .map(|m| m["params"]["update"]["messageId"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, expected);
+        wire.extend(updates);
+    }
+    server.request();
+    let continuation = server.request().body.to_string();
+    assert!(continuation.contains("tool-result"));
+    assert!(continuation.contains("private-"));
+    server.request();
+    assert!(!serde_json::to_string(&wire).unwrap().contains("private-"));
+    assert!(agent.finish().0.success());
+}
+
+#[rstest::rstest]
+fn display_thoughts_use_standard_wire_entities_and_survive_terminal_outcomes_and_restart(
+    #[values("openai-responses", "anthropic-messages")] protocol: &str,
+    #[values(
+        "success",
+        "malformed",
+        "failure",
+        "cancel",
+        "close",
+        "kill",
+        "refusal"
+    )]
+    stop: &str,
+) {
+    let root = tempfile::tempdir().unwrap();
+    let state = root.path().join("state");
+    let (prefix, mut suffix, next) = thought_exchange(protocol, stop == "refusal");
+    if stop == "malformed" {
+        suffix = "data: invalid-json\n\n".into();
+    }
+    if stop == "failure" {
+        suffix = if protocol == "openai-responses" {
+            support::event(
+                "response.failed",
+                json!({"type":"response.failed","response":{"error":{"message":"private-error-sentinel"}}}),
+            )
+        } else {
+            support::event(
+                "error",
+                json!({"type":"error","error":{"type":"overloaded_error","message":"private-error-sentinel"}}),
+            )
+        };
+    }
+    let (response, release) =
+        support::Response::sse(format!("{prefix}{suffix}")).gated_after(prefix.len());
+    let server = support::Server::start(vec![response, support::Response::json(next)]);
+    let config = format!(
+        "model='test/test'\n[accounts.test]\nprovider='custom'\nmodels=['test']\n[accounts.test.protocols.{protocol}]\nbase_url='{}'",
+        server.url
+    );
+    let mut agent = Agent::configured_with_state(&config, Some(&state));
+    agent.initialize(1);
+    agent
+        .send(&json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":root.path()}}));
+    let session = agent.recv()["result"]["sessionId"].clone();
+    agent.send(&json!({"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"text","text":"thought question"}]}}));
+    let mut wire = Vec::new();
+    let chunk = loop {
+        let message = agent.recv();
+        wire.push(message.clone());
+        if message["params"]["update"]["sessionUpdate"] == "agent_thought_chunk" {
+            break message;
+        }
+    };
+    assert_eq!(chunk["params"]["sessionId"], session);
+    assert_eq!(
+        chunk["params"]["update"],
+        json!({"sessionUpdate":"agent_thought_chunk","messageId":"thought-1-0-0-0","content":{"type":"text","text":"visible thought"}})
+    );
+    server.request();
+    agent.send(&json!({"jsonrpc":"2.0","id":90,"method":"session/resume","params":{"sessionId":session,"cwd":root.path(),"replayFrom":{"type":"start"}}}));
+    let mut live = Vec::new();
+    loop {
+        let message = agent.recv();
+        if message["id"] == 90 {
+            break;
+        }
+        live.push(message);
+    }
+    let thought = live
+        .iter()
+        .find(|m| m["params"]["update"]["sessionUpdate"] == "agent_thought")
+        .unwrap()["params"]["update"]
+        .clone();
+    assert_eq!(
+        thought,
+        json!({"sessionUpdate":"agent_thought","messageId":"thought-1-0-0-0","content":[{"type":"text","text":"visible thought"}]})
+    );
+    assert_eq!(live.last().unwrap()["params"]["update"]["state"], "running");
+    wire.extend(live);
+    match stop {
+        "kill" => {
+            agent.child.kill().unwrap();
+            agent.child.wait().unwrap();
+        }
+        "cancel" | "close" => {
+            if stop == "close" {
+                agent.send(&json!({"jsonrpc":"2.0","id":4,"method":"session/close","params":{"sessionId":session}}));
+            } else {
+                agent.send(&json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":session}}));
+            }
+            let ended = agent.until_idle();
+            assert_eq!(
+                ended.last().unwrap()["params"]["update"]["stopReason"],
+                "cancelled"
+            );
+            wire.extend(ended);
+            if stop == "close" {
+                assert_eq!(agent.recv()["id"], 4);
+            }
+        }
+        _ => {
+            release.send(()).unwrap();
+            let ended = agent.until_idle();
+            assert_eq!(
+                ended.last().unwrap()["params"]["update"]["stopReason"],
+                match stop {
+                    "success" => "end_turn",
+                    "refusal" => "refusal",
+                    _ => "error",
+                }
+            );
+            wire.extend(ended);
+        }
+    }
+    if matches!(stop, "kill" | "cancel" | "close") {
+        let _ = release.send(());
+    }
+    if stop == "kill" {
+        drop(agent);
+    } else {
+        agent.send(&json!({"jsonrpc":"2.0","id":5,"method":"session/list","params":{}}));
+        assert_eq!(
+            agent.recv()["id"],
+            5,
+            "no late thought follows terminal idle"
+        );
+        let (status, stderr) = agent.finish();
+        assert!(status.success());
+        assert!(!stderr.contains("private-"));
+    }
+    let mut restored = Agent::configured_with_state(&config, Some(&state));
+    restored.initialize(1);
+    for _ in 0..2 {
+        let replay = restored.resume(&session, root.path(), true);
+        let thoughts: Vec<_> = replay
+            .iter()
+            .filter(|m| m["params"]["update"]["sessionUpdate"] == "agent_thought")
+            .collect();
+        assert_eq!(thoughts.len(), 1);
+        assert_eq!(thoughts[0]["params"]["update"], thought);
+        wire.extend(replay);
+    }
+    let state_only = restored.resume(&session, root.path(), false);
+    assert_eq!(state_only.len(), 1);
+    // A different session cannot inherit this session's thought entities.
+    restored
+        .send(&json!({"jsonrpc":"2.0","id":6,"method":"session/new","params":{"cwd":root.path()}}));
+    let other = restored.recv()["result"]["sessionId"].clone();
+    assert_eq!(restored.resume(&other, root.path(), true).len(), 1);
+    restored.send(&json!({"jsonrpc":"2.0","id":7,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"text","text":"next question"}]}}));
+    wire.extend(restored.until_idle());
+    let request = server.request().body.to_string();
+    assert_eq!(request.contains("visible thought"), stop == "success");
+    assert_eq!(request.contains("thought question"), stop == "success");
+    assert!(!serde_json::to_string(&wire).unwrap().contains("private-"));
+    let (status, stderr) = restored.finish();
+    assert!(status.success());
+    assert!(!stderr.contains("private-"));
+}
+
 #[rstest::rstest]
 #[case::cancel(false)]
 #[case::close(true)]

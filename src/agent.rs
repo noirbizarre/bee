@@ -337,7 +337,18 @@ pub(crate) async fn run_with_guidance(
     guidance: Option<crate::instructions::Turn>,
 ) -> Result<Outcome, Error> {
     run_observed(
-        model, messages, tools, executor, text, limits, guidance, None,
+        model,
+        messages,
+        tools,
+        executor,
+        &mut |_, event| {
+            if let crate::llm::Stream::Text(delta) = event {
+                text(delta);
+            }
+        },
+        limits,
+        guidance,
+        None,
     )
     .await
 }
@@ -368,7 +379,7 @@ pub(crate) async fn run_observed(
     mut messages: Vec<Message>,
     tools: &[Tool],
     executor: Option<&dyn Executor>,
-    text: &mut (dyn FnMut(&str) + Send),
+    output: &mut (dyn FnMut(u32, crate::llm::Stream<'_>) + Send),
     limits: Limits,
     mut guidance: Option<crate::instructions::Turn>,
     observer: Option<&dyn Observer>,
@@ -389,13 +400,17 @@ pub(crate) async fn run_observed(
         return Err(Error::Tool);
     }
     for index in 0..limits.max_steps {
+        // Durable thought identity must not wrap even with embedder-supplied oversized loop budgets.
+        let step_index = u32::try_from(index).map_err(|_| Error::Limit)?;
         if let Some(guidance) = &mut guidance {
             // Final/targetless operations can change an already-observed instruction source.
             guidance.refresh().await?;
             model = model.with_instructions(guidance.render()?);
         }
         removed_turns += crate::context::fit(&model, &mut messages, tools, &mut active)?;
-        let step = model.step(&messages, tools, text).await?;
+        let step = model
+            .step_stream(&messages, tools, &mut |event| output(step_index, event))
+            .await?;
         input_steps += usize::from(step.usage.input.is_some());
         output_steps += usize::from(step.usage.output.is_some());
         usage.accumulate(&step.usage);

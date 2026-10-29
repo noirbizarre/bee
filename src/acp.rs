@@ -314,6 +314,41 @@ impl Reply {
     /// Send `text` as a chunk of the agent's answer, unless the turn was
     /// cancelled or has ended.
     pub fn text(&self, text: &str) {
+        self.output(None, text);
+    }
+
+    /// Publish only displayable provider text, with Bee-owned turn/step identity.
+    ///
+    /// Returns a limit error for item or part ordinals outside the native display bounds.
+    pub fn thought(
+        &self,
+        step: u32,
+        item: u64,
+        part: u64,
+        text: &str,
+    ) -> std::result::Result<(), crate::llm::Error> {
+        let id = crate::history::ThoughtId { step, item, part };
+        if item >= 128 || part >= 128 {
+            return Err(crate::llm::Error::Limit);
+        }
+        self.output(Some(id), text);
+        Ok(())
+    }
+
+    fn output(&self, thought: Option<crate::history::ThoughtId>, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let message_id =
+            thought.map_or_else(|| self.message_id.clone(), |id| id.message_id(self.token));
+        let update = |text: String| {
+            let chunk = v2::ContentChunk::new(text.into(), message_id.clone());
+            if thought.is_some() {
+                v2::SessionUpdate::AgentThoughtChunk(chunk)
+            } else {
+                v2::SessionUpdate::AgentMessageChunk(chunk)
+            }
+        };
         // Check/enqueue share cancellation's lock. Durable finalization drains
         // that ordered queue before idle; memory-only sessions send under the
         // guard. Neither path can emit a chunk after terminal idle.
@@ -322,34 +357,24 @@ impl Reply {
             if let Some(history) = sessions.history(&self.id) {
                 let connection = self.connection.clone();
                 let session_id = self.session_id.clone();
-                let message_id = self.message_id.clone();
+                let update = update(text.to_owned());
                 let text = text.to_owned();
-                let emitted = text.clone();
                 // The worker serializes durable chunks with replay. It does not
                 // reacquire the registry, avoiding a worker/dispatch lock cycle.
-                history.text(self.token, text, move || {
-                    let _ = send_update(
-                        &connection,
-                        &session_id,
-                        v2::SessionUpdate::AgentMessageChunk(v2::ContentChunk::new(
-                            emitted.into(),
-                            message_id,
-                        )),
-                    );
+                history.output(self.token, thought, text, move || {
+                    let _ = send_update(&connection, &session_id, update);
                 });
                 return;
             }
-            sessions.record_text(&self.id, &self.message_id, text);
+            let kind = if thought.is_some() {
+                crate::history::MessageKind::Thought
+            } else {
+                crate::history::MessageKind::Answer
+            };
+            sessions.record_output(&self.id, kind, message_id.as_ref(), text);
             // A failed send means the peer is gone, and the connection is
             // already shutting down: nothing is left to tell.
-            let _ = send_update(
-                &self.connection,
-                &self.session_id,
-                v2::SessionUpdate::AgentMessageChunk(v2::ContentChunk::new(
-                    text.into(),
-                    self.message_id.clone(),
-                )),
-            );
+            let _ = send_update(&self.connection, &self.session_id, update(text.to_owned()));
         }
     }
 }
@@ -634,7 +659,13 @@ async fn inference(reply: Reply, runtime: Arc<Runtime>) -> std::result::Result<(
         messages,
         executor.definitions(),
         Some(&executor),
-        &mut |text| reply.text(text),
+        &mut |step, event| match event {
+            crate::llm::Stream::Text(text) => reply.text(text),
+            crate::llm::Stream::Thought { item, part, text } => {
+                // Native adapters validate bounded coordinates before entering this display-only lane.
+                reply.output(Some(crate::history::ThoughtId { step, item, part }), text);
+            }
+        },
         runtime.limits,
         guidance,
         Some(&reply),
@@ -1943,10 +1974,16 @@ fn replay_message(
     };
     let content: Vec<v2::ContentBlock> =
         serde_json::from_value(message.content).map_err(|_| failure())?;
-    let update = if message.user {
-        v2::SessionUpdate::UserMessage(v2::UserMessage::new(message.id).content(content))
-    } else {
-        v2::SessionUpdate::AgentMessage(v2::AgentMessage::new(message.id).content(content))
+    let update = match message.kind {
+        crate::history::MessageKind::User => {
+            v2::SessionUpdate::UserMessage(v2::UserMessage::new(message.id).content(content))
+        }
+        crate::history::MessageKind::Answer => {
+            v2::SessionUpdate::AgentMessage(v2::AgentMessage::new(message.id).content(content))
+        }
+        crate::history::MessageKind::Thought => {
+            v2::SessionUpdate::AgentThought(v2::AgentThought::new(message.id).content(content))
+        }
     };
     send_update(connection, id, update).map_err(|_| failure())
 }

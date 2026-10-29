@@ -2,7 +2,7 @@
 
 mod support;
 
-use bee::llm::{Error, Message, Model, Stop};
+use bee::llm::{Error, Message, Model, Stop, Stream};
 use serde_json::{Value, json};
 use support::{Echo, Response, Server, event, profile, tool};
 
@@ -19,22 +19,33 @@ fn stream(blocks: Vec<Value>, reason: &str) -> String {
         let mut start = block.clone();
         if block["type"] == "text" {
             start["text"] = "".into();
-        } else {
+        } else if block["type"] == "tool_use" {
             start["input"] = json!({});
+        } else if block["type"] == "thinking" {
+            start["thinking"] = "".into();
+            start["signature"] = "".into();
         }
         wire += &event(
             "content_block_start",
             json!({"type":"content_block_start","index":index,"content_block":start}),
         );
-        let delta = if block["type"] == "text" {
-            json!({"type":"text_delta","text":block["text"]})
-        } else {
-            json!({"type":"input_json_delta","partial_json":block["input"].to_string()})
+        let deltas = match block["type"].as_str().unwrap() {
+            "text" => vec![json!({"type":"text_delta","text":block["text"]})],
+            "tool_use" => {
+                vec![json!({"type":"input_json_delta","partial_json":block["input"].to_string()})]
+            }
+            "thinking" => vec![
+                json!({"type":"thinking_delta","thinking":block["thinking"]}),
+                json!({"type":"signature_delta","signature":block["signature"]}),
+            ],
+            _ => vec![],
         };
-        wire += &event(
-            "content_block_delta",
-            json!({"type":"content_block_delta","index":index,"delta":delta}),
-        );
+        for delta in deltas {
+            wire += &event(
+                "content_block_delta",
+                json!({"type":"content_block_delta","index":index,"delta":delta}),
+            );
+        }
         wire += &event(
             "content_block_stop",
             json!({"type":"content_block_stop","index":index}),
@@ -45,6 +56,112 @@ fn stream(blocks: Vec<Value>, reason: &str) -> String {
         json!({"type":"message_delta","delta":{"stop_reason":reason},"usage":{"output_tokens":4}}),
     );
     wire + &event("message_stop", json!({"type":"message_stop"}))
+}
+
+#[tokio::test]
+async fn thinking_text_is_displayable_but_signatures_and_redactions_only_continue_privately() {
+    let blocks = vec![
+        json!({"type":"thinking","thinking":"visible héllo","signature":"private-signature-sentinel"}),
+        json!({"type":"redacted_thinking","data":"private-redacted-sentinel"}),
+        json!({"type":"thinking","thinking":"","signature":"private-omitted-sentinel"}),
+        json!({"type":"text","text":"answer"}),
+        json!({"type":"tool_use","id":"call-1","name":"echo","input":{"text":"result"}}),
+    ];
+    let mut complete = answer("");
+    complete["content"] = json!(blocks);
+    complete["stop_reason"] = "tool_use".into();
+    for first in [
+        Response::sse(stream(blocks.clone(), "tool_use")),
+        Response::json(complete),
+    ] {
+        let server = Server::start(vec![first, Response::json(answer("done"))]);
+        let model = Model::new(
+            profile("anthropic-messages", &server.url, ""),
+            "opaque".into(),
+            None,
+        )
+        .unwrap();
+        let mut visible = Vec::new();
+        let first = model
+            .step_stream(
+                &[Message::User("question".into())],
+                &[tool()],
+                &mut |event| match event {
+                    Stream::Text(text) => visible.push((None, text.to_owned())),
+                    Stream::Thought { item, part, text } => {
+                        visible.push((Some((item, part)), text.to_owned()))
+                    }
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            visible,
+            vec![
+                (Some((0, 0)), "visible héllo".into()),
+                (None, "answer".into())
+            ]
+        );
+        let history = vec![
+            Message::User("question".into()),
+            first.message,
+            Message::Tool {
+                id: "call-1".into(),
+                output: "result".into(),
+                is_error: false,
+            },
+        ];
+        let estimate = model.context(&history, &[tool()]).unwrap();
+        assert!(
+            estimate.estimated_input
+                > model
+                    .context(&[Message::User("question".into())], &[tool()])
+                    .unwrap()
+                    .estimated_input
+        );
+        model.step(&history, &[tool()], &mut |_| {}).await.unwrap();
+        assert!(server.request().body.get("thinking").is_none());
+        let continued = server.request().body;
+        assert_eq!(continued["messages"][1]["content"], json!(blocks));
+        // Count the native request once, including opaque bytes but not a second display copy.
+        let bytes = continued["messages"].to_string().len() + continued["tools"].to_string().len();
+        assert_eq!(estimate.estimated_input, (bytes as u64).div_ceil(3) + 256);
+        assert_eq!(
+            estimate.reserved_output,
+            continued["max_tokens"].as_u64().unwrap()
+        );
+    }
+}
+
+#[tokio::test]
+async fn malformed_thinking_and_private_delta_types_never_become_visible_output() {
+    let blocks =
+        vec![json!({"type":"thinking","thinking":"visible","signature":"private-signature"})];
+    let valid = stream(blocks, "end_turn");
+    for wire in [
+        valid.replace("\"thinking\":\"visible\"", "\"thinking\":123"),
+        valid.replace("\"signature\":\"private-signature\"", "\"signature\":123"),
+        valid.replace("\"type\":\"signature_delta\"", "\"type\":\"text_delta\""),
+        valid.replace("\"index\":0", "\"index\":1"),
+        valid[..valid.find("event: message_stop").unwrap()].to_owned(),
+    ] {
+        let server = Server::start(vec![Response::sse(wire)]);
+        let model = Model::new(
+            profile("anthropic-messages", &server.url, ""),
+            "opaque".into(),
+            None,
+        )
+        .unwrap();
+        let mut visible = String::new();
+        let error = model
+            .step_stream(&[], &[], &mut |event| match event {
+                Stream::Text(text) | Stream::Thought { text, .. } => visible.push_str(text),
+            })
+            .await
+            .unwrap_err();
+        assert!(!visible.contains("private"));
+        assert!(!format!("{error:?} {error}").contains("private"));
+    }
 }
 
 #[tokio::test]
@@ -292,9 +409,9 @@ async fn native_provider_errors_are_classified_without_echoing_their_messages() 
 }
 
 #[tokio::test]
-async fn thinking_unknown_blocks_and_truncated_streams_fail_explicitly() {
+async fn unknown_blocks_and_truncated_streams_fail_explicitly() {
     let mut thinking = answer("");
-    thinking["content"] = json!([{"type":"thinking","thinking":"sentinel","signature":"secret"}]);
+    thinking["content"] = json!([{"type":"unknown","thinking":"sentinel","signature":"secret"}]);
     let truncated = stream(vec![json!({"type":"text","text":"partial"})], "end_turn").replace(
         "event: message_stop\r\ndata: {\"type\":\"message_stop\"}\r\n\r\n",
         "",

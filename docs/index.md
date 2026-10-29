@@ -15,7 +15,8 @@ create sessions and submit prompts. Bee advertises the baseline session lifecycl
 (`session/new`, `list`, `resume`, `close`, `prompt`, `cancel`).
 
 **Chat Completions, Responses and Anthropic Messages inference are implemented.** Selected accounts receive prompts and
-stream answers over ACP. Cancellation and close interrupt pending inference. Production sessions retain successful
+stream answers and [supported displayable reasoning](inference.md#displayable-reasoning-and-acp-thoughts) over ACP.
+Cancellation and close interrupt pending inference. Production sessions retain successful
 context across close/resume and process restart. Start resume replays the separate visible transcript before current
 state. See [session history](sessions.md) for storage, retention and client restoration.
 Cancelled, failed and refused turns do not enter model context.

@@ -53,3 +53,4 @@ by editing the old one. The history is the value.
 - [ADR-028](028-account-model-availability-and-selection.md) — Account-scoped availability and qualified model selection
 - [ADR-029](029-cloudflare-ai-gateway.md) — Cloudflare REST routing and login-only acquisition of required settings
 - [ADR-030](030-scaleway-generative-apis.md) — Scaleway API-key authentication and project-scoped serverless Chat routing
+- [ADR-031](031-displayable-provider-thoughts.md) — Separate displayable thoughts from private native continuation

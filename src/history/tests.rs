@@ -1,6 +1,104 @@
 use super::*;
 
 #[tokio::test]
+async fn interleaved_thought_entities_replay_in_first_seen_order_after_interrupted_recovery() {
+    let (_root, store, id, handle) = create().await;
+    handle.accept(1, json!([])).await.unwrap();
+    let first = ThoughtId {
+        step: 0,
+        item: 0,
+        part: 0,
+    };
+    let second = ThoughtId {
+        step: 1,
+        item: 0,
+        part: 0,
+    };
+    handle.output(1, Some(first), "first ".into(), || {});
+    handle.text(1, "answer ".into(), || {});
+    handle.output(1, Some(second), "second".into(), || {});
+    handle.output(1, Some(first), "continued".into(), || {});
+    handle.text(1, "continued".into(), || {});
+    handle.drain().await.unwrap();
+    let expected = replay(&handle).await;
+    assert_eq!(
+        expected
+            .iter()
+            .map(|m| (&*m.id, m.kind))
+            .collect::<Vec<_>>(),
+        vec![
+            ("user-1", MessageKind::User),
+            ("thought-1-0-0-0", MessageKind::Thought),
+            ("agent-1", MessageKind::Answer),
+            ("thought-1-1-0-0", MessageKind::Thought),
+        ]
+    );
+    assert_eq!(expected[1].content[0]["text"], "first continued");
+    assert_eq!(expected[2].content[0]["text"], "answer continued");
+    handle.release().await.unwrap();
+    let (snapshot, restored, interrupted) = store.attach(&id).await.unwrap();
+    assert!(interrupted);
+    assert!(snapshot.messages.is_empty());
+    restored.recover().await.unwrap();
+    assert_eq!(
+        serde_json::to_value(replay(&restored).await).unwrap(),
+        serde_json::to_value(expected).unwrap()
+    );
+    // The budget covers the entire thought-bearing transcript before the first upsert.
+    let emitted = Arc::new(AtomicUsize::new(0));
+    let count = emitted.clone();
+    assert!(
+        restored
+            .replay(
+                Arc::new(ReplayBudget::new(Settings {
+                    replay_max_bytes: 1
+                })),
+                move |_| {
+                    count.fetch_add(1, Ordering::Relaxed);
+                    Ok(())
+                }
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(emitted.load(Ordering::Relaxed), 0);
+    restored.release().await.unwrap();
+}
+
+#[rstest::rstest]
+#[case::write(Fault::BeforeWrite)]
+#[case::sync(Fault::BeforeSync)]
+#[tokio::test]
+async fn thought_storage_failures_never_publish_uncommitted_display_text(#[case] fault: Fault) {
+    let (_root, _store, _id, handle) = create().await;
+    handle.accept(1, json!([])).await.unwrap();
+    handle
+        .run(move |journal, _| {
+            journal.fault = Some(fault);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let published = Arc::new(AtomicUsize::new(0));
+    let count = published.clone();
+    handle.output(
+        1,
+        Some(ThoughtId {
+            step: 0,
+            item: 0,
+            part: 0,
+        }),
+        "thought".into(),
+        move || {
+            count.fetch_add(1, Ordering::Relaxed);
+        },
+    );
+    handle.drain().await.unwrap();
+    assert!(handle.healthy().is_err());
+    assert_eq!(published.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
 async fn presentation_recovery_terminalizes_interrupted_work_without_committing_model_context() {
     let root = tempfile::tempdir().unwrap();
     let store = Store::open(root.path().join("state")).unwrap();
@@ -415,7 +513,7 @@ async fn incomplete_creations_are_not_published_to_the_session_listing() {
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(first["version"], 5);
+    assert_eq!(first["version"], 6);
     assert_eq!(first["seq"], 0);
     assert_eq!(first["event"]["id"], id);
 }

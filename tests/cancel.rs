@@ -300,7 +300,7 @@ async fn a_cancelled_turn_never_reports_end_turn() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn no_agent_message_follows_the_cancelled_idle_update() {
+async fn no_agent_message_or_thought_follows_the_cancelled_idle_update() {
     // A turn that hands its reply to another thread, which speaks only when
     // released: the case a plain drop of the turn future cannot stop.
     let release = Arc::new(Mutex::new(None::<std_mpsc::Sender<()>>));
@@ -315,6 +315,7 @@ async fn no_agent_message_follows_the_cancelled_idle_update() {
             std::thread::spawn(move || {
                 let _ = receiver.recv();
                 reply.text("too late");
+                reply.thought(0, 0, 0, "too late thought").unwrap();
                 let _ = spoke.send(());
             });
             async { future::pending::<Result<(), TurnFailure>>().await }

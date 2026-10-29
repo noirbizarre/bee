@@ -4,14 +4,16 @@ use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
 
-use super::{Error, Message, Model, Native, Step, Stop, Tool, Usage, call, string};
+use super::{
+    Error, Message, Model, Native, Step, Stop, Stream, Thoughts, Tool, Usage, call, string,
+};
 use crate::provider::{Protocol, ProtocolOptions};
 
 pub(super) async fn run(
     model: &Model,
     messages: &[Message],
     tools: &[Tool],
-    text: &mut (dyn FnMut(&str) + Send),
+    text: &mut (dyn FnMut(Stream<'_>) + Send),
 ) -> Result<Step, Error> {
     let body = request(model, messages, tools)?;
     let mut parser = Parser {
@@ -95,9 +97,22 @@ pub(super) fn request(model: &Model, messages: &[Message], tools: &[Tool]) -> Re
             body["tools"] = json!([{"type":"namespace","name":"bee","description":"Bee client-side tools","tools":body["tools"].clone()}]);
         }
     }
-    let ProtocolOptions::OpenAiResponses { cache } = model.endpoint().options() else {
+    let ProtocolOptions::OpenAiResponses {
+        cache,
+        reasoning_summary,
+    } = model.endpoint().options()
+    else {
         return Err(Error::Malformed);
     };
+    if *reasoning_summary {
+        // Compatible gateways and OAuth have independent contracts; explicit controls never probe them.
+        if model.base_url() != "https://api.openai.com/v1" || model.is_chatgpt() {
+            return Err(Error::Unsupported(
+                "reasoning_summary requires direct OpenAI Responses; use default on this route",
+            ));
+        }
+        body["reasoning"] = json!({"summary":"auto"});
+    }
     let boundaries = super::cache::openai(model, &mut body, cache)?;
     if boundaries.instructions() {
         let block = super::cache::marked_text("input_text", &model.instructions)?;
@@ -152,6 +167,15 @@ struct Item {
     arguments: String,
     parts: BTreeMap<u64, String>,
     done: Option<Value>,
+    // Distinguish text completion from part closure so late deltas cannot mutate a final summary.
+    summary_parts: BTreeMap<u64, SummaryState>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SummaryState {
+    Open,
+    TextDone,
+    Closed,
 }
 
 #[derive(Default)]
@@ -159,6 +183,7 @@ struct Parser {
     chatgpt: bool,
     items: BTreeMap<u64, Item>,
     streamed: String,
+    thoughts: Thoughts,
     result: Option<Step>,
 }
 
@@ -167,7 +192,7 @@ impl Parser {
         &mut self,
         event: Option<&str>,
         data: &str,
-        text: &mut (dyn FnMut(&str) + Send),
+        text: &mut (dyn FnMut(Stream<'_>) + Send),
     ) -> Result<(), Error> {
         if self.result.is_some() {
             return Err(Error::Malformed);
@@ -219,7 +244,7 @@ impl Parser {
                 let delta = string(&value["delta"])?;
                 item.parts.entry(index).or_default().push_str(delta);
                 self.streamed.push_str(delta);
-                text(delta);
+                text(Stream::Text(delta));
             }
             "response.function_call_arguments.delta" => {
                 let item = self.item(&value)?;
@@ -268,6 +293,13 @@ impl Parser {
                     return Err(Error::Malformed);
                 }
                 item.done = Some(full.clone());
+                if full["type"] == "reasoning" {
+                    self.summary(
+                        value["output_index"].as_u64().ok_or(Error::Malformed)?,
+                        full,
+                        text,
+                    )?;
+                }
             }
             "response.completed" | "response.incomplete" => {
                 let status = if kind == "response.completed" {
@@ -292,15 +324,77 @@ impl Parser {
                     value.get("error").unwrap_or(&value),
                 ));
             }
-            // Reasoning is never presented as visible assistant text. Its final
-            // replayable item is retained verbatim by response.completed.
             "response.reasoning_summary_part.added"
             | "response.reasoning_summary_part.done"
             | "response.reasoning_summary_text.delta"
-            | "response.reasoning_summary_text.done"
-            | "response.reasoning_text.delta"
-            | "response.reasoning_text.done" => {
-                self.item(&value)?;
+            | "response.reasoning_summary_text.done" => {
+                let index = value["output_index"].as_u64().ok_or(Error::Malformed)?;
+                let part = value["summary_index"].as_u64().ok_or(Error::Malformed)?;
+                if part >= 128 {
+                    return Err(Error::Limit);
+                }
+                let item = self.item(&value)?;
+                if item.kind != "reasoning" || value["item_id"] != item.id {
+                    return Err(Error::Malformed);
+                }
+                match kind {
+                    "response.reasoning_summary_part.added" => {
+                        if value["part"]["type"] != "summary_text"
+                            || item
+                                .summary_parts
+                                .insert(part, SummaryState::Open)
+                                .is_some()
+                        {
+                            return Err(Error::Malformed);
+                        }
+                        self.thoughts
+                            .delta(index, part, string(&value["part"]["text"])?, text)?;
+                    }
+                    "response.reasoning_summary_text.delta" => {
+                        if item.summary_parts.get(&part) != Some(&SummaryState::Open) {
+                            return Err(Error::Malformed);
+                        }
+                        self.thoughts
+                            .delta(index, part, string(&value["delta"])?, text)?;
+                    }
+                    "response.reasoning_summary_text.done" => {
+                        let closed = item.summary_parts.get_mut(&part).ok_or(Error::Malformed)?;
+                        if *closed != SummaryState::Open {
+                            return Err(Error::Malformed);
+                        }
+                        *closed = SummaryState::TextDone;
+                        self.thoughts
+                            .complete(index, part, string(&value["text"])?, text)?;
+                    }
+                    _ => {
+                        let state = item.summary_parts.get_mut(&part).ok_or(Error::Malformed)?;
+                        if value["part"]["type"] != "summary_text" || *state == SummaryState::Closed
+                        {
+                            return Err(Error::Malformed);
+                        }
+                        let text_done = *state == SummaryState::TextDone;
+                        *state = SummaryState::Closed;
+                        // A text.done snapshot is authoritative, even if a later snapshot adds a suffix.
+                        if text_done
+                            && self.thoughts.parts.get(&(index, part)).map(String::as_str)
+                                != Some(string(&value["part"]["text"])?)
+                        {
+                            return Err(Error::Malformed);
+                        }
+                        self.thoughts.complete(
+                            index,
+                            part,
+                            string(&value["part"]["text"])?,
+                            text,
+                        )?;
+                    }
+                }
+            }
+            // Raw reasoning is not the display-summary contract, even when it is plaintext.
+            "response.reasoning_text.delta" | "response.reasoning_text.done" => {
+                if self.item(&value)?.kind != "reasoning" {
+                    return Err(Error::Malformed);
+                }
             }
             _ => return Err(Error::Unsupported("Responses streaming event")),
         }
@@ -320,7 +414,7 @@ impl Parser {
         &mut self,
         response: &Value,
         streaming: bool,
-        text: &mut (dyn FnMut(&str) + Send),
+        text: &mut (dyn FnMut(Stream<'_>) + Send),
     ) -> Result<(), Error> {
         if self.chatgpt && response["status"] != "completed" {
             return Err(Error::Malformed);
@@ -399,6 +493,7 @@ impl Parser {
                             "unencrypted Responses reasoning continuation",
                         ));
                     }
+                    self.summary(index as u64, item, text)?;
                 }
                 _ => return Err(Error::Unsupported("Responses output item")),
             }
@@ -413,7 +508,7 @@ impl Parser {
             .strip_prefix(&self.streamed)
             .ok_or(Error::Malformed)?;
         if !suffix.is_empty() {
-            text(suffix);
+            text(Stream::Text(suffix));
         }
         self.result = Some(Step {
             message: Message::Assistant {
@@ -427,6 +522,49 @@ impl Parser {
             stop,
             usage: Usage::openai(&response["usage"], true),
         });
+        Ok(())
+    }
+
+    fn summary(
+        &mut self,
+        index: u64,
+        item: &Value,
+        output: &mut (dyn FnMut(Stream<'_>) + Send),
+    ) -> Result<(), Error> {
+        let parts = item["summary"].as_array().ok_or(Error::Malformed)?;
+        if parts.len() > 128 {
+            return Err(Error::Limit);
+        }
+        // Missing final parts must not silently discard text already published for this item.
+        if self
+            .thoughts
+            .parts
+            .keys()
+            .any(|(i, p)| *i == index && *p >= parts.len() as u64)
+        {
+            return Err(Error::Malformed);
+        }
+        for (part, value) in parts.iter().enumerate() {
+            if value["type"] != "summary_text" {
+                return Err(Error::Malformed);
+            }
+            if self
+                .items
+                .get(&index)
+                .and_then(|item| item.summary_parts.get(&(part as u64)))
+                .is_some_and(|state| *state != SummaryState::Open)
+                && self
+                    .thoughts
+                    .parts
+                    .get(&(index, part as u64))
+                    .map(String::as_str)
+                    != Some(string(&value["text"])?)
+            {
+                return Err(Error::Malformed);
+            }
+            self.thoughts
+                .complete(index, part as u64, string(&value["text"])?, output)?;
+        }
         Ok(())
     }
 }
