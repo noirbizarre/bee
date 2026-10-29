@@ -150,9 +150,17 @@ pub struct Runtime {
     history: Option<crate::history::Store>,
     history_settings: crate::history::Settings,
     preferences: crate::selection::Store,
+    project_mcp: Option<crate::config::Environment>,
+    direct_mcp: Arc<crate::mcp::runtime::Manager>,
 }
 
 impl Runtime {
+    /// Enable project-local MCP discovery with explicit environment sources.
+    #[must_use]
+    pub fn with_project_mcp(mut self, environment: crate::config::Environment) -> Self {
+        self.project_mcp = Some(environment);
+        self
+    }
     /// Configure native-tool routing without storing client approval decisions.
     #[must_use]
     pub fn with_permissions(mut self, settings: crate::permissions::Settings) -> Self {
@@ -181,6 +189,8 @@ impl Runtime {
             history: None,
             history_settings: Default::default(),
             preferences: Default::default(),
+            project_mcp: None,
+            direct_mcp: Arc::default(),
         }
     }
 
@@ -641,20 +651,13 @@ async fn inference(reply: Reply, runtime: Arc<Runtime>) -> std::result::Result<(
         reply: &reply,
         permissions: &runtime.permissions,
     };
-    let catalog = mcp::Catalog::discover(
-        &reply.connection,
-        &reply.mcp,
-        &reply.servers,
-        native.definitions(),
-    )
-    .await
-    .map_err(TurnFailure::new)?;
-    let executor = mcp::Composite {
-        native,
-        catalog,
-        connection: &reply.connection,
-        bindings: &reply.mcp,
-    };
+    // MCP initialization nests transport/SDK futures; keep that frame off the
+    // smaller Windows process stack, including for native-only production turns.
+    let servers = Box::pin(mcp::prepare(&reply, &runtime, native.inner.cwd())).await?;
+    let catalog = mcp::Catalog::discover(&reply, &servers, native.definitions())
+        .await
+        .map_err(TurnFailure::new)?;
+    let executor = mcp::Composite { native, catalog };
     let outcome = crate::agent::run_observed(
         &model,
         messages,
@@ -723,13 +726,16 @@ pub async fn serve_with_runtime(
 ) -> Result<()> {
     // `agent()` is `ConnectTo<Client>`, and the transport is the client's end,
     // so it is the transport that the agent connects to.
-    agent_with_runtime(providers, runtime)
+    let manager = runtime.direct_mcp.clone();
+    let result = agent_with_runtime(providers, runtime)
         .connect_to(transport)
         .await
         .map_err(|error| Error::Connection {
             // Stringified so the SDK's error type stays inside this module.
             reason: error.to_string(),
-        })
+        });
+    manager.shutdown().await;
+    result
 }
 
 /// Run the agent over the process's stdin and stdout.
@@ -826,10 +832,17 @@ pub fn agent_with_runtime(providers: Providers, runtime: Runtime) -> impl Connec
         providers,
         discovery,
         environment,
-        history,
-        history_settings,
-        runtime.preferences.clone(),
-        move |reply| inference(reply, Arc::clone(&runtime)),
+        ConnectionState {
+            history,
+            history_settings,
+            preferences: runtime.preferences.clone(),
+            direct_mcp: runtime.direct_mcp.clone(),
+            project_mcp: runtime.project_mcp.clone(),
+        },
+        // Provider/tool futures can be large in instrumented debug builds. The
+        // connection's turn task should own their heap frame rather than copy it
+        // through run_turn's cancellation/panic wrappers on the process stack.
+        move |reply| Box::pin(inference(reply, Arc::clone(&runtime))),
     )
 }
 
@@ -846,9 +859,7 @@ where
         Providers::default(),
         None,
         crate::config::Environment::default(),
-        None,
-        Default::default(),
-        Default::default(),
+        ConnectionState::default(),
         body,
     )
 }
@@ -867,26 +878,38 @@ where
         providers,
         None,
         crate::config::Environment::default(),
-        None,
-        Default::default(),
-        Default::default(),
+        ConnectionState::default(),
         body,
     )
+}
+
+#[derive(Default)]
+struct ConnectionState {
+    history: Option<crate::history::Store>,
+    history_settings: crate::history::Settings,
+    preferences: crate::selection::Store,
+    direct_mcp: Arc<crate::mcp::runtime::Manager>,
+    project_mcp: Option<crate::config::Environment>,
 }
 
 fn build<F, Fut>(
     providers: Providers,
     discovery: Option<Arc<crate::models::Service>>,
     environment: crate::config::Environment,
-    history: Option<crate::history::Store>,
-    history_settings: crate::history::Settings,
-    preferences: crate::selection::Store,
+    state: ConnectionState,
     body: F,
 ) -> impl ConnectTo<Client>
 where
     F: Fn(Reply) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = std::result::Result<(), TurnFailure>> + Send + 'static,
 {
+    let ConnectionState {
+        history,
+        history_settings,
+        preferences,
+        direct_mcp,
+        project_mcp,
+    } = state;
     let body = Arc::new(body);
     let endpoint_profiles: Vec<_> = providers
         .names()
@@ -899,7 +922,10 @@ where
             .with_discovery(discovery.clone())
             .with_preferences(preferences.clone(), environment.clone()),
     ));
-    let mcp = Arc::new(Mutex::new(mcp::Bindings::default()));
+    let mcp = Arc::new(Mutex::new(mcp::Bindings {
+        direct: direct_mcp,
+        ..Default::default()
+    }));
     let tasks: Tasks = Arc::default();
     let gates: Gates = Arc::default();
     let replay_budget = Arc::new(crate::history::ReplayBudget::new(history_settings));
@@ -910,6 +936,10 @@ where
     Agent
         .v2()
         .name("bee")
+        .on_close({
+            let manager = lock(&mcp).direct.clone();
+            async move |_connection| { manager.shutdown().await; Ok(()) }
+        })
         .on_receive_request(
             {
                 let interactions = Arc::clone(&interactions);
@@ -940,7 +970,7 @@ where
                             .as_ref()
                             .is_some_and(v2::ElicitationCapabilities::supports_url);
                     }
-                    // Advertise only transports we actually route, not HTTP or subprocess MCP.
+                    // All advertised transports share the bounded catalog and lifecycle.
                     responder.respond(
                         v2::InitializeResponse::new(
                             // Hand back the version the SDK gives us rather than
@@ -952,7 +982,8 @@ where
                         .capabilities(
                             v2::AgentCapabilities::new().session(
                                 v2::SessionCapabilities::new().mcp(
-                                    v2::McpCapabilities::new().acp(v2::McpAcpCapabilities::new()),
+                                    v2::McpCapabilities::new().acp(v2::McpAcpCapabilities::new())
+                                        .stdio(v2::McpStdioCapabilities::new()).http(v2::McpHttpCapabilities::new()),
                                 ),
                             ),
                         ),
@@ -1017,10 +1048,11 @@ where
                 let history = history.clone();
                 let gates = Arc::clone(&gates);
                 let tasks = Arc::clone(&tasks);
+                let environment = environment.clone();
                 async move |request: v2::NewSessionRequest,
                             responder: Responder<v2::NewSessionResponse>,
                             connection: V2ConnectionTo<Client>| {
-                    let servers = match mcp::declarations(request.mcp_servers) {
+                    let servers = match mcp::declarations(request.mcp_servers, request.cwd.as_ref(), &environment) {
                         Ok(servers) => servers,
                         Err(reason) => return responder.respond_with_error(invalid_params(reason)),
                     };
@@ -1116,6 +1148,8 @@ where
                 let history = history.clone();
                 let gates = Arc::clone(&gates);
                 let replay_budget = Arc::clone(&replay_budget);
+                let environment = environment.clone();
+                let project_mcp = project_mcp.clone();
                 async move |request: v2::ResumeSessionRequest,
                             responder: Responder<v2::ResumeSessionResponse>,
                             connection: V2ConnectionTo<Client>| {
@@ -1132,11 +1166,10 @@ where
                         Ok(gate) => gate,
                         Err(_) => return responder.respond_with_error(session_error(SessionError::Busy(id))),
                     };
-                    let servers = match mcp::declarations(request.mcp_servers) {
+                    let servers = match mcp::declarations(request.mcp_servers, request.cwd.as_ref(), &environment) {
                         Ok(servers) => servers,
                         Err(reason) => return responder.respond_with_error(invalid_params(reason)),
                     };
-                    let cwd: &Path = request.cwd.as_ref();
                     if let Some(store) = history.clone() {
                         let sessions = Arc::clone(&sessions);
                         let mcp = Arc::clone(&mcp);
@@ -1144,6 +1177,7 @@ where
                         let interactions = Arc::clone(&interactions);
                         let updates = connection.clone();
                         let replay_budget = Arc::clone(&replay_budget);
+                        let project_mcp = project_mcp.clone();
                         return connection.spawn(async move {
                             let _gate = gate;
                             if lock(&sessions).history(&id).is_none() {
@@ -1188,6 +1222,9 @@ where
                                 }
                                 sessions.history(&id).expect("durable attachment")
                             };
+                            if let Err(reason) = mcp::replace(&id, &servers, request.cwd.as_ref(), project_mcp.as_ref(), &mcp, &sessions, &tasks).await {
+                                return responder.respond_with_error(invalid_params(reason));
+                            }
                             if let Err(error) = refresh_recent(&sessions, &tasks, &id).await {
                                 return responder.respond_with_error(history_error(error));
                             }
@@ -1228,11 +1265,26 @@ where
                             Ok(())
                         });
                     }
-                    let options = {
-                        let mut sessions = lock(&sessions);
-                        if let Err(error) = sessions.resume(&id, cwd) {
+                    {
+                        let mut registry = lock(&sessions);
+                        if let Err(error) = registry.resume(&id, request.cwd.as_ref()) {
                             return responder.respond_with_error(session_error(error));
                         }
+                    }
+                    let sessions = Arc::clone(&sessions);
+                    let mcp = Arc::clone(&mcp);
+                    let tasks = Arc::clone(&tasks);
+                    let interactions = Arc::clone(&interactions);
+                    let replay_budget = Arc::clone(&replay_budget);
+                    let project_mcp = project_mcp.clone();
+                    let updates = connection.clone();
+                    connection.spawn(async move {
+                    let connection = updates;
+                    if let Err(reason) = mcp::replace(&id, &servers, request.cwd.as_ref(), project_mcp.as_ref(), &mcp, &sessions, &tasks).await {
+                        return responder.respond_with_error(invalid_params(reason));
+                    }
+                    let options = {
+                        let mut sessions = lock(&sessions);
                         if !lock(&tasks).contains_key(&id) {
                             sessions.refresh_recent(&id);
                         }
@@ -1282,6 +1334,7 @@ where
                     // response: the response alone does not imply idle.
                     drop(gate);
                     responder.respond(v2::ResumeSessionResponse::new().config_options(options))
+                    })
                 }
             },
             agent_client_protocol::on_receive_request!(),
@@ -1642,9 +1695,14 @@ async fn close_session(
         None => Arc::clone(&closing.gate.mutation).lock_owned().await,
     };
     let id = request.session_id.to_string();
+    let manager = lock(&mcp).direct.clone();
     let (pending, history) = {
         let mut sessions = lock(&sessions);
+        // Publish closing intent before abort wakes another runtime thread.
+        // Rejected IDs are immediately removed instead of accumulating policy state.
+        manager.closing(&id);
         if let Err(error) = sessions.close(&id) {
+            manager.reopen(&id);
             return responder.respond_with_error(session_error(error));
         }
         lock(&mcp).sessions.remove(&id);
@@ -1655,6 +1713,7 @@ async fn close_session(
     if let Some(pending) = pending {
         pending.await;
     }
+    manager.finish(&id, true).await;
     if let Some(history) = history {
         if let Err(error) = history.drain().await {
             return responder.respond_with_error(history_error(error));
@@ -1752,6 +1811,7 @@ where
     let preferences = reply.preferences.clone();
     let grouping_profile = lock(&sessions).profile_name().to_owned();
     let interactions = Arc::clone(&reply.interactions);
+    let mcp_manager = lock(&reply.mcp).direct.clone();
     let history = lock(&sessions).history(&id);
 
     // `catch_unwind` so a panicking turn ends as a failed turn and not as a
@@ -1781,20 +1841,24 @@ where
         Ok(Err(_panic)) => failed("the turn panicked; retry or report this failure"),
     };
 
-    // The Abortable has been dropped before taking this lock: cleanup and SDK
-    // request cancellation must happen before terminal idle. A concurrent cancel
-    // can still win against natural completion, but cannot start a replacement.
-    // Claim finalization before awaiting disk: a later cancel cannot invalidate
-    // an already durable successful context snapshot.
-    let mut outcome = lock(&completed).take();
-    let protocol = *lock(&selected_protocol);
-    if history.is_none() && !lock(&sessions).finalize(&id, token) {
+    // Linearize cancellation before asynchronous teardown. A close that already
+    // cancelled this turn published its closing intent under the same session lock;
+    // a later close cannot turn completed teardown into a new cancelled outcome.
+    if !lock(&sessions).finalize(&id, token) {
         stop_reason = v2::StopReason::Cancelled;
     }
+    // Inference drop revokes callers; the external owner must finish transport
+    // and process teardown before history finalization can publish terminal idle.
+    mcp_manager.finish(&id, mcp_manager.is_closing(&id)).await;
+
+    // Finalization was claimed before transport/disk waits: a later cancel
+    // cannot invalidate the successful context being made durable.
+    let mut outcome = lock(&completed).take();
+    let protocol = *lock(&selected_protocol);
     if let Some(history) = &history {
         let snapshot = {
-            let mut sessions = lock(&sessions);
-            let current = sessions.finalize(&id, token);
+            let sessions = lock(&sessions);
+            let current = sessions.is_current(&id, token);
             if !current {
                 stop_reason = v2::StopReason::Cancelled;
             }

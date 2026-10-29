@@ -56,6 +56,7 @@ pub struct Response {
     gate: Option<Receiver<()>>,
     pub status: u16,
     pub kind: &'static str,
+    pub headers: Vec<(String, String)>,
     pub body: String,
     pub delay: Duration,
     pub pause: Option<(usize, Duration)>,
@@ -68,6 +69,7 @@ impl Response {
             gate: None,
             status: 200,
             kind: "application/json",
+            headers: Vec::new(),
             body: value.to_string(),
             delay: Duration::ZERO,
             pause: None,
@@ -80,6 +82,7 @@ impl Response {
             gate: None,
             status: 200,
             kind: "text/event-stream",
+            headers: Vec::new(),
             body,
             delay: Duration::ZERO,
             pause: None,
@@ -147,12 +150,16 @@ impl Server {
                         name.eq_ignore_ascii_case("content-length")
                             .then(|| value.trim().parse().unwrap())
                     })
-                    .unwrap();
+                    .unwrap_or(0);
                 let mut body = vec![0; len];
                 socket.read_exact(&mut body).unwrap();
                 let request = Request {
                     head,
-                    body: serde_json::from_slice(&body).unwrap(),
+                    body: if body.is_empty() {
+                        Value::Null
+                    } else {
+                        serde_json::from_slice(&body).unwrap()
+                    },
                 };
                 let response = respond(&request);
                 tx.send(request).unwrap();
@@ -164,11 +171,17 @@ impl Server {
                     continue;
                 }
                 std::thread::sleep(response.delay);
+                let headers: String = response
+                    .headers
+                    .iter()
+                    .map(|(name, value)| format!("{name}: {value}\r\n"))
+                    .collect();
                 let head = format!(
-                    "HTTP/1.1 {} Fixture\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    "HTTP/1.1 {} Fixture\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n{}\r\n",
                     response.status,
                     response.kind,
-                    response.body.len()
+                    response.body.len(),
+                    headers
                 );
                 if socket.write_all(head.as_bytes()).is_ok() {
                     if let Some((index, gate)) = response.pause_gate {

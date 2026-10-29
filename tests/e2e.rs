@@ -45,7 +45,13 @@ fn subprocess_with_path(root: &tempfile::TempDir, url: &str, path: Option<&str>)
                 "--noprofile",
                 "--norc",
                 "-c",
-                "cd -- \"$1\" && exec \"$2\"",
+                // A Windows-sized main stack catches oversized async frames on
+                // Unix CI too, instead of waiting for a Windows-only overflow.
+                if cfg!(unix) {
+                    "ulimit -s 1024 && cd -- \"$1\" && exec \"$2\""
+                } else {
+                    "cd -- \"$1\" && exec \"$2\""
+                },
                 "bee-e2e",
                 root.path().to_str().unwrap(),
                 env!("CARGO_BIN_EXE_bee"),
@@ -132,6 +138,95 @@ fn result(request: &support::Request, id: &str) -> Value {
     serde_json::from_str(message["content"].as_str().unwrap()).unwrap()
 }
 
+#[tokio::test]
+async fn the_binary_executes_project_stdio_mcp_with_distinct_connection_and_tool_consent() {
+    let isolated = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::create_dir(workspace.path().join(".agents")).unwrap();
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/mcp.sh");
+    let marker = workspace.path().join("started");
+    std::fs::write(workspace.path().join(".agents/mcp.toml"), format!(
+        "[servers.echo]\ncommand=['{}', '{}']\n[servers.echo.env]\nMCP_MARKER='{}'\nMCP_CALLS='{}'\n",
+        support::bash_executable().display(), script.display(), marker.display(), workspace.path().join("called").display(),
+    )).unwrap();
+    let mut step = 0;
+    let model = Server::respond(2, move |request| {
+        step += 1;
+        Response::json(if step == 1 {
+            let name = request.body["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find_map(|tool| {
+                    tool["function"]["name"]
+                        .as_str()
+                        .filter(|name| name.starts_with("mcp_"))
+                })
+                .unwrap();
+            call("echo", name, json!({}))
+        } else {
+            assert_eq!(result(request, "echo")["result"]["extension"], 42);
+            support::chat_text("verified MCP")
+        })
+    });
+    let permissions = Arc::new(Mutex::new(Vec::new()));
+    let recorded = permissions.clone();
+    let (tx, mut updates) = tokio::sync::mpsc::unbounded_channel();
+    let client = Client
+        .v2()
+        .on_receive_request(
+            async move |request: v2::RequestPermissionRequest,
+                        responder: agent_client_protocol::Responder<
+                v2::RequestPermissionResponse,
+            >,
+                        _| {
+                let subject = serde_json::to_value(request.subject).unwrap();
+                if subject["type"] == "_bee_mcp_connection" {
+                    assert!(!marker.exists());
+                }
+                recorded.lock().unwrap().push(subject);
+                responder.respond(
+                    serde_json::from_value(
+                        json!({"outcome":{"outcome":"selected","optionId":"allow_once"}}),
+                    )
+                    .unwrap(),
+                )
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_notification(
+            async move |update: v2::UpdateSessionNotification, _| {
+                tx.send(update).map_err(Error::into_internal_error)
+            },
+            agent_client_protocol::on_receive_notification!(),
+        );
+    tokio::time::timeout(
+        TIMEOUT,
+        client.connect_with(subprocess(&isolated, &model.url), async |connection| {
+            initialize(&connection).await?;
+            let session = connection
+                .send_request(v2::NewSessionRequest::new(workspace.path()))
+                .block_task()
+                .await?
+                .session_id;
+            turn(&connection, &mut updates, &session, "verified MCP").await?;
+            connection
+                .send_request(v2::CloseSessionRequest::new(session))
+                .block_task()
+                .await?;
+            Ok(())
+        }),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let permissions = permissions.lock().unwrap();
+    assert_eq!(permissions.len(), 2);
+    assert_eq!(permissions[0]["type"], "_bee_mcp_connection");
+    assert_eq!(permissions[1]["type"], "tool_call");
+    assert!(permissions[1]["toolCall"]["_meta"]["bee/mcp"]["revision"].is_string());
+}
+
 async fn initialize(
     connection: &agent_client_protocol::V2ConnectionTo<Agent>,
 ) -> Result<(), Error> {
@@ -144,7 +239,10 @@ async fn initialize(
         .await?;
     assert_eq!(response.protocol_version, ProtocolVersion::V2);
     let capabilities = serde_json::to_value(response.capabilities).unwrap();
-    assert_eq!(capabilities, json!({"session":{"mcp":{"acp":{}}}}));
+    assert_eq!(
+        capabilities,
+        json!({"session":{"mcp":{"acp":{},"stdio":{},"http":{}}}})
+    );
     Ok(())
 }
 

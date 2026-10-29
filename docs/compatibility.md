@@ -253,8 +253,8 @@ except `auth/login` and `auth/logout`, which run client → agent.
 | `session/request_permission`, command subject | Implemented and supported | Validated native Bash when routing resolves to ask; exact command, absolute cwd and announced tool-call ID. No permission capability flag. [Approval tests][test-interactions], [request construction][interaction-code]. |
 | `allow_once`, `reject_once`; selected/cancelled outcomes | Implemented and supported | Exact offered IDs resolve to allow/reject kinds. Denial, unknown/malformed outcome or ID, cancellation, timeout and request errors never authorize work. [Fail-closed tests][test-interactions], [wire cleanup][test-stdio]. |
 | `allow_always`, `reject_always` | Implemented and supported | Client-owned persistence only. Both allow kinds approve this invocation; both reject kinds refuse it. Bee caches nothing and later ask-routed calls still request permission. `native_routing_and_snapshot_reads_preserve_client_owned_always_decisions` in [interaction tests][test-interactions]. |
-| Tool-call subjects and broader native coverage | Implemented and supported | Native read/glob/grep/list/write/edit/delete/move/copy and registered custom tools support ask routing. Reads/searches/listing default allow; mutations and custom tools default ask. Correlated pending tool-call subjects include bounded input and trusted presentation. Ordinary/snapshot paths share gating. [Rules and exact mapping](tools.md#native-permission-rules), [interaction tests][test-interactions], [wire tests][test-stdio]. MCP policy remains client-owned. |
-| Subjectless permission requests | Not implemented | Every current protected operation has a command or tool-call subject. No production subjectless workflow is claimed. |
+| Tool-call subjects and broader native coverage | Implemented and supported | Native read/glob/grep/list/write/edit/delete/move/copy and registered custom tools support ask routing. Reads/searches/listing default allow; mutations and custom tools default ask. Correlated pending tool-call subjects include bounded input and trusted presentation. Ordinary/snapshot paths share gating. [Rules and exact mapping](tools.md#native-permission-rules), [interaction tests][test-interactions], [wire tests][test-stdio]. Client-hosted ACP MCP policy remains client-owned; direct MCP calls default ask. |
+| Subjectless permission requests | Not implemented | Protected operations have command, tool-call or namespaced MCP-connection subjects. No production subjectless workflow is claimed. |
 | `elicitation/create`, form mode; `client.elicitation.form` | Partially supported | Negotiated `ask_user` form has one required string `answer`, bounded to 4096 bytes. Accept validates data; decline/cancel/invalid becomes tool failure. Richer forms: [#77](https://github.com/noirbizarre/bee/issues/77). [Form tests][test-interactions]. |
 | `elicitation/create`, URL mode; `client.elicitation.url` | Partially supported | Configured provider-login flows for missing/expired stored credentials only. Acceptance is not login completion. Successful browser scenarios are Unix-only. [Login tests][test-interactions]; broader workflows: [#77](https://github.com/noirbizarre/bee/issues/77). |
 | Provider OAuth through URL elicitation | Implemented and supported | ChatGPT browser login uses standard URL elicitation; subsequent token renewal is provider-side, not `auth/login`. `chatgpt_browser_login_renews_between_native_tool_requests_and_commits_history` in [OAuth boundary tests][test-oauth]. |
@@ -280,8 +280,8 @@ MCP operations below are inner MCP functionality carried by ACP, not extra stand
 | ACP attachments / `session.mcp.acp` | V2 experimental | Implemented and supported | Client-hosted endpoints, discovered per prompt and rebound on resume (including empty replacement); removed on close. [Production MCP tests][test-mcp], [implementation][mcp-code]. |
 | `mcp/message` request carrier | V2 experimental | Partially supported | Bee sends requests to client endpoints; no Bee-hosted MCP endpoint or incoming MCP service. Unique connection-scoped IDs and protocol metadata; inner result/error JSON preserved. [Production tests][test-mcp], [envelope unit tests][mcp-code]. |
 | `mcp/message` notifications | V2 experimental | Planned | No incoming catalog invalidation/subscription notifications handled yet. Per-prompt rediscovery is not subscription support. [#82](https://github.com/noirbizarre/bee/issues/82). |
-| Direct `stdio` / `session.mcp.stdio` | V2 | Planned | Declarations currently rejected; no local server launches. [#70](https://github.com/noirbizarre/bee/issues/70). |
-| Direct `http` / `session.mcp.http` | V2 | Planned | Declarations currently rejected; no direct HTTP MCP connections. [#70](https://github.com/noirbizarre/bee/issues/70). |
+| Direct `stdio` / `session.mcp.stdio` | V2 | Implemented and supported | Lazy session-owned processes with isolated environment, separate startup/call permissions, process group/job cleanup before idle/close. `project_servers_require_separate_approvals_reuse_connections_and_preserve_results` and `interrupted_stdio_work_is_reaped_before_terminal_idle` in [production tests][test-mcp]. [Subset and policy](mcp.md). |
+| Direct `http` / `session.mcp.http` | V2 | Partially supported | Streamable HTTP with HTTPS/loopback HTTP, explicit headers, JSON/SSE responses, no redirects or automatic tool POST retries. No OAuth or legacy SSE transport. Pinned rmcp 3.7.0, MCP through 2025-11-25; bounded raw-envelope preservation and stateful deletion/no-retry tests in `src/mcp/runtime.rs`. [Production tests][test-mcp], [subset](mcp.md). |
 | `tools/list` / `tools/call` | MCP over ACP | Implemented and supported | Pagination/cycle detection, stable aliases, offline argument-schema validation, complete JSON envelopes and deadlines. Bounds: 32 servers, 64 pages/server, 256 tools, 1 MiB catalog, depth 32. [Production tests][test-mcp], [limits/code][mcp-code]. |
 | Resources: listing/reading/templates/subscriptions | MCP over ACP | Planned | Not currently exposed; [#82](https://github.com/noirbizarre/bee/issues/82). |
 | Prompts: listing/retrieval | MCP over ACP | Planned | Not currently exposed; [#82](https://github.com/noirbizarre/bee/issues/82). |
@@ -289,9 +289,9 @@ MCP operations below are inner MCP functionality carried by ACP, not extra stand
 | Interactive `input_required` / task continuation | MCP over ACP | Planned | Current executor rejects non-complete outcomes explicitly; [#82](https://github.com/noirbizarre/bee/issues/82), [failure tests][test-mcp]. |
 | Sampling and roots | MCP over ACP | Not planned | No handlers or capabilities advertised. Do not infer support from using MCP tools. [MCP request metadata][mcp-code]. |
 
-The client currently owns MCP configuration/orchestration. [#19](https://github.com/noirbizarre/bee/issues/19)
-proposes Bee-owned project-local definitions; that separate future configuration proposal is not an ACP capability
-or a currently supported convention. Direct attachment transport work is tracked explicitly in #70.
+Bee supports [project-local TOML definitions and Claude JSON fallback](mcp.md), independently of ACP capabilities.
+Project and client identities coexist without overrides; direct connections require separate connection/call policy,
+while client-hosted ACP servers retain client-owned policy. This implements the shared runtime needed by #19 and #70.
 
 ### Other experimental features
 
@@ -328,7 +328,7 @@ the following v1 surfaces available. V2 support described above applies only to 
 | `session/request_permission`; `elicitation/create`, `elicitation/complete` | Not planned | No v1 interaction boundary. V2 command subjects and negotiated elicitation use the v2 schemas. |
 | `$/cancel_request`, JSON-RPC error/transport behavior on v1 | Not planned | Shared SDK machinery does not establish a tested Bee v1 endpoint. V2 request cancellation is assessed separately. |
 | `promptCapabilities`: image/audio/embeddedContext; text/resource links | Not planned | No v1 prompt ingestion. Planned #22 is for Bee's v2 prompt boundary. |
-| `mcpCapabilities`: stdio/http/sse; experimental acp | Not planned | No v1 MCP attachment support; legacy SSE is absent from v2. V2 direct stdio/HTTP work is #70. |
+| `mcpCapabilities`: stdio/http/sse; experimental acp | Not planned | No v1 MCP attachment support; legacy SSE is absent from v2. V2 supports the documented direct stdio/Streamable HTTP subset. |
 | `user_message_chunk`, `agent_message_chunk`, `agent_thought_chunk` | Not planned | No v1 message/thought emission; v2 adds full message upserts and changed lifecycle semantics. |
 | `tool_call`, `tool_call_update`; content/diff/terminal references | Not planned | No v1 tool presentation. V2 uses upserts/chunks and different structured diff/terminal shapes. |
 | `plan`, `available_commands_update`, `session_info_update`, `usage_update` | Not planned | No v1 plan/command/metadata/usage emission. V2 item plans use `plan_update` with `planId`. |
@@ -574,7 +574,7 @@ requests only current state. Replay never reexecutes tools. One connection owns 
 competing resumes fail explicitly. See [session history](sessions.md) for the storage and retention contract.
 
 The pinned v2 schema has no separate durability/replay capability flag. Bee continues advertising
-only its implemented MCP transport and baseline lifecycle, without v1 `loadSession` flags.
+its implemented MCP transports and baseline lifecycle, without v1 `loadSession` flags.
 
 ## Unsupported and deferred behavior
 
@@ -583,7 +583,7 @@ only its implemented MCP transport and baseline lifecycle, without v1 `loadSessi
   cannot be recovered after those processes exit. Missing/corrupt history fails explicitly.
 - **MCP interaction:** client-hosted MCP denials are ordinary tool errors; they are not
   ACP permission outcomes. MCP `input_required` and task continuations are rejected.
-  Only client-hosted ACP MCP attachments are advertised, not direct stdio/HTTP MCP servers.
+  Direct stdio/Streamable HTTP MCP uses separate connection/tool consent; OAuth and legacy SSE remain unsupported.
 - **Other optional surfaces:** image/audio/embedded prompt context, session deletion,
   forks and additional directories are not advertised. Resource links are references
   only and are never fetched.

@@ -199,9 +199,10 @@ embedded ACP runtimes can inject settings with `Runtime::with_permissions`.
 
 ## Client-hosted MCP tools
 
-Bee advertises `session.mcp.acp`. The client hosts or proxies MCP servers and declares their opaque server IDs in
-`session/new` or `session/resume`. Bee rejects HTTP, stdio and unknown server transports; it does not launch MCP
-processes or maintain MCP configuration. A successful resume replaces the session's attachments, including clearing
+Bee advertises `session.mcp.acp`, `session.mcp.stdio` and `session.mcp.http`. The client can host or proxy MCP servers
+and declare opaque ACP server IDs in `session/new` or `session/resume`, or attach direct stdio/Streamable HTTP servers.
+Bee also discovers [project-local MCP definitions](mcp.md), with distinct source identities and explicit consent.
+A successful resume replaces the session's client attachments, including clearing
 them when the list is empty. Closing removes attachments; retained conversation context does not grant access to old
 servers. Failed resume requests leave attachments unchanged.
 
@@ -227,7 +228,8 @@ code/message/data/extensions are preserved. This JSON becomes the provider's nat
 Anthropic additionally receives `is_error`. Non-text MCP content is preserved as JSON, not rendered as model-native
 images or resources.
 
-**Permissions belong to the client/server.** Bee does not request approval before each call or interpret annotations
+**For client-hosted ACP servers, permissions belong to the client/server.** Bee does not request approval before each
+such call or interpret annotations
 as authorization. Inner MCP errors, permission denials, tools that disappear after discovery and `isError: true`
 results become ordinary tool errors for model recovery. Outer ACP failures, malformed results and timeouts become
 sanitized local error envelopes. Interactive `input_required`, tasks and unknown result types are explicit unsupported
@@ -243,6 +245,11 @@ Calls also share the normal turn step/call budgets and context accounting with n
 Cancellation or close drops pending discovery/call futures and triggers SDK request cancellation. Remote cancellation
 is cooperative and cannot undo side effects. Bee never automatically retries an MCP call. Cancelled and failed turns
 are excluded from future model context under the normal turn contract.
+
+Direct servers share these catalog/result checks, with source-qualified aliases and labels. They use the pinned
+MCP initialization lifecycle rather than `mcp/message`, separate default-ask connection/tool permissions, bounded raw
+transport ingress, and session-owned process/connection cleanup. See [MCP configuration](mcp.md) for formats,
+credentials, protocol versions, coexistence and exact consent/lifetime semantics.
 
 ## Implement and register a tool
 

@@ -107,6 +107,13 @@ clap = { version = "4", features = ["derive", "env", "wrap_help"] }
 # `stdio` is the SDK's native stdin/stdout transport (ADR-003).
 # `process` owns local outbound delegates, including child guards and stderr draining.
 agent-client-protocol = { version = "=3.5.0", features = ["stdio", "process", "unstable_protocol_v2", "unstable_mcp_over_acp"] }
+# Direct MCP shares the pinned SDK lifecycle, with a raw ingress adapter so typed
+# decoding cannot discard tool-result extensions or error data.
+rmcp = { version = "=3.7.0", default-features = false, features = ["client", "transport-async-rw", "transport-streamable-http-client"] }
+sse-stream = "0.2"
+http = "1"
+# Process groups / Windows jobs keep descendants inside direct MCP ownership.
+process-wrap = { version = "=10.0.1", default-features = false, features = ["tokio1", "process-group", "job-object", "kill-on-drop"] }
 
 # SDK task cancellation and stream combinators. Tokio supplies model I/O's
 # reactor in the binary; the ACP transport itself stays runtime-agnostic.
@@ -179,8 +186,8 @@ tokio = { version = "1", features = ["test-util"] }
 # The client side of the MCP-over-ACP spike (tests/mcp.rs, ADR-002). The SDK core
 # has no tool builder, so a test client needs this companion crate to host a tool.
 # Exact pin and the same two features as the SDK, for the same reason: the draft
-# MCP binding may change in a minor release. Dev-only, so Bee itself pulls in no
-# rmcp.
+# MCP binding may change in a minor release. This server-hosting adapter remains
+# dev-only; production direct MCP uses the separately pinned rmcp client above.
 agent-client-protocol-rmcp = { version = "=4.0.5", features = ["unstable_protocol_v2", "unstable_mcp_over_acp"] }
 assert_cmd = "2"
 predicates = "3"

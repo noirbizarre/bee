@@ -28,7 +28,7 @@ async fn a_v2_client_can_initialize_the_bee_agent_in_process() -> Result<(), Err
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn the_bee_agent_advertises_sessions_and_only_acp_mcp_transport() -> Result<(), Error> {
+async fn the_bee_agent_advertises_all_implemented_mcp_transports() -> Result<(), Error> {
     Client
         .v2()
         .connect_with(bee::acp::agent(), async |connection| {
@@ -48,8 +48,8 @@ async fn the_bee_agent_advertises_sessions_and_only_acp_mcp_transport() -> Resul
             assert!(session.prompt.is_none());
             let mcp = serde_json::to_value(session.mcp.expect("MCP is implemented")).unwrap();
             assert!(mcp.get("acp").is_some());
-            assert!(mcp.get("http").is_none());
-            assert!(mcp.get("stdio").is_none());
+            assert!(mcp.get("http").is_some());
+            assert!(mcp.get("stdio").is_some());
             assert!(session.delete.is_none());
             assert!(session.additional_directories.is_none());
             Ok(())

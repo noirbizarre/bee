@@ -9,8 +9,13 @@ A minimal, headless Rust agent runtime implementing ACPv2.
 Bee is the agent side of an ACPv2 connection: the agentic loop and LLM provider
 integration, usable with any ACPv2 client. It is **not** an orchestration
 platform, has no UI of its own, and is not tied to Hive or any one client. MCP
-configuration and orchestration are the client's concern, reached through the
-ACPv2 client-agent contract. Do not propose a TUI, a web frontend, a plugin
+servers come from ACP client attachments or project `.agents/mcp.toml`,
+with Claude `.mcp.json` fallback. Direct
+stdio/Streamable HTTP connections are session-owned, with separate default-ask
+launch/connect and tool-call policy. Configuration never launches servers;
+cancelled/retired owners drain before terminal idle. Client-hosted ACP MCP retains
+client-owned permission policy. `.agents/skills/` remains standard Agent Skills.
+Do not propose a TUI, a web frontend, a plugin
 framework or a provider abstraction ahead of a concrete need.
 
 The library's `acp::client` boundary also controls explicitly selected `[agents.NAME]` local stdio delegates using
@@ -110,6 +115,7 @@ src/
 ├── acp.rs      the ACPv2 boundary: only this module and its submodules import the SDK;
 │               the agent core, and `serve` over any transport
 ├── acp/mcp.rs  session-scoped client MCP discovery, routing and composite execution
+├── mcp/        SDK-free project definitions and session-owned direct MCP runtime/transport
 ├── acp/interactions.rs client-owned Bash authorization, form input and URL login correlation
 ├── acp/plans.rs turn-owned plan operations and standard ACP item-plan publication
 ├── session.rs  session state, free of the SDK

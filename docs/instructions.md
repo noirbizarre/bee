@@ -9,7 +9,10 @@ Chat Completions, Responses and Anthropic Messages. No Bee-specific skill file o
 For each session, Bee finds the nearest ancestor containing a `.git` directory or worktree marker file. That directory
 is the project root; without a marker, the session's working directory is the root. Bee loads `AGENTS.md` from the root
 through the session directory. It does not search above the project root. This traversal is independent of configuration
-loading, which still uses the launch directory only.
+loading of `.config/bee.toml`, which still uses the launch directory only.
+`.agents/` is Bee's canonical project agent-resource directory.
+[Project MCP configuration](mcp.md) uses the same root boundary and a separate
+`.agents/mcp.toml` source; `.agents/skills/` is reserved for standard Agent Skills.
 
 `~/.agents/AGENTS.md` supplies additional user instructions alongside the built-in system prompt. Without a usable home
 directory, user-level discovery is disabled; Windows falls back from absent or empty `HOME` to `USERPROFILE`.

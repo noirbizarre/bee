@@ -133,11 +133,14 @@ impl Sources {
                 "use an existing accessible session directory",
             )
         })?;
-        let root = cwd
-            .ancestors()
-            .find(|p| p.join(".git").exists())
-            .unwrap_or(&cwd)
-            .to_path_buf();
+        let root = crate::mcp::project_root(&cwd).map_err(|_| {
+            Diagnostic::new(
+                "bee::instructions::root",
+                &cwd,
+                "cannot resolve project boundary",
+                "use an accessible session directory",
+            )
+        })?;
         let (catalog, mut diagnostics) =
             crate::skills::discover(&root, self.home.as_deref(), &self.skills).await;
         // Repeated aliases or inaccessible roots should not exhaust the notice budget.

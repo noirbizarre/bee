@@ -40,7 +40,9 @@ only, never fetched). The SDK-free loop supports injected function executors; pr
 `bash`, `read`, `glob`, `grep`, `list`, `write`, `edit`, `delete`, `move`, and `copy` tools in each session's working directory.
 Standard ACP tool cards, committed file/directory diffs, and agent-owned Bash terminal output are retained for replay.
 It also discovers and invokes client-hosted MCP tools through ACPv2's `session.mcp.acp` transport, alongside native
-tools. The client owns MCP configuration and permission policy; denials are returned to the model as tool errors.
+tools. Client-hosted servers keep client-owned permission policy. Bee also supports
+[project-local MCP servers](docs/mcp.md) and direct stdio/Streamable HTTP client attachments,
+with separate launch/connect and tool-call approvals and session-owned cleanup.
 Native Bash requests client permission before execution. Form-capable clients receive
 an `ask_user` tool; URL-capable clients can handle provider browser sign-in when a
 stored credential is missing or expired. See [user interactions](docs/tools.md#acp-user-interactions).
@@ -134,7 +136,8 @@ qualified IDs to disambiguate collisions. The compiled inventory includes OpenAI
 Ollama, OpenCode Zen/Go, DeepSeek, Google AI Studio/Cloud, Groq, Mistral, xAI and custom endpoints. Grok models use xAI;
 Groq is a separate provider. See the [inventory](docs/providers.md#inspect-compiled-in-providers).
 OpenRouter's sign-in returns an API key; Cloudflare uses a scoped API token and not Wrangler's login; remote MCP server
-authorization is a separate audience and is not implemented. Credentials are resolved when inference needs them. See the
+OAuth is a separate audience and is not implemented; direct MCP supports explicit environment/header credentials.
+Credentials are resolved when inference needs them. See the
 [documentation](https://noirbizarre.github.io/bee/#authentication).
 
 ## Scope
@@ -157,8 +160,8 @@ handling are implemented. Richer observability remains future work.
 - Bee is an agent runtime, not an orchestration platform.
 - Bee does not provide its own TUI, web interface or session-management frontend.
 - Bee does not assume it will only be used with Hive or any particular ACPv2 client.
-- MCP configuration and orchestration are not Bee-specific responsibilities. Bee should use the capabilities provided
-  through the ACPv2 client-agent contract, where the protocol supports them.
+- Bee does not provide an MCP registry service or configuration UI. Project-local definitions and ACP attachments use
+  standard MCP transports and tools with client-mediated consent.
 - WebAssembly-based extensions are a possible future direction, not an initial requirement.
 - Bee does not assume ACPv2 provides a universal implementation of provider authentication. Each browser sign-in is
   described in data and limited to one mechanism, not a generic OAuth client.

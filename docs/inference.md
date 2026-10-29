@@ -421,12 +421,13 @@ asks by default before Bash/mutations/custom tools, and adds `ask_user`
 when form elicitation is negotiated. Missing/expired stored credentials can initiate
 URL-based browser login before the first model request. See
 [ACP user interactions](tools.md#acp-user-interactions) for outcomes and cancellation.
-Client-hosted [MCP tools](tools.md#client-hosted-mcp-tools) join this catalog through the ACP boundary's composite
+Client-hosted and [project/direct MCP tools](mcp.md) join this catalog through the ACP boundary's composite
 executor. Catalog discovery runs on each prompt; permission denials and invocation failures are correlated tool
 results. Complete MCP result/error envelopes are JSON strings in each provider's native tool-result representation.
 Native filesystem tools resolve relative paths against the session cwd, while configuration is loaded from the launch
 directory. MCP arguments are forwarded unchanged; their path resolution, working directory and filesystem authority
-belong to the client/server integration.
+belong to the server integration; project stdio uses the configured project-root-relative cwd,
+while direct client stdio uses session cwd.
 Cancelling or closing a session drops pending inference and tool futures and signals native-tool cancellation tokens.
 Executors must cooperate with cancellation, and external side effects cannot be rolled back.
 Library callers can use `agent::run_with_limits` for explicit policy or `acp::Runtime` for a custom catalog and policy.

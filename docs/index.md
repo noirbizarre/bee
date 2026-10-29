@@ -28,6 +28,9 @@ using each session's working directory.
 Client-hosted MCP tools are discovered and invoked through ACPv2's `session.mcp.acp` transport alongside the native
 catalog. The client supplies server attachments and enforces permissions. See [tools](tools.md) for the contracts,
 execution context and supported MCP subset.
+Bee also supports [project-local MCP definitions](mcp.md) in `.agents/mcp.toml`,
+plus direct stdio/Streamable HTTP
+attachments. Direct connections and tool calls require separate consent by default.
 Native Bash and mutation calls request client permission by default; read-only tools
 run directly. [Ordered permission rules](tools.md#native-permission-rules) can allow,
 ask or deny native operations, with project-only tightening. Form-capable clients also receive
@@ -74,6 +77,7 @@ concatenate in order, while project rules only tighten decisions. An empty proje
 
 An empty `BEE_CONFIG` is unset; a relative path resolves from Bee's process working directory. Configuration is loaded
 at launch, not reloaded from each session's `cwd`. On Windows, an absent or empty `HOME` falls back to `USERPROFILE`.
+Project MCP resources are separate: they follow the session project root and reload at prompt boundaries and resume.
 All XDG roots must be absolute; empty or relative roots use the home-directory fallback:
 
 | Purpose | XDG location | Home fallback |
@@ -674,8 +678,8 @@ These are different things and Bee keeps them apart:
   [REST protocol restrictions](inference.md#cloudflare-ai-gateway-requests) and account/model billing requirements apply.
 - **Inference credentials** (everything above) authenticate Bee to an *LLM provider*. **MCP server authorization**
   (OAuth 2.1 for a remote tool server) is a separate audience: the credential store keeps the two in separate tables so
-  one can never be offered for the other. The MCP authorization flow itself is not implemented; MCP configuration stays
-  the client's concern.
+  one can never be offered for the other. MCP OAuth is not implemented; direct servers accept explicit
+  [environment/header credentials](mcp.md), independently of LLM accounts.
 
 ### Where credentials are kept
 
@@ -758,8 +762,8 @@ orchestration belong to the client. Its responsibilities are:
 - Bee is an agent runtime, not an orchestration platform.
 - Bee does not provide its own TUI, web interface or session-management frontend.
 - Bee does not assume it will only be used with Hive or any particular ACPv2 client.
-- MCP configuration and orchestration are not Bee-specific responsibilities. Bee should use the capabilities provided
-  through the ACPv2 client-agent contract, where the protocol supports them.
+- Bee does not provide an MCP registry service or configuration UI. Project-local definitions and ACP attachments use
+  standard MCP transports and tools with client-mediated consent.
 - WebAssembly-based extensions are a possible future direction, not an initial requirement.
 - Bee does not assume ACPv2 provides a universal implementation of provider authentication. Each browser sign-in is
   described in data and limited to one mechanism, not a generic OAuth client.

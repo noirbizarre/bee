@@ -97,6 +97,626 @@ async fn initialize(
     Ok(())
 }
 
+fn project_config(root: &std::path::Path, text: &str) {
+    std::fs::create_dir_all(root.join(".agents")).unwrap();
+    std::fs::write(root.join(".agents/mcp.toml"), text).unwrap();
+}
+
+fn project_environment() -> bee::config::Environment {
+    bee::config::Environment::default().with_variable("PATH", &std::env::var("PATH").unwrap())
+}
+
+fn stdio_config(root: &std::path::Path, block: bool) -> String {
+    let command = support::bash_executable();
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/mcp.sh");
+    // TOML literal strings preserve Windows paths without escaping executable settings.
+    format!(
+        "[servers.echo]\ncommand=['{}', '{}']\n[servers.echo.env]\nMCP_MARKER='{}'\nMCP_CALLS='{}'\nMCP_BLOCK='{}'\n",
+        command.display(),
+        script.display(),
+        root.join("started").display(),
+        root.join("called").display(),
+        if block { "yes" } else { "no" }
+    )
+}
+
+fn direct_http(count: usize, sse: bool) -> Server {
+    Server::respond(count, move |request| {
+        let result = match request.body["method"].as_str().unwrap() {
+            "initialize" => {
+                json!({"protocolVersion":request.body["params"]["protocolVersion"],"capabilities":{"tools":{}},"serverInfo":{"name":"fixture","version":"1"}})
+            }
+            "notifications/initialized" => {
+                let mut response = Response::json(json!({}));
+                response.status = 202;
+                return response;
+            }
+            "tools/list" => {
+                json!({"tools":[{"name":"echo.original","inputSchema":{"type":"object"}}]})
+            }
+            "tools/call" => {
+                json!({"content":[],"structuredContent":{"nested":[1,true,null]},"extension":42})
+            }
+            _ => panic!("unexpected method"),
+        };
+        let response = json!({"jsonrpc":"2.0","id":request.body["id"],"result":result});
+        if sse {
+            Response::sse(format!("event: message\ndata: {response}\n\n"))
+        } else {
+            Response::json(response)
+        }
+    })
+}
+
+#[tokio::test]
+async fn changed_credentials_require_fresh_connection_consent_and_invalid_reload_retires_old_processes()
+ {
+    let root = tempfile::tempdir().unwrap();
+    let config = stdio_config(root.path(), false);
+    project_config(root.path(), &config);
+    let model = Server::start(
+        (0..3)
+            .map(|_| Response::json(answer("openai-chat")))
+            .collect(),
+    );
+    let permissions = Arc::new(Mutex::new(Vec::new()));
+    let recorded = permissions.clone();
+    let (tx, mut updates) = tokio::sync::mpsc::unbounded_channel();
+    let client = Client
+        .v2()
+        .on_receive_request(
+            async move |request: v2::RequestPermissionRequest,
+                        responder: Responder<v2::RequestPermissionResponse>,
+                        _| {
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push(serde_json::to_value(request.subject).unwrap());
+                responder.respond(
+                    serde_json::from_value(
+                        json!({"outcome":{"outcome":"selected","optionId":"allow_once"}}),
+                    )
+                    .unwrap(),
+                )
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_notification(
+            async move |update: v2::UpdateSessionNotification, _| {
+                tx.send(update).map_err(Error::into_internal_error)
+            },
+            agent_client_protocol::on_receive_notification!(),
+        );
+    let runtime = bee::acp::Runtime::new(
+        bee::agent::Limits::default(),
+        bee::tool::Registry::default(),
+    )
+    .with_project_mcp(project_environment());
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        client.connect_with(
+            bee::acp::agent_with_runtime(
+                support::providers("openai-chat", &model.url, ""),
+                runtime,
+            ),
+            async |connection| {
+                initialize(&connection).await?;
+                let session = connection
+                    .send_request(v2::NewSessionRequest::new(root.path().to_path_buf()))
+                    .block_task()
+                    .await?
+                    .session_id;
+                for step in 0..4 {
+                    if step == 2 {
+                        project_config(
+                            root.path(),
+                            &format!("{config}PRIVATE='private-credential-sentinel'\n"),
+                        );
+                    }
+                    if step == 3 {
+                        project_config(root.path(), "private-credential-sentinel = [");
+                    }
+                    connection
+                        .send_request(v2::PromptRequest::new(
+                            session.clone(),
+                            vec!["question".into()],
+                        ))
+                        .block_task()
+                        .await?;
+                    let stop = idle(&mut updates).await.stop_reason;
+                    if step == 3 {
+                        assert!(matches!(stop, Some(v2::StopReason::Error(_))));
+                    } else {
+                        assert_eq!(stop, Some(v2::StopReason::EndTurn));
+                    }
+                }
+                Ok(())
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let permissions = permissions.lock().unwrap();
+    assert_eq!(permissions.len(), 2);
+    assert_ne!(permissions[0]["revision"], permissions[1]["revision"]);
+    assert!(
+        !serde_json::to_string(&*permissions)
+            .unwrap()
+            .contains("private-credential-sentinel")
+    );
+    let pids = std::fs::read_to_string(root.path().join("started")).unwrap();
+    assert_eq!(pids.lines().count(), 2);
+    #[cfg(unix)]
+    for pid in pids.lines() {
+        assert!(
+            nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid.parse().unwrap()), None).is_err()
+        );
+    }
+}
+
+#[rstest::rstest]
+#[case("openai-chat", "stdio")]
+#[case("openai-responses", "stdio")]
+#[case("anthropic-messages", "stdio")]
+#[case("openai-chat", "http")]
+#[case("openai-responses", "http")]
+#[case("anthropic-messages", "http")]
+#[case("openai-chat", "sse")]
+#[case("openai-chat", "attachment-stdio")]
+#[tokio::test]
+async fn project_servers_require_separate_approvals_reuse_connections_and_preserve_results(
+    #[case] protocol: &'static str,
+    #[case] transport: &str,
+) {
+    let root = tempfile::tempdir().unwrap();
+    let model = model(protocol);
+    let http = matches!(transport, "http" | "sse").then(|| direct_http(5, transport == "sse"));
+    project_config(
+        root.path(),
+        &http
+            .as_ref()
+            .map(|s| format!("[servers.echo]\nurl='{}'", s.url))
+            .unwrap_or_else(|| stdio_config(root.path(), false)),
+    );
+    let attachments = if transport == "attachment-stdio" {
+        let definition = bee::mcp::config::discover(root.path(), &project_environment())
+            .unwrap()
+            .remove(0);
+        std::fs::remove_file(root.path().join(".agents/mcp.toml")).unwrap();
+        let bee::mcp::config::Transport::Stdio {
+            command, args, env, ..
+        } = definition.transport
+        else {
+            panic!()
+        };
+        serde_json::from_value(json!([{"type":"stdio","name":"echo","command":command,"args":args,"env":env.into_iter().map(|(name,value)| json!({"name":name,"value":value})).collect::<Vec<_>>()}])).unwrap()
+    } else {
+        Vec::new()
+    };
+    let profiles = support::providers(protocol, &model.url, "");
+    let permissions = Arc::new(Mutex::new(Vec::new()));
+    let recorded = permissions.clone();
+    let marker = root.path().join("started");
+    let (tx, mut updates) = tokio::sync::mpsc::unbounded_channel();
+    let client = Client
+        .v2()
+        .on_receive_request(
+            async move |request: v2::RequestPermissionRequest,
+                        responder: Responder<v2::RequestPermissionResponse>,
+                        _| {
+                let subject = serde_json::to_value(&request.subject).unwrap();
+                if subject["type"] == "_bee_mcp_connection" {
+                    assert!(!marker.exists(), "spawn preceded approval");
+                }
+                recorded.lock().unwrap().push(subject);
+                responder.respond(
+                    serde_json::from_value(
+                        json!({"outcome":{"outcome":"selected","optionId":"allow_once"}}),
+                    )
+                    .unwrap(),
+                )
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_notification(
+            async move |update: v2::UpdateSessionNotification, _| {
+                tx.send(update).map_err(Error::into_internal_error)
+            },
+            agent_client_protocol::on_receive_notification!(),
+        );
+    let runtime = bee::acp::Runtime::new(
+        bee::agent::Limits::default(),
+        bee::tool::Registry::default(),
+    )
+    .with_project_mcp(project_environment());
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        client.connect_with(
+            bee::acp::agent_with_runtime(profiles, runtime),
+            async |connection| {
+                initialize(&connection).await?;
+                let mut request = v2::NewSessionRequest::new(root.path().to_path_buf());
+                request.mcp_servers = attachments;
+                let session = connection
+                    .send_request(request)
+                    .block_task()
+                    .await?
+                    .session_id;
+                for _ in 0..2 {
+                    connection
+                        .send_request(v2::PromptRequest::new(
+                            session.clone(),
+                            vec!["question".into()],
+                        ))
+                        .block_task()
+                        .await?;
+                    assert_eq!(
+                        idle(&mut updates).await.stop_reason,
+                        Some(v2::StopReason::EndTurn)
+                    );
+                }
+                connection
+                    .send_request(v2::CloseSessionRequest::new(session))
+                    .block_task()
+                    .await?;
+                Ok(())
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let requests = permissions.lock().unwrap();
+    assert_eq!(
+        requests.len(),
+        2,
+        "one connection approval and one call approval"
+    );
+    assert_eq!(requests[0]["type"], "_bee_mcp_connection");
+    assert_eq!(requests[1]["type"], "tool_call");
+    if transport.ends_with("stdio") {
+        let started = std::fs::read_to_string(root.path().join("started")).unwrap();
+        assert_eq!(
+            started.lines().count(),
+            1,
+            "second prompt must reuse process"
+        );
+        #[cfg(unix)]
+        assert!(
+            nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(started.trim().parse().unwrap()),
+                None
+            )
+            .is_err(),
+            "close response preceded process reap"
+        );
+    }
+    model.request();
+    let result_request = model.request();
+    assert!(result_request.body.to_string().contains("extension"));
+    assert!(result_request.body.to_string().contains("42"));
+}
+
+#[rstest::rstest]
+#[case(false)]
+#[case(true)]
+#[tokio::test]
+async fn denied_connection_has_no_process_or_network_effects(#[case] http: bool) {
+    let root = tempfile::tempdir().unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    project_config(
+        root.path(),
+        &if http {
+            format!(
+                "[servers.echo]\nurl='http://{}/mcp'",
+                listener.local_addr().unwrap()
+            )
+        } else {
+            stdio_config(root.path(), false)
+        },
+    );
+    let model = model("openai-chat");
+    let (tx, mut updates) = tokio::sync::mpsc::unbounded_channel();
+    let client = Client
+        .v2()
+        .on_receive_request(
+            async |_: v2::RequestPermissionRequest,
+                   responder: Responder<v2::RequestPermissionResponse>,
+                   _| {
+                responder.respond(
+                    serde_json::from_value(
+                        json!({"outcome":{"outcome":"selected","optionId":"reject_once"}}),
+                    )
+                    .unwrap(),
+                )
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_notification(
+            async move |update: v2::UpdateSessionNotification, _| {
+                tx.send(update).map_err(Error::into_internal_error)
+            },
+            agent_client_protocol::on_receive_notification!(),
+        );
+    let runtime = bee::acp::Runtime::new(
+        bee::agent::Limits::default(),
+        bee::tool::Registry::default(),
+    )
+    .with_project_mcp(project_environment());
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        client.connect_with(
+            bee::acp::agent_with_runtime(
+                support::providers("openai-chat", &model.url, ""),
+                runtime,
+            ),
+            async |connection| {
+                initialize(&connection).await?;
+                let session = connection
+                    .send_request(v2::NewSessionRequest::new(root.path().to_path_buf()))
+                    .block_task()
+                    .await?
+                    .session_id;
+                connection
+                    .send_request(v2::PromptRequest::new(session, vec!["question".into()]))
+                    .block_task()
+                    .await?;
+                assert!(matches!(
+                    idle(&mut updates).await.stop_reason,
+                    Some(v2::StopReason::Error(_))
+                ));
+                Ok(())
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(!root.path().join("started").exists());
+    assert!(listener.accept().is_err());
+    model.assert_no_more_requests();
+}
+
+#[rstest::rstest]
+#[case("cancel", false)]
+#[case("close", false)]
+#[case("resume", false)]
+#[case("cancel", true)]
+#[case("close", true)]
+#[tokio::test]
+async fn interrupted_stdio_work_is_reaped_before_terminal_idle(
+    #[case] operation: &str,
+    #[case] initializing: bool,
+) {
+    let root = tempfile::tempdir().unwrap();
+    let mut config = stdio_config(root.path(), true);
+    if initializing {
+        config.push_str("MCP_INIT_BLOCK='yes'\n");
+    }
+    project_config(root.path(), &config);
+    let model = model("openai-chat");
+    let marker = root.path().join("started");
+    let observed_marker = marker.clone();
+    let (tx, mut updates) = tokio::sync::mpsc::unbounded_channel();
+    let client = Client
+        .v2()
+        .on_receive_request(
+            async |_: v2::RequestPermissionRequest,
+                   responder: Responder<v2::RequestPermissionResponse>,
+                   _| {
+                responder.respond(
+                    serde_json::from_value(
+                        json!({"outcome":{"outcome":"selected","optionId":"allow_once"}}),
+                    )
+                    .unwrap(),
+                )
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_notification(
+            async move |update: v2::UpdateSessionNotification, _| {
+                if matches!(
+                    &update.update,
+                    v2::SessionUpdate::StateUpdate(v2::StateUpdate::Idle(_))
+                ) {
+                    #[cfg(unix)]
+                    if let Ok(pid) = std::fs::read_to_string(&observed_marker) {
+                        assert!(
+                            nix::sys::signal::kill(
+                                nix::unistd::Pid::from_raw(pid.trim().parse().unwrap()),
+                                None
+                            )
+                            .is_err(),
+                            "idle preceded process cleanup"
+                        );
+                    }
+                }
+                tx.send(update).map_err(Error::into_internal_error)
+            },
+            agent_client_protocol::on_receive_notification!(),
+        );
+    let runtime = bee::acp::Runtime::new(
+        bee::agent::Limits::default(),
+        bee::tool::Registry::default(),
+    )
+    .with_project_mcp(project_environment());
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        client.connect_with(
+            bee::acp::agent_with_runtime(
+                support::providers("openai-chat", &model.url, ""),
+                runtime,
+            ),
+            async |connection| {
+                initialize(&connection).await?;
+                let session = connection
+                    .send_request(v2::NewSessionRequest::new(root.path().to_path_buf()))
+                    .block_task()
+                    .await?
+                    .session_id;
+                connection
+                    .send_request(v2::PromptRequest::new(
+                        session.clone(),
+                        vec!["question".into()],
+                    ))
+                    .block_task()
+                    .await?;
+                let waiting = if initializing {
+                    marker
+                } else {
+                    root.path().join("called")
+                };
+                loop {
+                    // Opening the marker creates an empty file before printf writes.
+                    // Wait for complete records so cancellation cannot interrupt PID
+                    // publication; blocked calls also publish the descendant's PID.
+                    if std::fs::read_to_string(&waiting).is_ok_and(|contents| {
+                        contents.ends_with('\n')
+                            && contents.lines().count() >= if initializing { 1 } else { 2 }
+                    }) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+                match operation {
+                    "close" => {
+                        connection
+                            .send_request(v2::CloseSessionRequest::new(session.clone()))
+                            .block_task()
+                            .await?;
+                    }
+                    "resume" => {
+                        project_config(root.path(), "");
+                        connection
+                            .send_request(v2::ResumeSessionRequest::new(
+                                session.clone(),
+                                root.path(),
+                            ))
+                            .block_task()
+                            .await?;
+                    }
+                    _ => connection
+                        .send_notification(v2::CancelSessionNotification::new(session.clone()))?,
+                }
+                assert_eq!(
+                    idle(&mut updates).await.stop_reason,
+                    Some(v2::StopReason::Cancelled)
+                );
+                Ok(())
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    if initializing {
+        model.assert_no_more_requests();
+    } else {
+        model.request();
+        model.assert_no_more_requests();
+    }
+}
+
+#[tokio::test]
+async fn client_direct_attachments_and_same_named_project_servers_coexist_without_overrides() {
+    let root = tempfile::tempdir().unwrap();
+    let project_server = direct_http(4, false);
+    let client_server = direct_http(3, false);
+    project_config(
+        root.path(),
+        &format!("[servers.echo]\nurl='{}'", project_server.url),
+    );
+    let mut index = 0;
+    let model = Server::respond(2, move |request| {
+        index += 1;
+        let tools: Vec<_> = request.body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|t| t["function"]["name"].as_str().unwrap().starts_with("mcp_"))
+            .collect();
+        assert_eq!(tools.len(), 2);
+        assert_ne!(tools[0]["function"]["name"], tools[1]["function"]["name"]);
+        let project = tools
+            .iter()
+            .find(|t| {
+                t["function"]["description"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("project/")
+            })
+            .unwrap();
+        Response::json(if index == 1 {
+            call("openai-chat", project["function"]["name"].as_str().unwrap())
+        } else {
+            answer("openai-chat")
+        })
+    });
+    let (tx, mut updates) = tokio::sync::mpsc::unbounded_channel();
+    let client = Client
+        .v2()
+        .on_receive_request(
+            async |_: v2::RequestPermissionRequest,
+                   responder: Responder<v2::RequestPermissionResponse>,
+                   _| {
+                responder.respond(
+                    serde_json::from_value(
+                        json!({"outcome":{"outcome":"selected","optionId":"allow_once"}}),
+                    )
+                    .unwrap(),
+                )
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_notification(
+            async move |update: v2::UpdateSessionNotification, _| {
+                tx.send(update).map_err(Error::into_internal_error)
+            },
+            agent_client_protocol::on_receive_notification!(),
+        );
+    let runtime = bee::acp::Runtime::new(
+        bee::agent::Limits::default(),
+        bee::tool::Registry::default(),
+    )
+    .with_project_mcp(project_environment());
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        client.connect_with(
+            bee::acp::agent_with_runtime(
+                support::providers("openai-chat", &model.url, ""),
+                runtime,
+            ),
+            async |connection| {
+                initialize(&connection).await?;
+                let mut request = v2::NewSessionRequest::new(root.path().to_path_buf());
+                request.mcp_servers = serde_json::from_value(
+                    json!([{"type":"http","name":"echo","url":client_server.url,"headers":[]}]),
+                )
+                .unwrap();
+                let session = connection
+                    .send_request(request)
+                    .block_task()
+                    .await?
+                    .session_id;
+                connection
+                    .send_request(v2::PromptRequest::new(session, vec!["question".into()]))
+                    .block_task()
+                    .await?;
+                assert_eq!(
+                    idle(&mut updates).await.stop_reason,
+                    Some(v2::StopReason::EndTurn)
+                );
+                Ok(())
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+}
+
 async fn idle(
     updates: &mut tokio::sync::mpsc::UnboundedReceiver<v2::UpdateSessionNotification>,
 ) -> v2::IdleStateUpdate {
@@ -308,7 +928,11 @@ async fn paginated_servers_with_identical_tool_names_route_stably_and_stay_sessi
         let step = index;
         index += 1;
         Response::json(if step == 0 || step == 2 {
-            let wanted = if step == 0 { "first /" } else { "second /" };
+            let wanted = if step == 0 {
+                "client/acp/first /"
+            } else {
+                "client/acp/second /"
+            };
             let tool = request.body["tools"]
                 .as_array()
                 .unwrap()

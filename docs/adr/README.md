@@ -54,3 +54,4 @@ by editing the old one. The history is the value.
 - [ADR-029](029-cloudflare-ai-gateway.md) — Cloudflare REST routing and login-only acquisition of required settings
 - [ADR-030](030-scaleway-generative-apis.md) — Scaleway API-key authentication and project-scoped serverless Chat routing
 - [ADR-031](031-displayable-provider-thoughts.md) — Separate displayable thoughts from private native continuation
+- [ADR-032](032-project-local-mcp.md) — Discover project MCP definitions and own direct connections per session
