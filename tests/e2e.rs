@@ -45,7 +45,13 @@ fn subprocess_with_path(root: &tempfile::TempDir, url: &str, path: Option<&str>)
                 "--noprofile",
                 "--norc",
                 "-c",
-                "cd -- \"$1\" && exec \"$2\"",
+                // A Windows-sized main stack catches oversized async frames on
+                // Unix CI too, instead of waiting for a Windows-only overflow.
+                if cfg!(unix) {
+                    "ulimit -s 1024 && cd -- \"$1\" && exec \"$2\""
+                } else {
+                    "cd -- \"$1\" && exec \"$2\""
+                },
                 "bee-e2e",
                 root.path().to_str().unwrap(),
                 env!("CARGO_BIN_EXE_bee"),

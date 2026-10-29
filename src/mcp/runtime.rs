@@ -149,7 +149,7 @@ impl Entry {
                         buffer: Vec::new(),
                     });
                     state.transport = Some(owner);
-                    serve_client_with_ct(info, transport, cancellation)
+                    Box::pin(serve_client_with_ct(info, transport, cancellation))
                         .await
                         .map_err(|_| UNAVAILABLE)?
                 }
@@ -171,7 +171,7 @@ impl Entry {
                     let (transport, owner) =
                         owned(StreamableHttpClientTransport::with_client(client, config));
                     state.transport = Some(owner);
-                    serve_client_with_ct(info, transport, cancellation)
+                    Box::pin(serve_client_with_ct(info, transport, cancellation))
                         .await
                         .map_err(|_| UNAVAILABLE)?
                 }

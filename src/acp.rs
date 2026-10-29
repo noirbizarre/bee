@@ -651,7 +651,9 @@ async fn inference(reply: Reply, runtime: Arc<Runtime>) -> std::result::Result<(
         reply: &reply,
         permissions: &runtime.permissions,
     };
-    let servers = mcp::prepare(&reply, &runtime, native.inner.cwd()).await?;
+    // MCP initialization nests transport/SDK futures; keep that frame off the
+    // smaller Windows process stack, including for native-only production turns.
+    let servers = Box::pin(mcp::prepare(&reply, &runtime, native.inner.cwd())).await?;
     let catalog = mcp::Catalog::discover(&reply, &servers, native.definitions())
         .await
         .map_err(TurnFailure::new)?;
@@ -837,7 +839,10 @@ pub fn agent_with_runtime(providers: Providers, runtime: Runtime) -> impl Connec
             direct_mcp: runtime.direct_mcp.clone(),
             project_mcp: runtime.project_mcp.clone(),
         },
-        move |reply| inference(reply, Arc::clone(&runtime)),
+        // Provider/tool futures can be large in instrumented debug builds. The
+        // connection's turn task should own their heap frame rather than copy it
+        // through run_turn's cancellation/panic wrappers on the process stack.
+        move |reply| Box::pin(inference(reply, Arc::clone(&runtime))),
     )
 }
 

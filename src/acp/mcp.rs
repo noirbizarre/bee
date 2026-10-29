@@ -151,7 +151,11 @@ pub(super) async fn prepare(
                 "MCP connection cancelled; retry the prompt",
             ));
         }
-        entry.connect().await.map_err(super::TurnFailure::new)?;
+        // Keep the SDK handshake's transport-specific frame out of the catalog
+        // preparation future, which is also present on native-only turns.
+        Box::pin(entry.connect())
+            .await
+            .map_err(super::TurnFailure::new)?;
     }
     Ok(servers)
 }
