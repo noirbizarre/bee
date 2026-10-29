@@ -82,6 +82,23 @@ const CLOUDFLARE_FIELDS: &[Field] = &[
     },
     KEY_FIELDS[0],
 ];
+const SCALEWAY_FIELDS: &[Field] = &[
+    Field {
+        name: "project_id",
+        required: false,
+        secret: false,
+        owner: FieldOwner::Instance,
+        value_type: FieldType::Identifier,
+    },
+    Field {
+        name: "region",
+        required: false,
+        secret: false,
+        owner: FieldOwner::Instance,
+        value_type: FieldType::Identifier,
+    },
+    KEY_FIELDS[0],
+];
 const CLOUD_FIELDS: &[Field] = &[
     Field {
         name: "project",
@@ -171,6 +188,9 @@ impl Definition {
             }
             if self.id == "cloudflare" && owner == FieldOwner::Instance {
                 super::cloudflare::validate_field(field.name, text)?;
+            }
+            if self.id == "scaleway" && owner == FieldOwner::Instance {
+                super::scaleway::validate_field(field.name, text)?;
             }
         }
         Ok(())
@@ -526,6 +546,24 @@ pub fn definitions() -> &'static [Definition] {
                         Some("mistral"),
                         Some("MISTRAL_API_KEY"),
                         &[("openai-chat", "https://api.mistral.ai/v1")],
+                    )
+                },
+            },
+            Definition {
+                id: "scaleway",
+                label: "Scaleway",
+                methods: &[AuthMethod::ApiKey],
+                fields: SCALEWAY_FIELDS,
+                defaults: || {
+                    native(
+                        defaults(
+                            "Scaleway",
+                            None,
+                            Some("SCW_SECRET_KEY"),
+                            &[("openai-chat", "https://api.scaleway.ai/v1")],
+                        ),
+                        false,
+                        None,
                     )
                 },
             },

@@ -35,6 +35,8 @@ mod cloudflare_tests;
 mod google_cloud_tests;
 #[cfg(all(test, unix))]
 mod oauth_tests;
+#[cfg(test)]
+mod scaleway_tests;
 
 #[cfg(all(test, unix))]
 mod copilot_tests;

@@ -904,6 +904,12 @@ impl Reader<'_> {
                 own,
             );
         }
+        if definition.id == "scaleway" {
+            combined = overlay(
+                &crate::provider::scaleway::defaults(&settings, definition.defaults()),
+                own,
+            );
+        }
         if definition.id == "google-cloud" && !settings.is_empty() {
             if own.contains_key("google_cloud") {
                 return Err(self.invalid(&key, "use settings or google_cloud, not both"));
@@ -1047,6 +1053,25 @@ impl Reader<'_> {
             for (model, protocol) in &model_protocols {
                 crate::provider::cloudflare::validate_route(model, *protocol)
                     .map_err(|reason| self.invalid(&key, reason))?;
+            }
+        }
+        if definition.id == "scaleway" {
+            let settings = table
+                .get("settings")
+                .and_then(Value::as_table)
+                .cloned()
+                .unwrap_or_default();
+            let expected = crate::provider::scaleway::base_url(&settings);
+            // Validate the merged endpoints, including extra protocols supplied through expanded configuration.
+            if endpoints.iter().any(|endpoint| {
+                endpoint.protocol() != Protocol::OpenAiChat || endpoint.base_url() != expected
+            }) || headers
+                .iter()
+                .any(|(name, _)| crate::provider::scaleway::reserved_header(name))
+                || login.is_some()
+                || table.contains_key("auth")
+            {
+                return Err(self.invalid(&key, "Scaleway requires project-derived Chat Completions endpoints and API-key authentication without authentication header or browser-login overrides; use a custom account for other endpoints"));
             }
         }
         let credential_env_fields = table

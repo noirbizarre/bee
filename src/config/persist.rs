@@ -257,6 +257,16 @@ impl LoginAccount {
     pub fn import_env(&self) -> Option<&str> {
         self.import_env.as_deref()
     }
+    /// Whether the source came from provider defaults rather than explicit account configuration.
+    pub fn inherits_environment(&self) -> bool {
+        // Compare provenance, not the variable name: an explicit binding to the default name is still authoritative.
+        self.import_env.is_some()
+            && self
+                .original
+                .as_ref()
+                .and_then(|account| account.get("credential"))
+                .is_none()
+    }
     /// Acquire all declared secret fields as one generation before publication.
     pub fn import_credential(&self, env: &Environment) -> Result<Option<crate::auth::Credential>> {
         let Some(variable) = &self.import_env else {
