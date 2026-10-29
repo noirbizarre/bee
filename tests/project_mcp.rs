@@ -10,7 +10,7 @@ fn project() -> tempfile::TempDir {
     root
 }
 fn http(id: &str) -> String {
-    format!("[servers.{id}]\ntype='http'\nurl='https://example.test/mcp'\n")
+    format!("[servers.{id}]\nurl='https://example.test/mcp'\n")
 }
 
 #[test]
@@ -37,6 +37,87 @@ fn canonical_toml_defines_all_servers_and_ignores_unrelated_resource_files() {
             .collect::<Vec<_>>(),
         ["a", "b", "z"]
     );
+}
+
+#[test]
+fn stdio_command_arrays_preserve_literal_arguments_and_resolve_project_cwd() {
+    let root = project();
+    let executable = std::env::current_exe().unwrap();
+    let arguments = ["--flag", "value with spaces", "", "$HOME; private-sentinel"];
+    let command: Vec<_> = std::iter::once(executable.to_str().unwrap())
+        .chain(arguments)
+        .collect();
+    std::fs::create_dir(root.path().join("work")).unwrap();
+    std::fs::write(
+        root.path().join(".agents/mcp.toml"),
+        format!(
+            "[servers.local]\ncommand={}\ncwd='work'\n",
+            serde_json::to_string(&command).unwrap(),
+        ),
+    )
+    .unwrap();
+    let definitions = discover(root.path(), &Environment::default()).unwrap();
+    let Transport::Stdio {
+        command, args, cwd, ..
+    } = &definitions[0].transport
+    else {
+        panic!()
+    };
+    assert_eq!(command, &executable.canonicalize().unwrap());
+    assert_eq!(args, &arguments);
+    assert_eq!(cwd, &root.path().join("work").canonicalize().unwrap());
+    assert!(!format!("{definitions:?}").contains("private-sentinel"));
+}
+
+#[test]
+fn canonical_definitions_reject_empty_commands_ambiguous_transports_and_redundant_fields() {
+    let root = project();
+    for definition in [
+        "command=[]",
+        "command=['']",
+        "command='private-sentinel'",
+        "command=['private-sentinel', 42]",
+        "command=['private-sentinel']\nurl='https://example.test'",
+        "command=['private-sentinel']\nheaders={Authorization='private-sentinel'}",
+        "url='https://example.test'\ncwd='private-sentinel'",
+        "url='https://example.test'\nenv={TOKEN='private-sentinel'}",
+        "url='https://example.test'\ntype='http'",
+        "command=['private-sentinel']\nargs=['private-sentinel']",
+        "env={TOKEN='private-sentinel'}",
+    ] {
+        std::fs::write(
+            root.path().join(".agents/mcp.toml"),
+            format!("[servers.invalid]\n{definition}\n"),
+        )
+        .unwrap();
+        let error = discover(root.path(), &Environment::default()).unwrap_err();
+        assert!(!format!("{error:?} {error}").contains("private-sentinel"));
+        assert!(error.to_string().contains("mcp.toml"));
+    }
+}
+
+#[test]
+fn claude_stdio_retains_string_command_and_separate_args_with_optional_type() {
+    let root = project();
+    let executable = std::env::current_exe().unwrap();
+    for explicit_type in [false, true] {
+        let mut server =
+            serde_json::json!({"command":executable, "args":["--flag", "literal argument"]});
+        if explicit_type {
+            server["type"] = "stdio".into();
+        }
+        std::fs::write(
+            root.path().join(".mcp.json"),
+            serde_json::json!({"mcpServers":{"legacy":server}}).to_string(),
+        )
+        .unwrap();
+        let definitions = discover(root.path(), &Environment::default()).unwrap();
+        let Transport::Stdio { command, args, .. } = &definitions[0].transport else {
+            panic!()
+        };
+        assert_eq!(command, &executable.canonicalize().unwrap());
+        assert_eq!(args, &["--flag", "literal argument"]);
+    }
 }
 
 #[test]
@@ -154,6 +235,9 @@ fn claude_duplicate_keys_and_unsupported_fields_are_rejected_without_values() {
         r#"{"mcpServers":{"x":{"url":"https://private-sentinel","url":"https://private-sentinel"}}}"#,
         r#"{"mcpServers":{"x":{"type":"sse","url":"https://private-sentinel"}}}"#,
         r#"{"mcpServers":{"x":{"url":"https://private-sentinel","secret":"private-sentinel"}}}"#,
+        r#"{"mcpServers":{"x":{"type":"stdio","url":"https://private-sentinel"}}}"#,
+        r#"{"mcpServers":{"x":{"command":"private-sentinel","url":"https://private-sentinel"}}}"#,
+        r#"{"mcpServers":{"x":{"url":"https://private-sentinel","args":["private-sentinel"]}}}"#,
     ] {
         std::fs::write(root.path().join(".mcp.json"), json).unwrap();
         let error = discover(root.path(), &Environment::default()).unwrap_err();
@@ -165,10 +249,10 @@ fn claude_duplicate_keys_and_unsupported_fields_are_rejected_without_values() {
 fn unsafe_urls_reserved_headers_and_oversized_sources_are_rejected() {
     let root = project();
     for text in [
-        "[servers.a]\ntype='http'\nurl='http://external.test'",
-        "[servers.a]\ntype='http'\nurl='https://secret@example.test'",
-        "[servers.a]\ntype='http'\nurl='https://example.test#secret'",
-        "[servers.a]\ntype='http'\nurl='https://example.test'\n[servers.a.headers]\nMcp-Session-Id='secret'",
+        "[servers.a]\nurl='http://external.test'",
+        "[servers.a]\nurl='https://secret@example.test'",
+        "[servers.a]\nurl='https://example.test#secret'",
+        "[servers.a]\nurl='https://example.test'\n[servers.a.headers]\nMcp-Session-Id='secret'",
     ] {
         std::fs::write(root.path().join(".agents/mcp.toml"), text).unwrap();
         assert!(discover(root.path(), &Environment::default()).is_err());

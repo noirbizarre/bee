@@ -31,9 +31,7 @@ For example, commit `.agents/mcp.toml` with references to credentials:
 
 ```toml
 [servers.files]
-type = "stdio"
-command = "uvx"
-args = ["example-mcp-server"]
+command = ["uvx", "example-mcp-server"]
 cwd = "."
 
 [servers.files.env]
@@ -41,17 +39,20 @@ SERVICE_TOKEN = { env = "SERVICE_TOKEN" }
 MODE = "readonly"
 
 [servers.docs]
-type = "http"
 url = "https://mcp.example.test/mcp"
 
 [servers.docs.headers]
 Authorization = { env = "DOCS_MCP_AUTHORIZATION" }
 ```
 
-All servers belong in this file under the `servers` envelope. Transport type is
-required. Unknown fields and fields belonging to another transport are errors.
+All servers belong in this file under the `servers` envelope. Transport is inferred:
+`command` selects stdio and `url` selects Streamable HTTP. Specify exactly one.
+There is no `type` or separate `args` field in canonical configuration. Unknown
+fields and fields belonging to another transport are errors.
 
-Stdio commands are executables, not shell commands. Bee resolves bare names on
+The stdio `command` is a nonempty string array: the executable first, followed by
+its literal arguments. For example, `command = ["server"]` starts it without
+arguments. Bee resolves bare executable names on
 its injected PATH before approval; relative executable paths and `cwd` resolve
 against the project root. Default cwd is the project
 root. Arguments are literal strings. No shell, tilde, command substitution or
@@ -90,8 +91,9 @@ Bee accepts the command/args/env and Streamable HTTP URL/headers subset:
 }
 ```
 
-In this compatibility format only, omitted `type` is inferred from `command`
-or `url`. Bee's explicit env-reference object is supported in JSON too; Claude
+Claude fallback retains its standard string `command`, separate `args` array and
+optional `type`. Omitted `type` is inferred from `command` or `url`; an explicit
+type must match those fields. Bee's explicit env-reference object is supported in JSON too; Claude
 string interpolation is not performed. Duplicate JSON keys, unsupported fields
 and legacy SSE transport definitions fail explicitly.
 

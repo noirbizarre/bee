@@ -111,7 +111,7 @@ fn stdio_config(root: &std::path::Path, block: bool) -> String {
     let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/mcp.sh");
     // TOML literal strings preserve Windows paths without escaping executable settings.
     format!(
-        "[servers.echo]\ntype='stdio'\ncommand='{}'\nargs=['{}']\n[servers.echo.env]\nMCP_MARKER='{}'\nMCP_CALLS='{}'\nMCP_BLOCK='{}'\n",
+        "[servers.echo]\ncommand=['{}', '{}']\n[servers.echo.env]\nMCP_MARKER='{}'\nMCP_CALLS='{}'\nMCP_BLOCK='{}'\n",
         command.display(),
         script.display(),
         root.join("started").display(),
@@ -276,7 +276,7 @@ async fn project_servers_require_separate_approvals_reuse_connections_and_preser
         root.path(),
         &http
             .as_ref()
-            .map(|s| format!("[servers.echo]\ntype='http'\nurl='{}'", s.url))
+            .map(|s| format!("[servers.echo]\nurl='{}'", s.url))
             .unwrap_or_else(|| stdio_config(root.path(), false)),
     );
     let attachments = if transport == "attachment-stdio" {
@@ -410,7 +410,7 @@ async fn denied_connection_has_no_process_or_network_effects(#[case] http: bool)
         root.path(),
         &if http {
             format!(
-                "[servers.echo]\ntype='http'\nurl='http://{}/mcp'",
+                "[servers.echo]\nurl='http://{}/mcp'",
                 listener.local_addr().unwrap()
             )
         } else {
@@ -626,7 +626,7 @@ async fn client_direct_attachments_and_same_named_project_servers_coexist_withou
     let client_server = direct_http(3, false);
     project_config(
         root.path(),
-        &format!("[servers.echo]\ntype='http'\nurl='{}'", project_server.url),
+        &format!("[servers.echo]\nurl='{}'", project_server.url),
     );
     let mut index = 0;
     let model = Server::respond(2, move |request| {

@@ -80,6 +80,20 @@ struct File {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Raw {
+    command: Option<Vec<String>>,
+    cwd: Option<PathBuf>,
+    #[serde(default)]
+    env: BTreeMap<String, Setting>,
+    url: Option<String>,
+    #[serde(default)]
+    headers: BTreeMap<String, Setting>,
+}
+
+// Claude compatibility keeps its published executable/args fields at the edge;
+// canonical definitions use a single argv and infer transport without a tag.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClaudeRaw {
     #[serde(rename = "type")]
     kind: Option<String>,
     command: Option<String>,
@@ -91,6 +105,36 @@ struct Raw {
     url: Option<String>,
     #[serde(default)]
     headers: BTreeMap<String, Setting>,
+}
+
+impl ClaudeRaw {
+    fn into_raw(self, source: &Path) -> Result<Raw, Error> {
+        let inferred = match (self.command.is_some(), self.url.is_some()) {
+            (true, false) => "stdio",
+            (false, true) if self.args.is_empty() => "http",
+            _ => {
+                return Err(error(
+                    source,
+                    "invalid Claude transport; specify only command or url, with compatible fields",
+                ));
+            }
+        };
+        if self.kind.as_deref().is_some_and(|kind| kind != inferred) {
+            return Err(error(
+                source,
+                "invalid Claude transport type; match stdio to command or http to url",
+            ));
+        }
+        Ok(Raw {
+            command: self
+                .command
+                .map(|command| std::iter::once(command).chain(self.args).collect()),
+            cwd: self.cwd,
+            env: self.env,
+            url: self.url,
+            headers: self.headers,
+        })
+    }
 }
 
 fn error(path: &Path, reason: &'static str) -> Error {
@@ -245,46 +289,37 @@ fn normalize(
     root: &Path,
     environment: &Environment,
     source: &Path,
-    claude: bool,
 ) -> Result<Transport, Error> {
-    let kind = raw.kind.as_deref().or_else(|| {
-        claude.then_some(if raw.command.is_some() {
-            "stdio"
-        } else {
-            "http"
-        })
-    });
-    match kind {
-        Some("stdio") if raw.url.is_none() && raw.headers.is_empty() && raw.command.is_some() => {
+    match (raw.command, raw.url) {
+        (Some(argv), None) if raw.headers.is_empty() => {
+            let (executable_name, args) = argv.split_first().ok_or_else(|| {
+                error(
+                    source,
+                    "empty stdio command; put the executable first, followed by its arguments",
+                )
+            })?;
             let cwd = root
                 .join(raw.cwd.unwrap_or_default())
                 .canonicalize()
                 .map_err(|_| error(source, "MCP cwd is inaccessible; use an existing directory"))?;
-            if !cwd.is_dir() || raw.args.iter().any(|a| a.contains('\0')) {
+            if !cwd.is_dir() || args.iter().any(|a| a.contains('\0')) {
                 return Err(error(
                     source,
                     "invalid MCP cwd or arguments; use a directory and NUL-free arguments",
                 ));
             }
-            let command = executable(raw.command.as_deref().unwrap(), root, environment)
+            let command = executable(executable_name, root, environment)
                 .map_err(|reason| error(source, reason))?;
             let mut env = baseline(environment);
             env.extend(settings(raw.env, environment, source)?);
             Ok(Transport::Stdio {
                 command,
-                args: raw.args,
+                args: args.to_vec(),
                 cwd,
                 env,
             })
         }
-        Some("http")
-            if raw.command.is_none()
-                && raw.args.is_empty()
-                && raw.cwd.is_none()
-                && raw.env.is_empty()
-                && raw.url.is_some() =>
-        {
-            let url = raw.url.unwrap();
+        (None, Some(url)) if raw.cwd.is_none() && raw.env.is_empty() => {
             let headers = settings(raw.headers, environment, source)?;
             validate_http(&url, &headers).map_err(|reason| error(source, reason))?;
             let mut normalized = BTreeMap::new();
@@ -306,7 +341,7 @@ fn normalize(
         }
         _ => Err(error(
             source,
-            "invalid MCP definition; specify type stdio with command, or http with url, and only compatible fields",
+            "invalid MCP definition; specify exactly one command array or url, with only compatible fields",
         )),
     }
 }
@@ -449,20 +484,24 @@ pub fn discover(cwd: &Path, environment: &Environment) -> Result<Vec<Definition>
                 "Claude fallback requires only a mcpServers envelope",
             ));
         }
-        serde_json::from_value::<BTreeMap<String, Raw>>(value["mcpServers"].take()).map_err(
-            |_| {
-                error(
-                    &path,
-                    "invalid Claude server fields; use supported stdio or HTTP settings",
-                )
-            },
-        )?
+        let servers =
+            serde_json::from_value::<BTreeMap<String, ClaudeRaw>>(value["mcpServers"].take())
+                .map_err(|_| {
+                    error(
+                        &path,
+                        "invalid Claude server fields; use supported stdio or HTTP settings",
+                    )
+                })?;
+        servers
+            .into_iter()
+            .map(|(id, raw)| raw.into_raw(&path).map(|raw| (id, raw)))
+            .collect::<Result<BTreeMap<_, _>, _>>()?
     } else {
         toml::from_str::<File>(&content)
                 .map_err(|_| {
                     error(
                         &path,
-                        "invalid or duplicate MCP TOML definition; use unique servers tables and supported fields",
+                         "invalid or duplicate MCP TOML definition; use unique servers tables with command arrays or URLs, without type or args fields",
                     )
                 })?
                 .servers
@@ -479,7 +518,7 @@ pub fn discover(cwd: &Path, environment: &Environment) -> Result<Vec<Definition>
                 "invalid server identifier; use 1-128 ASCII letters, digits, dots, underscores or hyphens",
             ));
         }
-        let transport = normalize(raw, &root, environment, &path, claude)?;
+        let transport = normalize(raw, &root, environment, &path)?;
         definitions.push(Definition {
             id,
             root: root.clone(),

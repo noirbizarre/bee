@@ -21,6 +21,9 @@ loses extensions and explicit-null error data if round-tripped through its types
 - Use TOML-only `.agents/mcp.toml` with a `servers` envelope for all project servers.
   Use `.mcp.json`/`mcpServers` only as whole-project fallback.
   Reject duplicate IDs rather than assembling executable settings by precedence.
+- Infer transport from exactly one `command` string array or `url`. Stdio's
+  array includes executable and arguments, without redundant `type`/`args` fields.
+  Claude fallback retains its standard string command and separate arguments.
 - Normalize definitions without launching anything. Resolve explicit whole-value
   env references, freeze private effective settings, redact Debug/diagnostics,
   and keep provider credentials out of the default child environment.

@@ -146,7 +146,7 @@ async fn the_binary_executes_project_stdio_mcp_with_distinct_connection_and_tool
     let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/mcp.sh");
     let marker = workspace.path().join("started");
     std::fs::write(workspace.path().join(".agents/mcp.toml"), format!(
-        "[servers.echo]\ntype='stdio'\ncommand='{}'\nargs=['{}']\n[servers.echo.env]\nMCP_MARKER='{}'\nMCP_CALLS='{}'\n",
+        "[servers.echo]\ncommand=['{}', '{}']\n[servers.echo.env]\nMCP_MARKER='{}'\nMCP_CALLS='{}'\n",
         support::bash_executable().display(), script.display(), marker.display(), workspace.path().join("called").display(),
     )).unwrap();
     let mut step = 0;
