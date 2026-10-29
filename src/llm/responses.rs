@@ -69,6 +69,12 @@ pub(super) fn request(model: &Model, messages: &[Message], tools: &[Tool]) -> Re
         }
     }
     let mut body = json!({"model":model.model,"input":input,"stream":true,"store":false,"max_output_tokens":model.profile.max_output_tokens(),"include":["reasoning.encrypted_content"]});
+    if model.profile.provider() == "ovh" {
+        // OVH documents include as unsupported; retain strict replay validation on output.
+        body.as_object_mut()
+            .expect("request object")
+            .remove("include");
+    }
     if model.profile.provider() == "cloudflare" && model.model.starts_with("@cf/") {
         // Workers AI GPT-OSS Responses supports complete JSON, not SSE.
         body["stream"] = false.into();

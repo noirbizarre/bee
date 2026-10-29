@@ -134,6 +134,10 @@ pub(super) async fn discover(
     profile: &Profile,
     credential: Option<&Credential>,
 ) -> Result<EndpointListing, Error> {
+    if profile.provider() == "ovh" {
+        // Explicit endpoint commands must not turn the public catalog into account authority.
+        return Err(Error::Unsupported);
+    }
     if profile
         .integration()
         .is_some_and(|integration| integration.account_target)

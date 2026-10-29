@@ -160,6 +160,35 @@ async fn scaleway_discovery_preserves_project_and_key_scope_and_clears_only_reje
     }
 }
 
+#[tokio::test]
+async fn ovh_endpoint_enumeration_cannot_expand_declared_availability_or_send_credentials() {
+    let accounts =
+        support::configured_providers("[accounts.work]\nprovider='ovh'\nmodels=['gpt-oss-20b']");
+    let account = accounts.get("work").unwrap();
+    let env =
+        Environment::default().with_variable("OVH_AI_ENDPOINTS_ACCESS_TOKEN", "private-ovh-token");
+    let http = Arc::new(FakeHttp::new(vec![]));
+    let (cache, clock) = defaults();
+    let service = service(Settings::default(), http.clone(), cache, clock);
+    assert!(matches!(
+        service.list_endpoint(account, &env).await,
+        Err(Error::Unsupported)
+    ));
+    assert!(http.requests.lock().unwrap().is_empty());
+    let mut snapshot = models::Snapshot::default();
+    snapshot.endpoints.insert(
+        "work".into(),
+        models::EndpointListing {
+            fetched_at: Some(1000),
+            models: vec!["public-only".into()],
+            ..Default::default()
+        },
+    );
+    assert_eq!(snapshot.available_ids(account), ["gpt-oss-20b"]);
+    assert!(snapshot.check_available(account, "public-only").is_err());
+    assert!(snapshot.check_available(account, "gpt-oss-20b").is_ok());
+}
+
 #[rstest::rstest]
 #[case(false, "", vec![])]
 #[case(false, "models=[]", vec![])]

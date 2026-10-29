@@ -50,6 +50,27 @@ Streams must have a valid terminal lifecycle. Truncated streams are errors, not 
 event/tool argument is limited to 1 MiB and each response to 16 MiB. Tools execute sequentially with no automatic retry
 after side effects.
 
+## OVHcloud AI Endpoints requests
+
+The `ovh` provider sends a project-bound AI Endpoints key as a bearer token to the shared base URL
+`https://oai.endpoints.kepler.ai.cloud.ovh.net/v1`. Chat appends `/chat/completions`; Responses appends `/responses`.
+No additional project/region headers are needed. Chat is the default; select Responses with `protocol = "openai-responses"`
+or route individual raw IDs through `model_protocols`. No protocol or account fallback occurs after a failed request.
+
+Both routes support streaming and custom function tools on compatible models; see OVH's
+[function calling guide][ovh-tools] and [Responses guide][ovh-responses]. Bee always sends `store:false` for Responses,
+omits `previous_response_id`, and supplies the full retained successful context, including native tool calls/results.
+It omits the unsupported/inconsistent `include` parameter for OVH. Responses models returning reasoning items without
+replayable encrypted state fail explicitly rather than losing continuation; use Chat for those models. Built-in server
+tools are unsupported, and some models do not support Responses, system prompts or particular reasoning parameters.
+Bee adds no unverified cache controls. Check the model's current capabilities before selecting a protocol.
+
+See [key setup and account isolation](providers.md#ovhcloud-ai-endpoints). Authentication and rate-limit errors are
+sanitized without response-body disclosure; redirects and automatic retries remain disabled.
+
+[ovh-tools]: https://docs.ovhcloud.com/en/guides/public-cloud/ai-machine-learning/ai-endpoints-function-calling.md
+[ovh-responses]: https://docs.ovhcloud.com/en/guides/public-cloud/ai-machine-learning/ai-endpoints-responses-api.md
+
 ## Cloudflare AI Gateway requests
 
 The `cloudflare` provider uses the current [REST API](https://developers.cloudflare.com/ai-gateway/usage/rest-api/).

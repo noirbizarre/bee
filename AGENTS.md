@@ -45,6 +45,8 @@ renewable authorized-user, service-account-key or attached-account ADC, separate
 Cloudflare AI Gateway uses account-derived REST Chat, Responses and Messages routes with static bearer tokens and
 private account/gateway settings. Login-only drafts collect missing settings without weakening startup validation.
 Workers AI Messages is unsupported; documented GPT-OSS Responses requests use complete JSON rather than streaming.
+OVHcloud AI Endpoints uses project-bound bearer keys and shared Chat/Responses routes, with explicitly declared models
+and discovery disabled. Responses stays stateless and omits the unsupported include parameter.
 Models.dev only enriches available models; public cache and private account listings stay separate. Discovery off permits
 exactly declared raw `models`; discovery on permits successful selectable listing intersected with optional `models`
 (omitted: no filter; empty: none). Pending/first failure permits none; same-account last-good stale results may survive
