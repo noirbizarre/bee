@@ -9,17 +9,18 @@ the documentation application currently runs through unversioned `uvx zensical`.
 ```bash
 mise install          # the tools
 prek install          # the Git hooks
-mise run ci           # local checks, tests and documentation build
 ```
 
-Rustup provides the stable channel declared in `rust-toolchain.toml`. The
-project-specific mise configuration also selects that channel to enable native
-[Mr Boxington](https://mr-boxington.jdx.dev/setup) integration (mise 2026.9.2+).
-Explicit `RUSTUP_TOOLCHAIN` selections take precedence; in GitHub Actions the
-configuration preserves the rustup default selected by `dtolnay/rust-toolchain`.
-The mise install request stays stable so locked installs remain valid.
+### Mr Boxington build caching
 
-### Build caching
+[Mr Boxington](https://mr-boxington.jdx.dev/setup) is enabled through mise's
+native Rust option (requires mise 2026.9.2+). Rustup provides the stable channel
+declared in `rust-toolchain.toml`; keep that channel and the mise Rust version
+in sync when changing a pin, preserving existing components and other options.
+Explicit `RUSTUP_TOOLCHAIN` selections win. In GitHub Actions, the runtime
+preserves the rustup default selected by `dtolnay/rust-toolchain`, including
+MSRV jobs. Mise still ensures its stable install and declared components exist;
+the install request stays stable so locked installs remain valid.
 
 ```bash
 mise exec -- cargo build --locked
@@ -29,89 +30,112 @@ mise exec -- mbx doctor
 
 **Mise tasks have mbx built in:** `mise build`, `mise test`, and their explicit
 forms `mise run build` and `mise run test` already route Cargo through mbx; no
-extra `mbx` prefix is needed. The explicit commands above also work in a coding
-agent's non-interactive environment. Plain `cargo` in a terminal needs effective mise
-activation or shims; calling `~/.cargo/bin/cargo` directly bypasses wrapping.
-Installing mbx alone does not enable wrapping. Doctor can warn about a missing
-standalone Cargo shim with native integration; actual build summaries establish
-activation. No standalone setup or editor configuration is required.
+extra `mbx` prefix is needed. Plain terminal `cargo` requires effective
+mise activation or shims; a direct rustup Cargo proxy bypasses it. Coding agents
+should use `mise exec` rather than assume the terminal's PATH. Native integration
+does not require `mbx setup` or configure rust-analyzer. Doctor can warn about a
+missing standalone shim even when wrapping works; verify real build summaries.
+If personal environment paths shadow the wrapper in task shells, enable
+`[settings] activate_aggressive = true` in ignored `mise.local.toml` or use the
+explicit `mise exec -- cargo ...` route.
 
-If personal environment paths put rustup's Cargo before mise's wrapper inside
-task shells, use `mise exec -- cargo ...` directly or enable
-`[settings] activate_aggressive = true` in ignored `mise.local.toml`. The local
-trial uses that checkout-only setting; global shell configuration is unchanged.
-
-For the local trial, an uncommitted `.cargo/config.toml` clears an inherited
-compiler wrapper so mbx can cache; it leaves global Cargo settings, build jobs
-and linker flags intact. Other checkouts can opt into the same project-only
-`[build] rustc-wrapper = ""` override after inspecting their existing wrapper.
-An environment-selected `RUSTC_WRAPPER` still wins and prevents mbx caching.
+An existing compiler wrapper makes mbx delegate rather than cache. Inspect
+Cargo configuration and `RUSTC_WRAPPER` before changing one; an authorized
+project-only `[build] rustc-wrapper = ""` override can clear an inherited wrapper.
+Environment-selected wrappers still take precedence and prevent mbx caching.
 
 CI uses `jdx/mr-boxington-action` instead of sccache and rust-cache. Its default
 GitHub `target` payload includes Cargo outputs and registry/git downloads, so
 an additional rust-cache action is unnecessary. Successful main pushes populate
-the cache; same-repository pull requests also save in their own PR scope so
-later runs can reuse the trial cache. Fork pull requests only restore.
-Cross-build jobs retain their
-container-produced target outputs through that payload, while native builds
-also use mbx compiler caching. Publication jobs use `backend: local`, without
-restoring or saving shared compiler outputs. No separate remote cache service
-or local-to-CI cache connection is configured.
+the cache; same-repository pull requests also save in their own PR scope.
+Fork pull requests only restore. Cross-build jobs retain their container-produced
+target outputs through that payload; native builds also use compiler caching.
+Publication jobs use `backend: local` without shared compiler-output restores
+or saves. No separate remote cache service or local-to-CI connection is configured.
 
-Local compiler actions, eligible links, build-script executions and C/C++
-compilations are cached by default. Compilation scheduling, in-flight
-deduplication and learned private incremental reuse are also enabled. This
-project additionally enables `[scheduler] tests = true` in `.mbx.toml` to
-coordinate concurrent nextest tests and Cargo test binaries; test outcomes are
-not cached. Queueing counts toward nextest's slow-test timeouts.
+Local compiler actions, eligible links, build scripts and C/C++ compilations
+are cached by default. Compilation scheduling, in-flight deduplication and
+learned private incremental reuse are also enabled. This project enables
+`[scheduler] tests = true` in `.mbx.toml` to coordinate concurrent nextest tests
+and Cargo test binaries; test outcomes are not cached. Queueing counts toward
+nextest's slow-test timeouts.
 
-For this trial, mise disables automatic garbage collection and managed target
-placement (`MBX_GC_AUTO=0`, `MBX_TARGET_VIEWS=0`) to preserve existing caches and
-outputs. If the system temporary directory exceeds its quota, use a short,
-local temporary path, for example `TMPDIR="$HOME/.cache/mbx" mise exec -- cargo
-build --locked` after the first doctor run has created that cache directory.
+This feature disables automatic collection and managed target placement through
+`MBX_GC_AUTO=0` and `MBX_TARGET_VIEWS=0`, preserving existing outputs and caches.
+If the system temporary directory exceeds its quota, use a short local path,
+such as `TMPDIR="$HOME/.cache/mbx" mise exec -- cargo build --locked`, after
+the first doctor run has created that cache directory.
+To demonstrate reuse, run equivalent builds in two fresh temporary target
+directories using `--target-dir` and `MBX_SUMMARY=full`. Require positive mbx hits
+on the second build; Cargo freshness is not a hit. Diagnose with
+`mise exec -- mbx explain --last` and remove only your temporary targets.
 
-To measure reuse, build the same source/toolchain/profile/features into two
-fresh temporary target directories with `--target-dir`, using the commands
-above and `MBX_SUMMARY=full`. Check for positive mbx hits on the second build;
-Cargo skipping fresh outputs does not count. Diagnose misses with
-`mise exec -- mbx explain --last`, then remove only those temporary targets.
+To undo, remove or disable `mr_boxington` first and run `mise reshim`, then remove
+the mbx tool/lock entry and introduced environment settings. Restore rustup-only
+ownership by removing the added mise Rust entry, preserving unrelated pins and
+options. Remove any wrapper/scheduler and local activation overrides you added;
+keep the shared cache. Set the template answer `mbx = false` and review the
+rendered update to restore the original CI cache actions too.
 
-To undo, remove or disable `mr_boxington` in the project Rust entry first and
-run `mise reshim`. Then remove the mbx tool and its lock entry, the introduced
-Cargo wrapper override, `.mbx.toml`, and the trial environment settings. Remove
-the local `activate_aggressive` override if you added it. Remove
-the newly added mise Rust entry if returning to rustup-only ownership. Preserve
-existing Rust pins/options and unrelated lock entries; no cache deletion is
-needed.
+Before committing or opening a PR, choose checks relevant to your changes;
+see [Before you push](#before-you-push) for guidance. Clippy runs through
+`mise lint` and in CI, rather than in the commit hooks. `mise ci` is an
+optional comprehensive check.
 
 ## Tasks
 
 | Command | What it does |
 |---|---|
-| `mise run build` | Build the project |
-| `mise run cli` | Run `bee` from source (passes flags through) |
-| `mise run test` | Run the tests (accepts nextest selectors) |
-| `mise run cover` | Run the tests with coverage |
-| `mise run format` | Format |
-| `mise run lint` | Clippy, warnings denied |
-| `mise run lint:actions` | actionlint over the workflows |
-| `mise run lint:md` | markdownlint over AGENTS.md, CONTRIBUTING.md, README.md and docs/ |
-| `mise run spell` | typos |
-| `mise run snapshots` | Review pending insta snapshots |
-| `mise run check` | Everything that does not modify the working tree |
-| `mise run ci` | `check` plus the documentation build |
-| `mise run docs` | Serve the documentation locally |
-| `mise run changelog` | Preview the changelog for unreleased commits |
-| `mise run release` | Show the version the next release would take |
-| `mise run tpl:update` | Bring the rendered template ref up to date |
-| `mise run tpl:diff` | Show what merging the template would change |
+| `mise build` | Build the project |
+| `mise cli` | Run `bee` from source (passes flags through) |
+| `mise test` | Run the tests (accepts nextest selectors) |
+| `mise cover` | Run the tests with coverage |
+| `mise format` | Format |
+| `mise lint` | Clippy, warnings denied |
+| `mise lint:actions` | actionlint over the workflows |
+| `mise lint:md` | markdownlint over AGENTS.md, CONTRIBUTING.md, README.md and docs/ |
+| `mise spell` | typos |
+| `mise snapshots` | Review pending insta snapshots |
+| `mise check` | Everything that does not modify the working tree |
+| `mise ci` | `check` plus the documentation build |
+| `mise docs` | Serve the documentation locally |
+| `mise changelog` | Preview the changelog for unreleased commits |
+| `mise release` | Show the version the next release would take |
+| `mise tpl:update` | Bring the rendered template ref up to date |
+| `mise tpl:diff` | Show what merging the template would change |
 
 `mise <task>` is a shorthand for `mise run <task>`, but a builtin subcommand of
 the same name wins it silently — which is why the format task is `format` and
 not `fmt` (`mise fmt` formats `mise.toml`), and why running the binary is
 `mise cli` and not `mise run` (`mise run` runs a task). Prefer the explicit
 `mise run <task>` in scripts: mise can claim a new name in any release.
+
+## Before you push
+
+Choose checks based on the files changed and the risk. Run relevant tasks
+individually rather than launching every check in parallel by default.
+
+- **Rust code:** run `mise lint` (Clippy) and the relevant tests through
+  `mise test`, which accepts nextest selectors. Target affected packages
+  and tests instead of running the whole suite by default. For example,
+  replacing the placeholders with the affected package and test name:
+
+  ```sh
+  mise test -p <package> -E 'test(<test_name>)'
+  ```
+
+- **Documentation, workflows or tooling:** run the relevant checks, such as
+  `mise lint:md`, `mise spell` or `mise lint:actions`, and
+  `mise docs:build` when documentation changes warrant a build.
+  Documentation-only changes do not require Rust lint or tests.
+
+Broaden validation when the change warrants it. `mise ci` is available as
+an optional comprehensive check, not a prerequisite for committing, pushing or
+opening a PR.
+
+If a local check is unavailable or prohibitively expensive, proceed with the
+commit or PR and report which checks ran, which were skipped and why in the
+handoff or PR description. CI provides full validation.
 
 ## Commits
 
@@ -176,8 +200,8 @@ The toolchain, hooks, CI and release workflows come from
 
 ```bash
 git tpl status         # is there a template update pending?
-mise run tpl:update    # advance refs/tpl/<id> — HEAD, index and worktree untouched
-mise run tpl:diff      # read what merging it would change
+mise tpl:update    # advance refs/tpl/<id> — HEAD, index and worktree untouched
+mise tpl:diff      # read what merging it would change
 git tpl merge          # take it
 ```
 
