@@ -201,6 +201,10 @@ impl InferenceHttp {
                 // Preserve the account path so integration tests can prove routing isolation.
                 url.strip_prefix("https://api.cloudflare.com")
                     .expect("official Cloudflare target")
+            } else if url.starts_with("https://api.scaleway.ai/") {
+                // Retain project scope so fixtures detect accidental default-project fallback.
+                url.strip_prefix("https://api.scaleway.ai")
+                    .expect("official Scaleway target")
             } else {
                 match url {
                     "https://api.openai.com/v1/responses" => "/responses",

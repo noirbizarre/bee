@@ -110,6 +110,56 @@ fn defaults() -> (Arc<MemoryCache>, Arc<Time>) {
     )
 }
 
+#[tokio::test]
+async fn scaleway_discovery_preserves_project_and_key_scope_and_clears_only_rejected_authority() {
+    let accounts = support::configured_providers(
+        "[accounts.work]\nprovider='scaleway'\nsettings={project_id='78e655b5-feb0-417c-bb3f-8c448bd0e8da',region='fr-par'}\ncredential={env='WORK_KEY'}\ndiscovery=true\nmodels=['chat-model']\n[accounts.personal]\nprovider='scaleway'\ncredential={env='PERSONAL_KEY'}\ndiscovery=true",
+    );
+    let env = Environment::default()
+        .with_variable("WORK_KEY", "work-secret")
+        .with_variable("PERSONAL_KEY", "personal-secret");
+    let (cache, clock) = defaults();
+    let http = Arc::new(FakeHttp::new(vec![
+        Ok(br#"{"data":[{"id":"chat-model"},{"id":"other-model"}]}"#.to_vec()),
+        Ok(br#"{"data":[{"id":"personal-model"}]}"#.to_vec()),
+        Err(Error::Unauthorized),
+    ]));
+    let service = service(Settings::default(), http.clone(), cache, clock);
+    let work = accounts.get("work").unwrap();
+    let personal = accounts.get("personal").unwrap();
+    service.list_endpoint(work, &env).await.unwrap();
+    service.list_endpoint(personal, &env).await.unwrap();
+    assert_eq!(service.snapshot().available_ids(work), ["chat-model"]);
+    assert_eq!(
+        service.snapshot().available_ids(personal),
+        ["personal-model"]
+    );
+    assert_eq!(
+        service.list_endpoint(work, &env).await.err(),
+        Some(Error::Unauthorized)
+    );
+    assert!(service.snapshot().available_ids(work).is_empty());
+    assert_eq!(
+        service.snapshot().available_ids(personal),
+        ["personal-model"]
+    );
+    let requests = http.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(
+        requests[0].0,
+        "https://api.scaleway.ai/78e655b5-feb0-417c-bb3f-8c448bd0e8da/v1/models"
+    );
+    assert_eq!(requests[1].0, "https://api.scaleway.ai/v1/models");
+    assert_eq!(requests[2].0, requests[0].0);
+    for (request, key) in requests
+        .iter()
+        .zip(["work-secret", "personal-secret", "work-secret"])
+    {
+        assert_eq!(request.1["authorization"], format!("Bearer {key}"));
+        assert!(request.1["authorization"].is_sensitive());
+    }
+}
+
 #[rstest::rstest]
 #[case(false, "", vec![])]
 #[case(false, "models=[]", vec![])]

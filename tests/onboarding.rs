@@ -12,6 +12,33 @@ fn fixture(text: &str) -> (tempfile::TempDir, Environment) {
     (root, env)
 }
 
+#[test]
+fn scaleway_login_distinguishes_inherited_and_explicit_environment_authority() {
+    for (declaration, inherited) in [
+        ("", true),
+        ("credential={env='SCW_SECRET_KEY'}", false),
+        ("credential={env='WORK_KEY'}", false),
+    ] {
+        let original = format!("[accounts.work]\nprovider='scaleway'\n{declaration}\n");
+        let (root, env) = fixture(&original);
+        let draft = persist::begin_login(&env, root.path(), Some("work")).unwrap();
+        assert!(draft.missing_fields().is_empty());
+        let plan = draft
+            .complete(&env, root.path(), toml::Table::new())
+            .unwrap();
+        assert_eq!(plan.inherits_environment(), inherited);
+        assert!(plan.import_credential(&env).is_err());
+        // Source changes during a pending login must not publish a different account's authority.
+        std::fs::write(
+            env.global_config_path().unwrap(),
+            "[accounts.work]\nprovider='scaleway'\ncredential={env='CHANGED_KEY'}",
+        )
+        .unwrap();
+        assert!(plan.check(&env, root.path()).is_err());
+        assert!(plan.commit(&env, root.path()).is_err());
+    }
+}
+
 fn cloudflare_inputs() -> toml::Table {
     toml::Table::from_iter([
         (

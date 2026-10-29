@@ -64,6 +64,11 @@ Cloudflare login asks for Account ID and Gateway ID when absent from account `se
 both IDs in configuration; `--with-token` reads exactly one token line, never routing identifiers. Login persists IDs
 as ordinary private settings and the token only in credential storage. See [Cloudflare setup](providers.md#cloudflare-ai-gateway).
 
+Scaleway uses API secret keys: `bee auth login scaleway` imports `SCW_SECRET_KEY` or asks for a key in a terminal when
+the inherited default binding is unset. `--with-token` imports one line from stdin instead. Explicit configured
+environment bindings fail when missing; browser options are unsupported. Optional project UUID and Paris region
+settings belong in account configuration and are preserved by login. See [Scaleway setup](providers.md#scaleway-generative-apis).
+
 ## Model discovery
 
 `bee providers list` and `bee providers show NAME` inspect compiled-in integrations without loading configuration or

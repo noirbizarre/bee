@@ -20,7 +20,7 @@ bee providers show google-cloud
 These commands inspect definitions independently of configuration, credentials and public Models.dev discovery.
 `bee models providers` instead browses Models.dev. The complete compiled-in inventory is `openai`, `anthropic`,
 `openrouter`, `chatgpt`, `github`, `ollama`, `opencode`, `opencode-go`, `deepseek`, `google-aistudio`, `google-cloud`,
-`groq`, `mistral`, `xai`, `cloudflare` and generic `custom`. Groq uses `groq` and `GROQ_API_KEY`;
+`groq`, `mistral`, `scaleway`, `xai`, `cloudflare` and generic `custom`. Groq uses `groq` and `GROQ_API_KEY`;
 Grok models belong to `xai`, using `XAI_API_KEY`. DeepSeek uses `DEEPSEEK_API_KEY`, and Mistral uses `MISTRAL_API_KEY`.
 See [provider setup and credentials](index.md#authentication) for endpoints, protocols and vendor-specific facts.
 
@@ -106,6 +106,8 @@ For an environment-backed account, explicit login validates and stores the compl
 user configuration to `credential = { store = true }`. Subsequent requests use stored authority even if the environment
 changes or disappears. `--with-token` imports stdin instead; missing environment values fail without another source.
 Cloudflare interactive login can ask for a manual token when its environment variable is unset.
+Scaleway can also ask for a key when its inherited default environment binding is unset; explicit environment bindings
+remain authoritative and fail when missing, even when named `SCW_SECRET_KEY`.
 Higher-priority credential-source overrides must be resolved before authority can switch. Browser/device options use
 native acquisition. Publication preserves comments, unrelated concurrent edits and no-op reauthentication behavior.
 
@@ -132,6 +134,70 @@ remain live during authorization.
 
 See [ADR-027](adr/027-provider-registry-and-instance-authentication.md) for registry and native-runtime rationale and
 [ADR-028](adr/028-account-model-availability-and-selection.md) for the current account contract.
+
+## Scaleway Generative APIs
+
+`scaleway` integrates the serverless [Generative APIs](https://www.scaleway.com/en/developers/api/generative-apis/)
+using streaming Chat Completions and function tools. Create a Scaleway API key with the
+**GenerativeApisModelAccess** permission set for the intended project. **GenerativeApisFullAccess** and
+**AllProductsFullAccess** also grant model access. Use the key's **secret key** as the bearer credential;
+the access key and organization ID are not needed for these requests. See Scaleway's
+[authentication, permissions and project guide](https://www.scaleway.com/en/docs/generative-apis/api-cli/using-generative-apis/).
+
+For first-use setup on Unix:
+
+```sh
+bee auth login scaleway
+bee auth status scaleway
+```
+
+Login imports `SCW_SECRET_KEY` when set. Otherwise, interactive login asks for the secret key with terminal echo
+disabled. Noninteractive callers can pipe one key line into `bee auth login scaleway --with-token`.
+Explicit login stores the key privately and switches the account to stored authority. Ordinary inference can use
+the environment directly without login. Browser acquisition options are unsupported.
+
+The default project uses `https://api.scaleway.ai/v1`. To scope IAM access and consumption/billing to a specific project,
+copy its UUID from **Project settings** into optional `settings.project_id`. Bee then derives
+`https://api.scaleway.ai/{project_id}/v1`; project scope never enters the model ID or prompt.
+Project IDs must use the standard 36-character hyphenated UUID form. Optional `settings.region` accepts only `fr-par`:
+Paris is currently the only documented region, and both omitted and explicit Paris settings use the documented global
+host. Bee does not construct an undocumented regional URL. No project/region input is required during login.
+
+Configure distinct named accounts before authenticating them:
+
+```toml
+[accounts.scw-work]
+provider = "scaleway"
+settings = { project_id = "78e655b5-feb0-417c-bb3f-8c448bd0e8da", region = "fr-par" }
+credential = { env = "WORK_SCW_SECRET_KEY" }
+models = ["your-chat-model"]
+context_window = 32000 # Example only: use this model's documented context budget.
+
+[accounts.scw-personal]
+provider = "scaleway"
+credential = { env = "PERSONAL_SCW_SECRET_KEY" }
+models = ["your-chat-model"]
+context_window = 32000 # Example only: use this model's documented context budget.
+```
+
+`bee auth login scw-work` imports its configured variable; a missing explicitly configured variable fails without
+trying another source. `--with-token` explicitly selects stdin instead. Each account has independent stored credentials;
+profiles may scope either or both accounts. Select `scw-work/your-chat-model` or `scw-personal/your-chat-model` through
+ACP. Login does not select a model, enable an existing disabled account or change its profile membership.
+
+Discovery defaults off, so declare raw Chat model IDs explicitly. Opting into `discovery = true` lists `/models` under
+the same project-scoped base URL and intersects it with optional `models`; listing is not an inference/tool entitlement
+check. There is no default public catalog binding. Configure a verified context window for each selected model.
+
+Native accounts enforce project-derived Chat endpoints and bearer authentication; endpoint, authentication-header and
+browser-login overrides are rejected. Dedicated deployments and other endpoints can use `provider = "custom"`.
+Scaleway's Responses limitations do not match Bee's continuation contract, so only Chat Completions is registered.
+Unsupported explicit prompt-cache controls fail before HTTP. See the official
+[API schema](https://www.scaleway.com/en/developers/api/generative-apis/v1/schema.yml) and
+[ADR-030](adr/030-scaleway-generative-apis.md) for the routing/protocol decision.
+
+`bee auth logout scw-work` removes only Bee's stored key for that account, without revoking the remote key or falling
+back to an environment credential. Revoke or rotate the key in Scaleway's console when needed.
 
 ## Cloudflare AI Gateway
 

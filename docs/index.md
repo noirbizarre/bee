@@ -270,6 +270,7 @@ Shipped providers, with the variable each reads its key from:
 | `google-cloud` | Google Cloud | `openai-chat` (official Vertex AI compatibility endpoint) | renewable ADC |
 | `groq` | Groq | `openai-chat`, `openai-responses` | `GROQ_API_KEY` |
 | `mistral` | Mistral | `openai-chat` | `MISTRAL_API_KEY` |
+| `scaleway` | Scaleway | `openai-chat` (serverless Generative APIs) | `SCW_SECRET_KEY` |
 | `xai` | xAI | `openai-responses`, `openai-chat` | `XAI_API_KEY` |
 | `ollama` | Ollama | `openai-chat`, local server | none |
 
@@ -287,6 +288,14 @@ Chat, Responses and Messages, including Gemini text models. Exact `model_protoco
 OpenCode Go uses separate endpoints (`/inference/go`) and needs an account of its own. Definitions contain no model
 lists: declare raw `models` with discovery off, or select from successful filtered discovery. Optional defaults belong
 only at root/profile `model` and are qualified.
+
+### Use Scaleway Generative APIs
+
+Run `bee auth login scaleway` to import `SCW_SECRET_KEY` or paste a key interactively. Use a key with
+**GenerativeApisModelAccess** for the intended project. The native Chat endpoint is `https://api.scaleway.ai/v1`;
+optional `settings.project_id` scopes its URL to a project UUID. Optional `settings.region` accepts only Paris (`fr-par`)
+and uses the same global host. Declare Chat models and their context budgets; discovery is opt-in.
+See [Scaleway setup, named accounts and permissions](providers.md#scaleway-generative-apis).
 
 ### Use Cloudflare AI Gateway
 

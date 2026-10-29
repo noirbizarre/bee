@@ -106,7 +106,8 @@ fn acquire_environment(
     if plan.import_env().is_none() {
         return Ok(None);
     }
-    if instance.provider() == "cloudflare"
+    if (instance.provider() == "cloudflare"
+        || (instance.provider() == "scaleway" && plan.inherits_environment()))
         && plan
             .import_env()
             .is_some_and(|variable| env.variable(variable).is_none())
@@ -331,6 +332,14 @@ fn login(args: &LoginArgs, context: &mut Context<'_>) -> Result<()> {
     auth::require_store(profile)?;
     let name = profile.name();
 
+    if profile.provider() == "scaleway" && (args.no_browser || args.paste_code) {
+        return Err(Error::ProviderInvalid {
+            path: "<command line>".into(),
+            key: "authentication".into(),
+            reason: "Scaleway uses an API secret key; omit browser options and set the key environment variable or use --with-token",
+        });
+    }
+
     if profile
         .login_spec()
         .is_some_and(bee::provider::signin::LoginSpec::is_copilot)
@@ -398,7 +407,9 @@ fn login(args: &LoginArgs, context: &mut Context<'_>) -> Result<()> {
     }
 
     let generation = context.store.generation(auth::Audience::Provider(name))?;
-    if args.with_token || (profile.provider() == "cloudflare" && context.interactive) {
+    if args.with_token
+        || (matches!(profile.provider(), "cloudflare" | "scaleway") && context.interactive)
+    {
         #[cfg(unix)]
         let echo = if context.interactive && io::stdin().is_terminal() {
             // Suppress driver echo before displaying the prompt, not after a token could be pasted.
@@ -435,6 +446,13 @@ fn login(args: &LoginArgs, context: &mut Context<'_>) -> Result<()> {
     // The flow is data (ADR-009): whatever `credential.login` names, not a
     // provider this code knows.
     let Some(flow) = profile.login_spec() else {
+        if profile.provider() == "scaleway" {
+            return Err(Error::ProviderInvalid {
+                path: "<command line>".into(),
+                key: "authentication".into(),
+                reason: "Scaleway requires an API secret key; set the configured key environment variable, run login in a terminal, or use --with-token",
+            });
+        }
         return Err(Error::AuthNoLoginFlow {
             profile: name.to_owned(),
         });
@@ -626,6 +644,71 @@ mod tests {
     use super::*;
 
     const KEY: &str = "sk-or-test-key";
+
+    #[test]
+    fn scaleway_manual_login_is_available_only_after_inherited_environment_acquisition_is_absent() {
+        for explicit in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let env = Environment::new(Some(root.path().join("config")), None, None);
+            if explicit {
+                let path = env.global_config_path().unwrap();
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(
+                    path,
+                    "[accounts.scaleway]\nprovider='scaleway'\ncredential={env='SCW_SECRET_KEY'}",
+                )
+                .unwrap();
+            }
+            let plan = bee::config::persist::prepare(&env, root.path(), "scaleway").unwrap();
+            let store = MemoryStore::default();
+            let acquired = acquire_environment(
+                &plan,
+                &env,
+                plan.accounts().get("scaleway").unwrap(),
+                &store,
+            );
+            if explicit {
+                assert!(matches!(acquired, Err(Error::AuthMissingEnv { .. })));
+                continue;
+            }
+            assert!(acquired.unwrap().is_none());
+            let (mut out, mut err) = (Vec::new(), Vec::new());
+            let mut input: &[u8] = b"private-scaleway-key\n";
+            execute(
+                AuthCommand::Login(args(false, false, false)),
+                &mut Context {
+                    env: &env,
+                    providers: plan.accounts(),
+                    store: &store,
+                    http: &KeyGiver,
+                    login_http: &bee::http::AsyncLoginHttp,
+                    discovery: None,
+                    timeout: Duration::from_secs(1),
+                    open: &|_| panic!("Scaleway has no browser login"),
+                    interactive: true,
+                    out: &mut out,
+                    err: &mut err,
+                    input: &mut input,
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                store
+                    .get(Audience::Provider("scaleway"))
+                    .unwrap()
+                    .unwrap()
+                    .secret()
+                    .expose(),
+                "private-scaleway-key"
+            );
+            assert!(out.is_empty());
+            assert!(
+                !String::from_utf8(err)
+                    .unwrap()
+                    .contains("private-scaleway-key")
+            );
+        }
+    }
 
     #[test]
     fn cloudflare_interactive_login_collects_missing_ids_before_the_token_without_echoing_inputs() {

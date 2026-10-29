@@ -8,6 +8,106 @@ fn bee() -> Command {
 }
 
 #[test]
+#[cfg(unix)]
+fn scaleway_named_accounts_persist_independent_keys_and_preserve_disabled_membership() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("xdg/bee/config.toml");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "[accounts.work]\nprovider='scaleway'\nenabled=false\nsettings={project_id='78e655b5-feb0-417c-bb3f-8c448bd0e8da'}\ncredential={env='WORK_SCW_KEY'}\n[accounts.personal]\nprovider='scaleway'\ncredential={env='PERSONAL_SCW_KEY'}\n[profiles.default]\naccounts=['personal']\n").unwrap();
+    for (account, variable, key) in [
+        ("work", "WORK_SCW_KEY", "private-work-key"),
+        ("personal", "PERSONAL_SCW_KEY", "private-personal-key"),
+    ] {
+        isolated(root.path())
+            .env(variable, key)
+            .args(["auth", "login", account])
+            .assert()
+            .success()
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::contains(key).not());
+        isolated(root.path())
+            .args(["auth", "status", account])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("stored credential present"));
+    }
+    let text = std::fs::read_to_string(&path).unwrap();
+    let config: toml::Value = toml::from_str(&text).unwrap();
+    assert_eq!(config["accounts"]["work"]["enabled"].as_bool(), Some(false));
+    assert_eq!(
+        config["profiles"]["default"]["accounts"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(!text.contains("private-"));
+    isolated(root.path())
+        .args(["auth", "logout", "work"])
+        .assert()
+        .success();
+    isolated(root.path())
+        .env("WORK_SCW_KEY", "replacement-key")
+        .args(["auth", "status", "work"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("no stored credential"));
+    isolated(root.path())
+        .args(["auth", "status", "personal"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("stored credential present"));
+}
+
+#[test]
+#[cfg(unix)]
+fn scaleway_first_login_imports_environment_or_stdin_without_inventing_project_settings() {
+    for stdin in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let mut command = isolated(root.path());
+        command.args(["auth", "login", "scaleway"]);
+        if stdin {
+            command.arg("--with-token").write_stdin("private-key\n");
+        } else {
+            command.env("SCW_SECRET_KEY", "private-key");
+        }
+        command
+            .assert()
+            .success()
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::contains("private-key").not());
+        let text = std::fs::read_to_string(root.path().join("xdg/bee/config.toml")).unwrap();
+        let config: toml::Value = toml::from_str(&text).unwrap();
+        assert_eq!(
+            config["accounts"]["scaleway"]["credential"]["store"].as_bool(),
+            Some(true)
+        );
+        assert!(config["accounts"]["scaleway"].get("settings").is_none());
+        assert!(config.get("model").is_none());
+        assert!(!text.contains("private-key"));
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn scaleway_missing_keys_and_browser_options_fail_before_publishing_configuration() {
+    let root = tempfile::tempdir().unwrap();
+    for flag in [None, Some("--no-browser"), Some("--paste-code")] {
+        let mut command = isolated(root.path());
+        command.args(["auth", "login", "scaleway"]);
+        if let Some(flag) = flag {
+            command.arg(flag);
+        }
+        command
+            .assert()
+            .failure()
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::contains("--with-token"));
+        assert!(!root.path().join("xdg/bee/config.toml").exists());
+    }
+}
+
+#[test]
 #[cfg(unix)] // Production credential storage deliberately requires Unix private-file guarantees.
 fn cloudflare_environment_login_is_account_bound_and_logout_never_falls_back_to_environment() {
     let root = tempfile::tempdir().unwrap();
@@ -362,6 +462,7 @@ fn isolated(dir: &std::path::Path) -> Command {
         .env_remove("BEE_CONFIG")
         .env_remove("BEE_PROFILE")
         .env_remove("BEE_TEST_KEY")
+        .env_remove("SCW_SECRET_KEY")
         .current_dir(dir);
     command
 }

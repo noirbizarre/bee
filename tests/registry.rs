@@ -15,6 +15,62 @@ fn load(text: &str) -> bee::Result<Providers> {
 }
 
 #[test]
+fn scaleway_accounts_derive_optional_project_scope_and_keep_settings_private() {
+    let project = "78e655b5-feb0-417c-bb3f-8c448bd0e8da";
+    let accounts = load(&format!("[accounts.work]\nprovider='scaleway'\nsettings={{project_id='{project}',region='fr-par'}}\ncredential={{env='WORK_SCW_KEY'}}\nmodels=['raw/model']\n[accounts.personal]\nprovider='scaleway'\ndiscovery=true")).unwrap();
+    let work = accounts.get("work").unwrap();
+    let personal = accounts.get("personal").unwrap();
+    assert_eq!(work.protocol(), Protocol::OpenAiChat);
+    assert_eq!(
+        work.base_url(),
+        format!("https://api.scaleway.ai/{project}/v1")
+    );
+    assert_eq!(personal.base_url(), "https://api.scaleway.ai/v1");
+    assert!(!work.discovery());
+    assert!(personal.discovery());
+    assert!(accounts.configured_model().is_none());
+    assert!(!format!("{accounts:?}").contains(project));
+    load(&format!(
+        "[accounts.work]\nprovider='scaleway'\nsettings={{project_id='{}'}}",
+        project.to_ascii_uppercase()
+    ))
+    .unwrap();
+}
+
+#[test]
+fn scaleway_rejects_invalid_settings_and_authority_overrides_without_echoing_values() {
+    let valid = "[accounts.work]\nprovider='scaleway'\nsettings={project_id='78e655b5-feb0-417c-bb3f-8c448bd0e8da',region='fr-par'}\n";
+    for invalid in [
+        valid.replace("78e655b5-feb0-417c-bb3f-8c448bd0e8da", "private-invalid"),
+        valid.replace(
+            "78e655b5-feb0-417c-bb3f-8c448bd0e8da",
+            "78e655b5-feb0-417c-bb3f-8c448bd0e8da/path",
+        ),
+        valid.replace("fr-par", "private-region"),
+        valid.replace("region='fr-par'", "region=123"),
+        format!("{valid}protocol='openai-chat'\nbase_url='https://private.example/v1'"),
+        format!("{valid}protocol='openai-chat'\nbase_url='https://api.scaleway.ai/v1'"),
+        format!("{valid}protocols={{openai-responses={{base_url='https://api.scaleway.ai/v1'}}}}"),
+        format!("{valid}headers={{Authorization='private-key'}}"),
+        format!("{valid}headers={{'X-Auth-Token'='private-key'}}"),
+        format!("{valid}credential={{store=true,login='github'}}"),
+        format!("{valid}auth='github'"),
+    ] {
+        let error = load(&invalid).unwrap_err();
+        let diagnostic = format!("{error:?} {error}");
+        for private in [
+            "private-invalid",
+            "private-region",
+            "private.example",
+            "private-key",
+            "78e655b5-feb0-417c-bb3f-8c448bd0e8da",
+        ] {
+            assert!(!diagnostic.contains(private), "{diagnostic}");
+        }
+    }
+}
+
+#[test]
 fn cloudflare_accounts_derive_private_protocol_targets_without_discovery_or_defaults() {
     let providers = load("[accounts.work]\nprovider='cloudflare'\nsettings={account_id='work-account',gateway_id='work-gateway'}\nmodels=['anthropic/model']\n[accounts.personal]\nprovider='cloudflare'\nsettings={account_id='personal-account',gateway_id='personal-gateway'}\ncredential={env='PERSONAL_CLOUDFLARE_TOKEN'}").unwrap();
     let work = providers.get("work").unwrap();
@@ -124,6 +180,7 @@ fn every_registered_type_has_unique_identity_and_resolves_its_native_defaults() 
             "opencode",
             "opencode-go",
             "openrouter",
+            "scaleway",
             "xai"
         ]
     );
@@ -142,6 +199,7 @@ fn native_defaults_preserve_protocol_preferences_and_environment_sources() {
         ("google-aistudio", Protocol::OpenAiChat, "GEMINI_API_KEY"),
         ("groq", Protocol::OpenAiChat, "GROQ_API_KEY"),
         ("mistral", Protocol::OpenAiChat, "MISTRAL_API_KEY"),
+        ("scaleway", Protocol::OpenAiChat, "SCW_SECRET_KEY"),
         ("xai", Protocol::OpenAiResponses, "XAI_API_KEY"),
         ("opencode", Protocol::OpenAiChat, "OPENCODE_API_KEY"),
         ("opencode-go", Protocol::OpenAiChat, "OPENCODE_GO_API_KEY"),

@@ -4,6 +4,7 @@ pub use crate::account::cache;
 pub(crate) mod cloudflare;
 pub mod registry;
 pub mod runtime;
+pub(crate) mod scaleway;
 pub mod signin;
 
 pub(crate) use crate::account::cloud_identifier;
