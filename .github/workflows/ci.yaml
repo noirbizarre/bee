@@ -55,19 +55,20 @@ jobs:
         with:
           cache: true
 
-      # The target payload includes Cargo downloads; a second Rust cache would
-      # restore/save the same paths. Mise supplies mbx and native Cargo wrapping.
+      # Includes Cargo downloads and target outputs; do not duplicate rust-cache.
       # Workload generations scope fallback restores too, unlike key suffixes.
       - uses: jdx/mr-boxington-action@v1
         with:
           cache-generation: lint-v1
           save-on-pull-request: true
 
-      # The hooks, not the mise tasks: this is the same command a developer's
-      # `git commit` runs, so a green CI means the hooks are actually passing
-      # rather than a parallel set of checks that happens to agree.
+      # Run the same hooks as `git commit`, then the heavier Rust lint task
+      # separately so committing does not require a Clippy compilation.
       - name: Run hooks
         run: prek run --all-files --show-diff-on-failure
+
+      - name: Lint Rust
+        run: mise run lint
 
   test:
     name: 🧪 Tests (${{ matrix.os.name }})
@@ -178,7 +179,6 @@ jobs:
 
       # This job is Linux-only, so mold always applies (see the lint job).
       - uses: rui314/setup-mold@v1
-
       - uses: jdx/mr-boxington-action@v1
         with:
           version: 1.28.0
@@ -216,8 +216,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.build.target }}
-      # Cross compiles in a container; the target payload still retains its
-      # outputs without passing a host-only compiler wrapper into the container.
+      # The target payload retains container-produced cross outputs too.
       - uses: jdx/mr-boxington-action@v1
         with:
           version: 1.28.0

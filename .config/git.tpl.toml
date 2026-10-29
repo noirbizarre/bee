@@ -5,7 +5,6 @@
 
 [template]
 source = "https://github.com/noirbizarre/rust.tpl"
-ref = "ac04185746281724add56a8d45de4f167c3be214"
 
 [answers]
 archive = false
