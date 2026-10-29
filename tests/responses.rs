@@ -2,7 +2,7 @@
 
 mod support;
 
-use bee::llm::{Error, Message, Model, Stop};
+use bee::llm::{Error, Message, Model, Stop, Stream};
 use serde_json::{Value, json};
 use support::{Echo, Response, Server, event, profile, tool};
 
@@ -56,6 +56,173 @@ fn stream(items: Vec<Value>, delta: bool) -> String {
         "response.completed",
         json!({"type":"response.completed","response":completed(items)}),
     )
+}
+
+fn reasoning() -> Value {
+    json!({"id":"private-provider-id","type":"reasoning","summary":[
+        {"type":"summary_text","text":"héllo"},{"type":"summary_text","text":"second"}
+    ],"encrypted_content":"private-encrypted-sentinel"})
+}
+
+fn reasoning_stream() -> String {
+    let wire = stream(vec![reasoning(), message("answer")], true);
+    let mut summaries = String::new();
+    for (part, full) in ["héllo", "second"].iter().enumerate() {
+        for (kind, fields) in [
+            (
+                "part.added",
+                json!({"part":{"type":"summary_text","text":""}}),
+            ),
+            ("text.delta", json!({"delta":full})),
+            ("text.done", json!({"text":full})),
+            (
+                "part.done",
+                json!({"part":{"type":"summary_text","text":full}}),
+            ),
+        ] {
+            let kind = format!("response.reasoning_summary_{kind}");
+            let mut value = json!({"type":kind,"output_index":0,"item_id":"private-provider-id","summary_index":part});
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(fields.as_object().unwrap().clone());
+            summaries += &event(&kind, value);
+        }
+    }
+    // Raw plaintext reasoning is deliberately a separate, non-display surface.
+    summaries += &event(
+        "response.reasoning_text.delta",
+        json!({"type":"response.reasoning_text.delta","output_index":0,"item_id":"private-provider-id","delta":"private-raw-sentinel"}),
+    );
+    let position = wire.find("event: response.output_item.done").unwrap();
+    format!("{}{}{}", &wire[..position], summaries, &wire[position..])
+}
+
+#[tokio::test]
+async fn summaries_stream_once_with_part_identity_and_keep_continuation_private() {
+    for response in [
+        Response::sse(reasoning_stream()),
+        Response::sse(stream(vec![reasoning(), message("answer")], false)),
+        Response::json(completed(vec![reasoning(), message("answer")])),
+    ] {
+        let server = Server::start(vec![response]);
+        let model = Model::new(
+            profile("openai-responses", &server.url, ""),
+            "opaque".into(),
+            None,
+        )
+        .unwrap();
+        let mut visible = Vec::new();
+        let step = model
+            .step_stream(&[], &[], &mut |event| match event {
+                Stream::Text(text) => visible.push((None, text.to_owned())),
+                Stream::Thought { item, part, text } => {
+                    visible.push((Some((item, part)), text.to_owned()))
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            visible,
+            vec![
+                (Some((0, 0)), "héllo".into()),
+                (Some((0, 1)), "second".into()),
+                (None, "answer".into())
+            ]
+        );
+        let Message::Assistant { text, native, .. } = step.message else {
+            panic!("assistant expected")
+        };
+        assert_eq!(text, "answer");
+        assert_eq!(native.unwrap().items[0], reasoning());
+        assert!(server.request().body.get("reasoning").is_none());
+    }
+}
+
+#[tokio::test]
+async fn malformed_summary_identity_lifecycle_and_final_prefix_fail_without_exposing_private_text()
+{
+    let valid = reasoning_stream();
+    let done = valid.find("event: response.output_item.done").unwrap();
+    let changed_final = format!(
+        "{}{}",
+        &valid[..done],
+        valid[done..].replace("\"text\":\"héllo\"", "\"text\":\"héllo suffix\"")
+    );
+    for wire in [
+        changed_final,
+        valid.replace("\"summary_index\":0", "\"summary_index\":128"),
+        valid.replace(
+            "\"item_id\":\"private-provider-id\"",
+            "\"item_id\":\"wrong\"",
+        ),
+        valid.replace("\"text\":\"héllo\"", "\"text\":\"different\""),
+        valid.replace(
+            "response.reasoning_summary_part.added",
+            "response.reasoning_summary_text.delta",
+        ),
+        valid[..valid.find("event: response.completed").unwrap()].to_owned(),
+    ] {
+        let server = Server::start(vec![Response::sse(wire)]);
+        let model = Model::new(
+            profile("openai-responses", &server.url, ""),
+            "opaque".into(),
+            None,
+        )
+        .unwrap();
+        let mut visible = String::new();
+        let error = model
+            .step_stream(&[], &[], &mut |event| match event {
+                Stream::Text(text) | Stream::Thought { text, .. } => visible.push_str(text),
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(error, Error::Malformed | Error::Limit));
+        assert!(!visible.contains("private"));
+        assert!(!format!("{error:?} {error}").contains("private"));
+    }
+}
+
+#[tokio::test]
+async fn reasoning_parts_and_answer_chunks_can_interleave_without_changing_entity_identity() {
+    let added = event(
+        "response.output_item.added",
+        json!({"type":"response.output_item.added","output_index":1,"item":{"id":"msg-1","type":"message"}}),
+    );
+    let delta = event(
+        "response.output_text.delta",
+        json!({"type":"response.output_text.delta","output_index":1,"item_id":"msg-1","content_index":0,"delta":"answer"}),
+    );
+    let mut wire = reasoning_stream().replace(&added, "").replace(&delta, "");
+    let position = wire
+        .find("event: response.reasoning_summary_part.done")
+        .unwrap();
+    wire.insert_str(position, &(added + &delta));
+    let server = Server::start(vec![Response::sse(wire)]);
+    let model = Model::new(
+        profile("openai-responses", &server.url, ""),
+        "opaque".into(),
+        None,
+    )
+    .unwrap();
+    let mut visible = Vec::new();
+    model
+        .step_stream(&[], &[], &mut |event| match event {
+            Stream::Text(text) => visible.push((None, text.to_owned())),
+            Stream::Thought { item, part, text } => {
+                visible.push((Some((item, part)), text.to_owned()))
+            }
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        visible,
+        vec![
+            (Some((0, 0)), "héllo".into()),
+            (None, "answer".into()),
+            (Some((0, 1)), "second".into())
+        ]
+    );
 }
 
 #[tokio::test]

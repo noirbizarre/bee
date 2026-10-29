@@ -36,6 +36,9 @@ GitHub.com Copilot supports device OAuth or explicit environment GitHub user tok
 validated account API targets and native per-model endpoint/context declarations independent of public catalog hints.
 Pending interactions are turn-owned; cleanup precedes terminal idle and direct-close responses.
 Each native backend preserves its own continuation and tool-result semantics.
+Responses display summaries and Anthropic returned thinking stream as standard ACP thoughts with stable turn/step/part
+identity and durable full-upsert replay; unsuccessful partials remain visible. Encrypted reasoning, signatures and redacted
+payloads stay private. Request controls are explicit, route-validated opt-ins; Chat reasoning extensions are unsupported.
 Compiled-in providers own implementations; configured accounts under `[accounts.ID]` use `provider = "NAME"` and own
 credentials/private fields (ADRs 027–028). Generic API-key/OAuth material reads v1/v2 stores and writes v3.
 Explicit environment login imports credentials and publishes stored authority; native turn runtimes own renewal/checks.

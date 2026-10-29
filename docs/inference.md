@@ -36,7 +36,8 @@ identical raw model ID. See [model availability](models.md#account-model-availab
 - Anthropic appends `/v1/messages`, normally presents credentials with `x-api-key`, and sends `anthropic-version` from
   `options.version` or the default `2023-06-01`. Its `max_tokens` comes from `options.max_tokens` if present, else the
   common `max_output_tokens`. Native text/tool-use blocks and grouped user tool-result blocks retain their order and
-  error flags. Thinking, multimodal blocks, server tools and pause-turn continuation are explicitly unsupported.
+  error flags. Displayable thinking is supported as described below; multimodal blocks, server tools and pause-turn
+  continuation are explicitly unsupported.
 - Text, streamed function calls, optional usage, and ordinary JSON answers are supported. Chat requests streamed usage
   with `stream_options.include_usage`; compatible servers may omit the counters. Chat supports one choice,
   modern function tools, and `max_tokens` or `max_completion_tokens`. Legacy functions, audio and other meaningful
@@ -49,6 +50,59 @@ identical raw model ID. See [model availability](models.md#account-model-availab
 Streams must have a valid terminal lifecycle. Truncated streams are errors, not successful partial answers. Each wire
 event/tool argument is limited to 1 MiB and each response to 16 MiB. Tools execute sequentially with no automatic retry
 after side effects.
+
+## Displayable reasoning and ACP thoughts
+
+Bee displays only explicitly recognized provider reasoning intended for presentation, independently of native
+continuation and ordinary answer text. Clients receive standard ACPv2 `agent_thought_chunk` updates; full
+`agent_thought` replacements restore retained thoughts. The pinned v2 surface requires no additional thought capability.
+
+| Adapter | Displayed fields | Private continuation / unsupported display |
+| --- | --- | --- |
+| Responses | `reasoning.summary[]` entries of type `summary_text`, including `response.reasoning_summary_text.delta` | `encrypted_content` and raw `reasoning_text` remain private; encrypted state is still required for stateless continuation |
+| Anthropic Messages | Returned `thinking.thinking` and `thinking_delta.thinking` | `signature`, `signature_delta.signature`, `redacted_thinking.data` remain private; signature-only/empty thinking produces no empty thought |
+| Chat Completions | None | DeepSeek/OpenRouter reasoning extensions and Google thought signatures are not display text in Bee |
+
+Both SSE and complete JSON responses are supported. Multiple parts/blocks and tool steps have separate thought IDs.
+Terminal snapshots reconcile already streamed text without duplicating it; changed prefixes and malformed lifecycles
+fail the turn. Recognized output is parsed whether or not Bee requested thinking. Protocol-compatible endpoints can
+return this subset, but compatibility alone does not establish support for request controls.
+
+### Request opt-ins
+
+No reasoning-generation fields are added by default. To request [OpenAI summaries][reasoning-summaries] on direct
+API-key Responses, configure:
+
+```toml
+[accounts.openai.protocols.openai-responses.options]
+reasoning_summary = "auto"
+```
+
+This sends `reasoning: {"summary":"auto"}`. For [Anthropic adaptive thinking][anthropic-thinking] on direct Messages:
+
+```toml
+[accounts.claude.protocols.anthropic-messages.options]
+thinking = { type = "adaptive", display = "summarized" }
+```
+
+This sends `thinking: {"type":"adaptive","display":"summarized"}`. Omitting `display` from this opt-in still requests
+summarized display. The model must support adaptive thinking; manual budgets, effort controls and beta thinking modes
+are not configured by Bee. Neither opt-in guarantees nonempty thought output.
+
+Explicit controls require the effective base URL `https://api.openai.com/v1` (Responses, excluding ChatGPT OAuth) or
+`https://api.anthropic.com` (Messages), respectively. Unverified gateway, Copilot, OAuth and custom routes reject explicit
+controls before HTTP, with no retry or fallback. Returned display fields on those routes are still recognized.
+These options apply to every model using that account endpoint; use separately model-filtered accounts for differing
+request policies. The selected model's API support remains the provider's responsibility, not a catalog inference.
+
+Set `reasoning_summary = "default"` or `thinking = { type = "default" }` to reset an inherited opt-in to omission.
+An inherited `display = "summarized"` remains valid but dormant after the latter reset. Unknown keys, modes and field
+types fail configuration without printing their values. Reset means provider defaults, not forcing thinking off.
+See [thought retention and identity](sessions.md#thought-retention-and-identity) for partial failures, cancellation,
+bounds and replay; native successful continuation is counted once by context estimation.
+
+[reasoning-summaries]: https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries
+[anthropic-thinking]: https://platform.claude.com/docs/en/build-with-claude/thinking
 
 ## OVHcloud AI Endpoints requests
 
@@ -562,6 +616,8 @@ max_output_tokens = 4096
 ```
 
 Repeat the short answer, follow-up and cancellation checks against the official endpoint. The provider uses
-`https://api.anthropic.com`; Bee appends `/v1/messages` and applies the required protocol headers. Do not enable thinking
-or server tools for this subset. A Messages-compatible gateway may override this protocol's base URL without changing
+`https://api.anthropic.com`; Bee appends `/v1/messages` and applies the required protocol headers. On a model supporting
+adaptive thinking, enable the [explicit opt-in](#request-opt-ins), verify thought chunks before the answer, and resume
+from start to verify full thought replacements. Server tools remain unsupported.
+A Messages-compatible gateway may override this protocol's base URL without changing
 its provider name or authentication source. Validate such gateways separately against their own documented contract.

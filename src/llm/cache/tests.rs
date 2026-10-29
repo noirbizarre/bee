@@ -530,7 +530,7 @@ fn explicit_key_debug_never_exposes_the_configured_value() {
         "prompt_cache_key={mode='explicit',value='private-application-key'}",
     );
     assert!(!format!("{:?}", model.profile).contains("private-application-key"));
-    let ProtocolOptions::OpenAiResponses { cache } = model.endpoint().options() else {
+    let ProtocolOptions::OpenAiResponses { cache, .. } = model.endpoint().options() else {
         unreachable!()
     };
     assert!(!format!("{cache:?}").contains("private-application-key"));

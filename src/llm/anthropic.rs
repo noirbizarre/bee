@@ -2,14 +2,16 @@
 
 use serde_json::{Value, json};
 
-use super::{Error, Message, Model, Native, Step, Stop, Tool, Usage, call, string};
+use super::{
+    Error, Message, Model, Native, Step, Stop, Stream, Thoughts, Tool, Usage, call, string,
+};
 use crate::provider::{Protocol, ProtocolOptions};
 
 pub(super) async fn run(
     model: &Model,
     messages: &[Message],
     tools: &[Tool],
-    text: &mut (dyn FnMut(&str) + Send),
+    text: &mut (dyn FnMut(Stream<'_>) + Send),
 ) -> Result<Step, Error> {
     let body = request(model, messages, tools)?;
     let ProtocolOptions::AnthropicMessages { version, .. } = model.endpoint().options() else {
@@ -89,9 +91,20 @@ pub(super) fn request(model: &Model, messages: &[Message], tools: &[Tool]) -> Re
     if !tools.is_empty() {
         body["tools"] = tools.iter().map(|tool| json!({"name":tool.name,"description":tool.description,"input_schema":tool.parameters})).collect();
     }
-    let ProtocolOptions::AnthropicMessages { cache, .. } = model.endpoint().options() else {
+    let ProtocolOptions::AnthropicMessages {
+        cache, thinking, ..
+    } = model.endpoint().options()
+    else {
         return Err(Error::Malformed);
     };
+    if *thinking {
+        if model.base_url() != "https://api.anthropic.com" {
+            return Err(Error::Unsupported(
+                "adaptive thinking requires direct Anthropic Messages; use default on this route",
+            ));
+        }
+        body["thinking"] = json!({"type":"adaptive","display":"summarized"});
+    }
     super::cache::anthropic(model, &mut body, cache)?;
     Ok(body)
 }
@@ -110,6 +123,7 @@ struct Parser {
     usage: Usage,
     raw_usage: Value,
     result: Option<Step>,
+    thoughts: Thoughts,
 }
 
 impl Parser {
@@ -117,7 +131,7 @@ impl Parser {
         &mut self,
         event: Option<&str>,
         data: &str,
-        text: &mut (dyn FnMut(&str) + Send),
+        text: &mut (dyn FnMut(Stream<'_>) + Send),
     ) -> Result<(), Error> {
         if self.result.is_some() {
             return Err(Error::Malformed);
@@ -138,8 +152,15 @@ impl Parser {
                 reason(&value["stop_reason"])?,
                 self.usage.clone(),
             )?;
-            if let Message::Assistant { text: answer, .. } = &step.message {
-                text(answer);
+            for (index, block) in blocks.iter().enumerate() {
+                match block["type"].as_str() {
+                    Some("text") => text(Stream::Text(string(&block["text"])?)),
+                    Some("thinking") => {
+                        self.thoughts
+                            .delta(index as u64, 0, string(&block["thinking"])?, text)?
+                    }
+                    _ => {}
+                }
             }
             self.result = Some(step);
             return Ok(());
@@ -183,13 +204,25 @@ impl Parser {
                     Some("text") => {
                         let initial = string(&block["text"])?;
                         if !initial.is_empty() {
-                            text(initial);
+                            text(Stream::Text(initial));
                         }
                     }
                     Some("tool_use") => {
                         if !block["input"].is_object() {
                             return Err(Error::Malformed);
                         }
+                    }
+                    Some("thinking") => {
+                        string(&block["signature"])?;
+                        self.thoughts.delta(
+                            self.blocks.len() as u64,
+                            0,
+                            string(&block["thinking"])?,
+                            text,
+                        )?;
+                    }
+                    Some("redacted_thinking") => {
+                        string(&block["data"])?;
                     }
                     _ => return Err(Error::Unsupported("Anthropic content block")),
                 }
@@ -200,6 +233,7 @@ impl Parser {
                 });
             }
             "content_block_delta" => {
+                let index = value["index"].as_u64().ok_or(Error::Malformed)?;
                 let block = self.block(&value)?;
                 let delta = &value["delta"];
                 match delta["type"].as_str() {
@@ -209,11 +243,31 @@ impl Parser {
                             return Err(Error::Malformed);
                         };
                         existing.push_str(chunk);
-                        text(chunk);
+                        text(Stream::Text(chunk));
                     }
                     Some("input_json_delta") if block.value["type"] == "tool_use" => {
                         block.arguments.push_str(string(&delta["partial_json"])?);
                         if block.arguments.len() > crate::http::MAX_EVENT {
+                            return Err(Error::Limit);
+                        }
+                    }
+                    Some("thinking_delta") if block.value["type"] == "thinking" => {
+                        if !string(&block.value["signature"])?.is_empty() {
+                            return Err(Error::Malformed);
+                        }
+                        let chunk = string(&delta["thinking"])?;
+                        let Value::String(existing) = &mut block.value["thinking"] else {
+                            return Err(Error::Malformed);
+                        };
+                        existing.push_str(chunk);
+                        self.thoughts.delta(index, 0, chunk, text)?;
+                    }
+                    Some("signature_delta") if block.value["type"] == "thinking" => {
+                        let Value::String(existing) = &mut block.value["signature"] else {
+                            return Err(Error::Malformed);
+                        };
+                        existing.push_str(string(&delta["signature"])?);
+                        if existing.len() > crate::http::MAX_EVENT {
                             return Err(Error::Limit);
                         }
                     }
@@ -311,6 +365,9 @@ fn usage(value: &Value) -> Usage {
 }
 
 fn complete(blocks: Vec<Value>, stop: Stop, usage: Usage) -> Result<Step, Error> {
+    if blocks.len() > 128 {
+        return Err(Error::Limit);
+    }
     let mut text = String::new();
     let mut calls = Vec::new();
     for block in &blocks {
@@ -321,6 +378,16 @@ fn complete(blocks: Vec<Value>, stop: Stop, usage: Usage) -> Result<Step, Error>
                 &block["name"],
                 &block["input"].to_string(),
             )?),
+            Some("thinking") => {
+                string(&block["thinking"])?;
+                // Even omitted display text needs its private signature for subsequent requests.
+                if string(&block["signature"])?.is_empty() {
+                    return Err(Error::Malformed);
+                }
+            }
+            Some("redacted_thinking") => {
+                string(&block["data"])?;
+            }
             _ => return Err(Error::Unsupported("Anthropic content block")),
         }
     }

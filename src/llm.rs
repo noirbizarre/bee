@@ -205,6 +205,68 @@ impl fmt::Debug for Message {
     }
 }
 
+/// Display-only output; opaque native continuation never crosses this boundary.
+#[derive(Clone, Copy)]
+pub enum Stream<'a> {
+    /// Ordinary assistant answer text.
+    Text(&'a str),
+    /// Provider-designated display text with adapter-local entity coordinates.
+    Thought {
+        /// Output item or content block ordinal, never a provider identifier.
+        item: u64,
+        /// Summary part ordinal (zero for Anthropic thinking blocks).
+        part: u64,
+        /// Append-only visible text.
+        text: &'a str,
+    },
+}
+
+#[cfg(test)]
+mod reasoning_tests;
+
+/// Bound display reasoning independently of opaque continuation and HTTP framing.
+#[derive(Default)]
+struct Thoughts {
+    parts: std::collections::BTreeMap<(u64, u64), String>,
+    bytes: usize,
+}
+
+impl Thoughts {
+    fn delta(
+        &mut self,
+        item: u64,
+        part: u64,
+        text: &str,
+        output: &mut (dyn FnMut(Stream<'_>) + Send),
+    ) -> Result<(), Error> {
+        if item >= 128 || part >= 128 || self.bytes.saturating_add(text.len()) > 4 * 1024 * 1024 {
+            return Err(Error::Limit);
+        }
+        if !self.parts.contains_key(&(item, part)) && self.parts.len() >= 128 {
+            return Err(Error::Limit);
+        }
+        self.parts.entry((item, part)).or_default().push_str(text);
+        self.bytes += text.len();
+        if !text.is_empty() {
+            output(Stream::Thought { item, part, text });
+        }
+        Ok(())
+    }
+
+    fn complete(
+        &mut self,
+        item: u64,
+        part: u64,
+        full: &str,
+        output: &mut (dyn FnMut(Stream<'_>) + Send),
+    ) -> Result<(), Error> {
+        // Published text cannot be retracted; a changed prefix is malformed, not a replacement.
+        let prefix = self.parts.get(&(item, part)).map_or("", String::as_str);
+        let suffix = full.strip_prefix(prefix).ok_or(Error::Malformed)?;
+        self.delta(item, part, suffix, output)
+    }
+}
+
 /// Completed output returned after terminal validation.
 #[derive(Debug, Clone)]
 pub struct Step {
@@ -264,7 +326,7 @@ impl Model {
         })
     }
 
-    /// Produce one model step, streaming text to `text` as it arrives.
+    /// Produce one model step, streaming answer text only to legacy callers.
     pub fn step<'a>(
         &'a self,
         messages: &'a [Message],
@@ -273,14 +335,31 @@ impl Model {
     ) -> futures::future::BoxFuture<'a, Result<Step, Error>> {
         // Keep transport and renewable-session state out of every enclosing
         // ACP/tool future and its unoptimized moves on Windows' 1 MiB main stack.
-        Box::pin(self.step_inner(messages, tools, text))
+        Box::pin(async move {
+            self.step_stream(messages, tools, &mut |event| {
+                if let Stream::Text(delta) = event {
+                    text(delta);
+                }
+            })
+            .await
+        })
+    }
+
+    /// Stream only adapter-allowlisted display text, independently of native continuation.
+    pub fn step_stream<'a>(
+        &'a self,
+        messages: &'a [Message],
+        tools: &'a [Tool],
+        output: &'a mut (dyn FnMut(Stream<'_>) + Send),
+    ) -> futures::future::BoxFuture<'a, Result<Step, Error>> {
+        Box::pin(self.step_inner(messages, tools, output))
     }
 
     async fn step_inner(
         &self,
         messages: &[Message],
         tools: &[Tool],
-        text: &mut (dyn FnMut(&str) + Send),
+        output: &mut (dyn FnMut(Stream<'_>) + Send),
     ) -> Result<Step, Error> {
         if self.profile.provider() == "cloudflare" {
             crate::provider::cloudflare::validate_route(&self.model, self.selection.protocol)
@@ -303,9 +382,14 @@ impl Model {
             self
         };
         let result = match model.endpoint().protocol() {
-            Protocol::OpenAiChat => chat::run(model, messages, tools, text).await,
-            Protocol::OpenAiResponses => responses::run(model, messages, tools, text).await,
-            Protocol::AnthropicMessages => anthropic::run(model, messages, tools, text).await,
+            Protocol::OpenAiChat => {
+                chat::run(model, messages, tools, &mut |text| {
+                    output(Stream::Text(text))
+                })
+                .await
+            }
+            Protocol::OpenAiResponses => responses::run(model, messages, tools, output).await,
+            Protocol::AnthropicMessages => anthropic::run(model, messages, tools, output).await,
         };
         if model
             .profile

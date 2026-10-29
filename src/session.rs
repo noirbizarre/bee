@@ -181,6 +181,7 @@ pub(crate) struct InferenceInput {
 struct Session {
     durable: Option<crate::history::Handle>,
     transcript: Vec<crate::history::Message>,
+    transcript_index: HashMap<(crate::history::MessageKind, String), usize>,
     plans: std::collections::BTreeMap<u64, crate::plan::Entries>,
     presentation: std::sync::Arc<std::sync::Mutex<crate::presentation::State>>,
     finalizing: bool,
@@ -670,6 +671,7 @@ impl Sessions {
             Session {
                 durable: None,
                 transcript: Vec::new(),
+                transcript_index: HashMap::new(),
                 plans: Default::default(),
                 presentation: Default::default(),
                 finalizing: false,
@@ -910,6 +912,7 @@ impl Sessions {
             Session {
                 durable: Some(handle),
                 transcript: Vec::new(),
+                transcript_index: HashMap::new(),
                 plans: Default::default(),
                 presentation: Default::default(),
                 finalizing: false,
@@ -965,27 +968,34 @@ impl Sessions {
         {
             session.transcript.push(crate::history::Message {
                 id: message_id,
-                user: true,
+                kind: crate::history::MessageKind::User,
                 content,
             });
         }
     }
 
-    pub(crate) fn record_text(&mut self, id: &str, message_id: &str, text: &str) {
+    pub(crate) fn record_output(
+        &mut self,
+        id: &str,
+        kind: crate::history::MessageKind,
+        message_id: &str,
+        text: &str,
+    ) {
         if let Some(session) = self.by_id.get_mut(id) {
-            if let Some(message) = session
-                .transcript
-                .last_mut()
-                .filter(|message| message.id == message_id)
-            {
-                if let Some(content) = message.content[0]["text"].as_str() {
-                    message.content[0]["text"] =
-                        serde_json::Value::String(format!("{content}{text}"));
+            let key = (kind, message_id.to_owned());
+            if let Some(index) = session.transcript_index.get(&key) {
+                let message = &mut session.transcript[*index];
+                if let serde_json::Value::String(content) = &mut message.content[0]["text"] {
+                    content.push_str(text);
                 }
             } else {
+                // First-seen ordering survives interleaving without scanning the whole transcript per chunk.
+                session
+                    .transcript_index
+                    .insert(key, session.transcript.len());
                 session.transcript.push(crate::history::Message {
                     id: message_id.into(),
-                    user: false,
+                    kind,
                     content: serde_json::json!([{"type":"text","text":text}]),
                 });
             }

@@ -188,6 +188,8 @@ pub enum ProtocolOptions {
     OpenAiResponses {
         /// Native OpenAI caching controls.
         cache: OpenAiCache,
+        /// Explicitly request automatic display summaries; false omits the native field.
+        reasoning_summary: bool,
     },
     /// For [`Protocol::AnthropicMessages`].
     AnthropicMessages {
@@ -197,6 +199,8 @@ pub enum ProtocolOptions {
         max_tokens: Option<u32>,
         /// Explicit opt-in to Anthropic cache writes.
         cache: AnthropicCache,
+        /// Explicit adaptive thinking with summarized display; false preserves provider defaults.
+        thinking: bool,
     },
 }
 
@@ -211,20 +215,26 @@ impl fmt::Debug for ProtocolOptions {
                 .field("max_tokens_field", max_tokens_field)
                 .field("cache", cache)
                 .finish(),
-            Self::OpenAiResponses { cache } => f
+            Self::OpenAiResponses {
+                cache,
+                reasoning_summary,
+            } => f
                 .debug_struct("OpenAiResponses")
                 .field("cache", cache)
+                .field("has_reasoning_summary", reasoning_summary)
                 .finish(),
             Self::AnthropicMessages {
                 version,
                 max_tokens,
                 cache,
+                thinking,
             } => f
                 .debug_struct("AnthropicMessages")
                 // A version can contain any accepted text, including an accidentally pasted secret.
                 .field("has_version", &version.is_some())
                 .field("has_max_tokens", &max_tokens.is_some())
                 .field("cache", cache)
+                .field("has_thinking", thinking)
                 .finish(),
         }
     }
@@ -239,11 +249,13 @@ impl ProtocolOptions {
             },
             Protocol::OpenAiResponses => Self::OpenAiResponses {
                 cache: OpenAiCache::default(),
+                reasoning_summary: false,
             },
             Protocol::AnthropicMessages => Self::AnthropicMessages {
                 version: None,
                 max_tokens: None,
                 cache: AnthropicCache::default(),
+                thinking: false,
             },
         }
     }
@@ -257,11 +269,12 @@ impl ProtocolOptions {
                 "prompt_cache_options",
             ],
             Protocol::OpenAiResponses => &[
+                "reasoning_summary",
                 "prompt_cache_key",
                 "prompt_cache_retention",
                 "prompt_cache_options",
             ],
-            Protocol::AnthropicMessages => &["version", "max_tokens", "cache_control"],
+            Protocol::AnthropicMessages => &["version", "max_tokens", "cache_control", "thinking"],
         }
     }
 }
@@ -1732,15 +1745,46 @@ impl Reader<'_> {
                     };
                 }
             }
-            ProtocolOptions::OpenAiResponses { cache } => {
+            ProtocolOptions::OpenAiResponses {
+                cache,
+                reasoning_summary,
+            } => {
                 *cache = self.openai_cache(key, table)?;
+                if let Some(value) = table.get("reasoning_summary") {
+                    let key = format!("{key}.reasoning_summary");
+                    *reasoning_summary = match self.string(&key, value)? {
+                        "default" => false,
+                        "auto" => true,
+                        _ => return Err(self.invalid(&key, "must be `default` or `auto`")),
+                    };
+                }
             }
             ProtocolOptions::AnthropicMessages {
                 version,
                 max_tokens,
                 cache,
+                thinking,
             } => {
                 *cache = self.anthropic_cache(key, table)?;
+                if let Some(value) = table.get("thinking") {
+                    let key = format!("{key}.thinking");
+                    let settings = self.table(&key, value)?;
+                    self.only_keys(&key, settings, &["type", "display"])?;
+                    let mode = settings
+                        .get("type")
+                        .ok_or_else(|| self.invalid(&key, "requires `type`"))?;
+                    *thinking = match self.string(&format!("{key}.type"), mode)? {
+                        "default" => false,
+                        "adaptive" => true,
+                        _ => return Err(self.invalid(&key, "type must be `default` or `adaptive`")),
+                    };
+                    if let Some(display) = settings.get("display") {
+                        // A reset must survive recursive merging with an inherited display setting.
+                        if self.string(&format!("{key}.display"), display)? != "summarized" {
+                            return Err(self.invalid(&key, "display must be `summarized`"));
+                        }
+                    }
+                }
                 if let Some(value) = table.get("version") {
                     let key = format!("{key}.version");
                     let text = self.string(&key, value)?;

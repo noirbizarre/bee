@@ -179,11 +179,38 @@ fn default_profile() -> String {
     "default".into()
 }
 
+/// Entity type participates in replay identity, independently of a message ID's spelling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub(crate) enum MessageKind {
+    User,
+    Answer,
+    Thought,
+}
+
+/// Bounded local coordinates cannot carry opaque provider identifiers into visible history.
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ThoughtId {
+    pub(crate) step: u32,
+    pub(crate) item: u64,
+    pub(crate) part: u64,
+}
+
+impl ThoughtId {
+    pub(crate) fn message_id(self, turn: u64) -> String {
+        format!("thought-{turn}-{}-{}-{}", self.step, self.item, self.part)
+    }
+
+    fn valid(self) -> bool {
+        self.item < 128 && self.part < 128
+    }
+}
+
 /// An SDK-free upsert. Original user blocks are validated at the ACP boundary.
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct Message {
     pub(crate) id: String,
-    pub(crate) user: bool,
+    pub(crate) kind: MessageKind,
     pub(crate) content: serde_json::Value,
 }
 
@@ -483,6 +510,7 @@ enum Job {
     Release(tokio::sync::oneshot::Sender<Result<()>>),
     Text {
         turn: u64,
+        thought: Option<ThoughtId>,
         text: String,
         emit: Box<dyn FnOnce() + Send>,
         worker: std::sync::Weak<Worker>,
@@ -610,9 +638,21 @@ fn persist_text(journal: &mut Journal, batch: Vec<Job>) {
         let events = batch
             .iter()
             .filter_map(|job| match job {
-                Job::Text { turn, text, .. } => Some(Event::AssistantDelta {
-                    turn: *turn,
-                    text: text.clone(),
+                Job::Text {
+                    turn,
+                    thought,
+                    text,
+                    ..
+                } => Some(match thought {
+                    Some(id) => Event::ThoughtDelta {
+                        turn: *turn,
+                        id: *id,
+                        text: text.clone(),
+                    },
+                    None => Event::AssistantDelta {
+                        turn: *turn,
+                        text: text.clone(),
+                    },
                 }),
                 _ => None,
             })
@@ -784,13 +824,24 @@ impl Handle {
             .inspect_err(|failure| self.fail(failure.clone()))
     }
 
+    #[cfg(test)]
     pub(crate) fn text(&self, turn: u64, text: String, emit: impl FnOnce() + Send + 'static) {
+        self.output(turn, None, text, emit);
+    }
+
+    pub(crate) fn output(
+        &self,
+        turn: u64,
+        thought: Option<ThoughtId>,
+        text: String,
+        emit: impl FnOnce() + Send + 'static,
+    ) {
         const MAX_QUEUED_BYTES: usize = 4 * 1024 * 1024;
         if self.healthy().is_err() {
             return;
         }
-        // Command overhead prevents empty/tiny deltas from evading the bound.
-        let bytes = text.len().saturating_add(256);
+        // Account for both journal text and captured wire text; command overhead also bounds tiny deltas.
+        let bytes = text.len().saturating_mul(2).saturating_add(256);
         if self
             .0
             .queued
@@ -808,6 +859,7 @@ impl Handle {
             .sender
             .send(Job::Text {
                 turn,
+                thought,
                 text,
                 emit: Box::new(emit),
                 worker,

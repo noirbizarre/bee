@@ -8,12 +8,14 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::{Message, Result, Snapshot, error, open_options, open_private_file};
+use super::{
+    Message, MessageKind, Result, Snapshot, ThoughtId, error, open_options, open_private_file,
+};
 
 // A corrupt/malicious line must not allocate the size of the entire journal.
 // This bounds one record, not transcript length or the number of sessions.
 pub(super) const MAX_RECORD_BYTES: usize = 64 * 1024 * 1024;
-const VERSION: u32 = 5;
+const VERSION: u32 = 6;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -41,6 +43,11 @@ pub(super) enum Event {
     },
     AssistantDelta {
         turn: u64,
+        text: String,
+    },
+    ThoughtDelta {
+        turn: u64,
+        id: ThoughtId,
         text: String,
     },
     PlanUpdated {
@@ -138,7 +145,7 @@ fn decode(line: &[u8], seq: u64, path: &Path) -> Result<Event> {
         serde_json::from_slice(line).map_err(|_| error(path, "invalid complete journal record"))?;
     // Existing journals remain readable; older binaries reject new records by
     // version instead of interpreting an extended event contract as v1.
-    if !matches!(record.version, 1 | 2 | 3 | 4 | VERSION) {
+    if !matches!(record.version, 1 | 2 | 3 | 4 | 5 | VERSION) {
         return Err(error(
             path,
             "unsupported session history version; use a compatible Bee version",
@@ -151,6 +158,14 @@ fn decode(line: &[u8], seq: u64, path: &Path) -> Result<Event> {
     }
     let event = serde_json::from_str(record.event.get())
         .map_err(|_| error(path, "invalid journal event"))?;
+    if let Event::ThoughtDelta { id, .. } = &event
+        && (record.version < 6 || !id.valid())
+    {
+        return Err(error(
+            path,
+            "agent thoughts require valid session history version 6 coordinates",
+        ));
+    }
     let selection = match &event {
         Event::SessionCreated { snapshot, .. } => Some((
             &snapshot.selection_state,
@@ -356,7 +371,7 @@ impl Projection {
                     .checked_add(bytes)
                     .ok_or_else(invalid)?;
             }
-            Event::AssistantDelta { turn, text } => {
+            Event::AssistantDelta { turn, text } | Event::ThoughtDelta { turn, text, .. } => {
                 if self.active != Some(*turn) {
                     return Err(invalid());
                 }
@@ -659,8 +674,10 @@ impl Journal {
         // Only the byte count changes; all records belong to the active turn.
         let mut bytes = self.projection.transcript_bytes;
         for event in events {
-            let Event::AssistantDelta { turn, text } = event else {
-                return Err(error(&self.path, "invalid streamed journal event"));
+            let (turn, text) = match event {
+                Event::AssistantDelta { turn, text } => (turn, text),
+                Event::ThoughtDelta { turn, id, text } if id.valid() => (turn, text),
+                _ => return Err(error(&self.path, "invalid streamed journal event")),
             };
             if self.projection.active != Some(*turn) {
                 return Err(error(&self.path, "stale assistant journal delta"));
@@ -718,45 +735,63 @@ impl Journal {
         self.unchanged_file(self.offset)?;
         let mut reader = Reader::open(&self.path, self.offset)?;
         let mut turn = None;
-        let mut text = String::new();
+        let mut messages: Vec<Message> = Vec::new();
+        let mut indices = std::collections::HashMap::new();
         while let Some(event) = reader.next()? {
             match event {
                 Event::TurnAccepted {
                     turn: next,
                     content,
                 } => {
-                    if !text.is_empty() {
-                        emit(Message {
-                            id: format!("agent-{}", turn.unwrap_or_default()),
-                            user: false,
-                            content: serde_json::json!([{"type":"text","text":std::mem::take(&mut text)}]),
-                        })?;
+                    for message in messages.drain(..) {
+                        emit(message)?;
                     }
+                    indices.clear();
                     turn = Some(next);
                     emit(Message {
                         id: format!("user-{next}"),
-                        user: true,
+                        kind: MessageKind::User,
                         content,
                     })?;
                 }
-                Event::AssistantDelta {
-                    turn: next,
-                    text: part,
-                } => {
+                event @ (Event::AssistantDelta { .. } | Event::ThoughtDelta { .. }) => {
+                    let (next, kind, id, part) = match event {
+                        Event::AssistantDelta { turn, text } => {
+                            (turn, MessageKind::Answer, format!("agent-{turn}"), text)
+                        }
+                        Event::ThoughtDelta { turn, id, text } => {
+                            (turn, MessageKind::Thought, id.message_id(turn), text)
+                        }
+                        _ => unreachable!(),
+                    };
                     if turn != Some(next) {
                         return Err(error(&self.path, "transcript message order is invalid"));
                     }
-                    text.push_str(&part);
+                    if part.is_empty() {
+                        continue;
+                    }
+                    let key = (kind, id.clone());
+                    if let Some(index) = indices.get(&key).copied() {
+                        let message: &mut Message = &mut messages[index];
+                        let serde_json::Value::String(text) = &mut message.content[0]["text"]
+                        else {
+                            return Err(error(&self.path, "invalid transcript text"));
+                        };
+                        text.push_str(&part);
+                    } else {
+                        indices.insert(key, messages.len());
+                        messages.push(Message {
+                            id,
+                            kind,
+                            content: serde_json::json!([{"type":"text","text":part}]),
+                        });
+                    }
                 }
                 _ => {}
             }
         }
-        if !text.is_empty() {
-            emit(Message {
-                id: format!("agent-{}", turn.unwrap_or_default()),
-                user: false,
-                content: serde_json::json!([{"type":"text","text":text}]),
-            })?;
+        for message in messages {
+            emit(message)?;
         }
         Ok(())
     }
@@ -765,6 +800,39 @@ impl Journal {
 #[cfg(test)]
 mod compatibility_tests {
     use super::*;
+
+    #[test]
+    fn legacy_answer_records_remain_readable_but_thoughts_require_version_six() {
+        let path = Path::new("journal");
+        for version in 1..=6 {
+            for (value, valid) in [
+                (
+                    serde_json::json!({"type":"assistant_delta","turn":1,"text":"answer"}),
+                    true,
+                ),
+                (
+                    serde_json::json!({"type":"thought_delta","turn":1,"id":{"step":0,"item":0,"part":0},"text":"thought"}),
+                    version == 6,
+                ),
+                (
+                    serde_json::json!({"type":"thought_delta","turn":1,"id":{"step":0,"item":128,"part":0},"text":"thought"}),
+                    false,
+                ),
+            ] {
+                let event = serde_json::value::to_raw_value(&value).unwrap();
+                let record = Record {
+                    version,
+                    seq: 1,
+                    checksum: checksum(version, 1, event.get()),
+                    event,
+                };
+                assert_eq!(
+                    decode(&serde_json::to_vec(&record).unwrap(), 1, path).is_ok(),
+                    valid
+                );
+            }
+        }
+    }
 
     #[test]
     fn selection_guards_require_version_four_and_explicit_settings_fields() {
@@ -843,7 +911,9 @@ mod compatibility_tests {
     #[case(1)]
     #[case(2)]
     #[case(3)]
-    fn legacy_headers_accept_new_plan_records_without_rewriting_the_old_prefix(
+    #[case(4)]
+    #[case(5)]
+    fn legacy_headers_accept_new_plan_and_thought_records_without_rewriting_the_old_prefix(
         #[case] version: u32,
     ) {
         let root = tempfile::tempdir().unwrap();
@@ -869,10 +939,12 @@ mod compatibility_tests {
         })
         .unwrap();
         // Historical snapshots lack recency guards; v1/v2 also lack grouping ownership.
-        event["snapshot"]
-            .as_object_mut()
-            .unwrap()
-            .remove("selection_state");
+        if version < 4 {
+            event["snapshot"]
+                .as_object_mut()
+                .unwrap()
+                .remove("selection_state");
+        }
         if version < 3 {
             event["snapshot"].as_object_mut().unwrap().remove("profile");
         }
@@ -904,6 +976,17 @@ mod compatibility_tests {
             .append(Event::PlanUpdated { turn: 1, plan })
             .unwrap();
         journal
+            .append(Event::ThoughtDelta {
+                turn: 1,
+                id: ThoughtId {
+                    step: 0,
+                    item: 0,
+                    part: 0,
+                },
+                text: "visible".into(),
+            })
+            .unwrap();
+        journal
             .append(Event::TurnFinished {
                 turn: 1,
                 outcome: Outcome::Cancelled,
@@ -913,6 +996,18 @@ mod compatibility_tests {
         drop(journal);
         assert!(std::fs::read(&path).unwrap().starts_with(&prefix));
         let journal = Journal::open(&path, "saved").unwrap();
+        let mut thoughts = Vec::new();
+        journal
+            .for_each_message(|message| {
+                if message.kind == MessageKind::Thought {
+                    thoughts.push(message);
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(thoughts.len(), 1);
+        assert_eq!(thoughts[0].id, "thought-1-0-0-0");
+        assert_eq!(thoughts[0].content[0]["text"], "visible");
         assert_eq!(
             journal.projection.plans[&1].entries[0].status,
             crate::plan::Status::Cancelled

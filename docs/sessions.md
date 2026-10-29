@@ -21,7 +21,7 @@ Creation publishes a synchronized temporary journal by atomic file rename while 
 handle in place. Incomplete creations without a published `session.jsonl` do not appear in `session/list`.
 Unix directories use mode 0700; journal and lock files use mode 0600. Windows directories use protected,
 owner-only DACLs inherited by files. Existing unsafe permissions are refused.
-History is not encrypted at rest: it contains prompts, assistant answers,
+History is not encrypted at rest: it contains prompts, assistant answers, displayable thoughts,
 successful tool results, native continuation and committed instruction/skill snapshots.
 It also contains retained tool presentation, committed mutation receipts, and bounded raw terminal output.
 
@@ -56,7 +56,8 @@ The version 1 event types are:
 Version 2 adds `plan_updated` events. Version 3 makes profile ownership explicit in the immutable `session_created`
 snapshot. Version 4 adds account-bound automatic-selection state and explicit-selection-required guards to creation and
 settings records. Version 5 adds `presentation` delta events for tool/terminal observations and receipt-space reservations.
-Writers emit version 5; readers also accept versions 1–4, whose missing selection state means the
+Version 6 adds `thought_delta` events with Bee-owned step/item/part coordinates and display text.
+Writers emit version 6; readers also accept versions 1–5, whose missing selection state means the
 original explicit/default behavior and whose missing profile means `default`. New records can append to legacy journals
 without rewriting their prefix. Older binaries reject newer versions rather than ignoring profile ownership or guards.
 
@@ -96,8 +97,8 @@ replay_max_bytes = 134217728 # 128 MiB per connection
 ```
 
 The value must be a positive integer. Embedded runtimes can inject parsed `history::Settings` through
-`Runtime::with_history_settings`. Replay memory assembly is bounded to one message, and both transcript measurement
-and publication are serialized with live session state and text updates.
+`Runtime::with_history_settings`. Replay memory assembly groups interleaved messages within one turn, and both transcript
+measurement and publication are serialized with live session state and text updates.
 
 ## Client flow
 
@@ -115,9 +116,9 @@ and publication are serialized with live session state and text updates.
    }
    ```
 
-5. Apply full `user_message` and `agent_message` updates as upserts by `messageId`. Their content replaces
-   that message's prior content; subsequent live chunks append. Repeated start replay preserves IDs and
-   order and does not duplicate stored messages. No nonstandard replay marker is required: the resume
+5. Apply full `user_message`, `agent_message` and `agent_thought` updates as upserts by entity kind plus `messageId`.
+   Their content replaces that message's prior content; subsequent live chunks append. Repeated start replay preserves
+   IDs and order and does not duplicate stored messages. No nonstandard replay marker is required: the resume
    request/response brackets restoration.
 6. Apply retained `plan_update` snapshots by `planId`, replacing the entire ordered entry list.
    These follow message replay and precede the current state. Empty lists are meaningful snapshots.
@@ -136,7 +137,7 @@ connection preserves its running state and orders replay with live output and st
 ## Transcript versus model context
 
 The visible transcript preserves original accepted user blocks, including resource-link references, and
-assistant text already emitted. It also retains partial text from cancelled, failed and refused turns.
+assistant answer/thought text already emitted. It also retains partial text from cancelled, failed and refused turns.
 Prompt acceptance follows durable user-message insertion; live text follows durable delta commits.
 
 The successful model-context projection is separate. Only successful, non-refused inference advances it; cancelled,
@@ -145,11 +146,35 @@ messages while leaving their visible transcript intact. Successful native tool-c
 committed guidance snapshots survive restart. Provider/model selection survives; provider configuration and
 credentials are resolved from current configuration when inference next runs.
 
-Replay sends historical user/assistant messages, latest execution-plan snapshots, and retained tool/terminal snapshots.
+Replay sends historical user/assistant/thought messages, latest execution-plan snapshots, and retained tool/terminal snapshots.
 It does not execute tools, query providers, request
 permissions, reopen login flows or restore previous MCP authority. Tool calls/results retained for model
 continuation are data, not executable restoration instructions. Legacy journals without tool observations
 do not acquire invented historical tool events.
+
+## Thought retention and identity
+
+Live `agent_thought_chunk` updates append only provider-designated display text, as described in the
+[inference subset](inference.md#displayable-reasoning-and-acp-thoughts). Bee allocates IDs of the form
+`thought-TURN-STEP-ITEM-PART`; coordinates are local ordinals, never opaque provider IDs. Different tool-loop steps,
+parts and turns remain distinct. First observation fixes transcript position; later interleaved chunks patch the
+same entity. Answers retain their existing `agent-TURN` identity.
+
+Start replay sends full `agent_thought` replacements with those same IDs before current state. Repeated replay
+does not duplicate thoughts, and omitted/null replay cursors send state only. Memory and durable sessions use
+the same entity semantics. Old journals do not acquire thoughts inferred from private native continuation.
+
+Displayed partials survive provider failure, malformed terminal output, refusal, cancellation and interrupted
+recovery, independently of successful model context and whole-turn context eviction. No new thought is accepted
+from a cancelled/finalized turn. Previously queued durable chunks can drain before terminal idle/close; nothing
+from that turn follows terminal idle. Thoughts have no separate invented completion/cancellation status.
+
+Provider parsing admits at most 128 thought entities and 4 MiB of UTF-8 display text per model step, with item/part
+indices below 128. The default loop permits sixteen steps. Exceeding a bound fails the turn rather than silently
+truncating thoughts. Durable thought/answer output shares the bounded 4 MiB pending queue (including conservative
+text-copy and command accounting), persistence-before-publication and cumulative replay budget. Display history
+has no automatic disk expiry. Signatures, encrypted reasoning and redacted payloads belong only to private native
+successful-context continuation, never thought records or ACP replay. History remains private but unencrypted at rest.
 
 ## Tool and terminal retention
 
