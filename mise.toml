@@ -25,7 +25,7 @@ idiomatic_version_file_enable_tools = []
 [tools]
 # Keep the install request stable and lockable; runtime selection lives in env.
 rust = { version = "stable", components = ["rustfmt", "clippy"], mr_boxington = true }
-mr-boxington = "1.28.0"
+mr-boxington = "latest"
 actionlint = "latest"
 # actionlint silently skips its shellcheck integration when the binary is
 # absent, so without this a local run is NOT the CI run. Runners ship it.
