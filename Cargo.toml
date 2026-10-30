@@ -161,7 +161,7 @@ base64 = "0.23"
 # The operating system's CSPRNG, for the PKCE verifier and `state`.
 getrandom = "0.4"
 # Verify OIDC identity with a maintained implementation, never decoded claims alone.
-jsonwebtoken = { version = "10", features = ["rust_crypto"] }
+jsonwebtoken = { version = "11", features = ["rust_crypto"] }
 # The credential store file and the OpenRouter exchange are JSON. Read by hand
 # over `Value`, never derived: serde's error text quotes the offending value, and
 # this file is where keys live (the reason `provider.rs` avoids it for TOML).
