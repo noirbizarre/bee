@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0](https://github.com/noirbizarre/bee/compare/0.2.0..0.3.0) - 2026-10-31
+
+### 💫 Features
+
+- **acp** Add outbound client for configured agents ([#121](https://github.com/noirbizarre/bee/issues/121)) - ([ae96cb9](https://github.com/noirbizarre/bee/commit/ae96cb9f9929a6c3c13e220cfd8e72ca2f40faa2))
+- **mcp** Support project-local server configuration ([#123](https://github.com/noirbizarre/bee/issues/123)) - ([e8b2f4d](https://github.com/noirbizarre/bee/commit/e8b2f4db83bfd5695cc750e7d364420103da7a58))
+
+### 🏗️ Build
+
+- **deps** Update mise.lock and dependencies ([#124](https://github.com/noirbizarre/bee/issues/124)) - ([b212049](https://github.com/noirbizarre/bee/commit/b2120494fce81cf9c2c4e51c44a8ad8b8276e2f7))
+
 ## [0.2.0](https://github.com/noirbizarre/bee/compare/0.1.1..0.2.0) - 2026-10-29
 
 ### 💫 Features
