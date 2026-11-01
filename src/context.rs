@@ -88,7 +88,7 @@ pub(crate) fn fit(
     Ok(removed)
 }
 
-fn validate_turn(messages: &[Message]) -> Result<(), Error> {
+pub(crate) fn validate_turn(messages: &[Message]) -> Result<(), Error> {
     if !messages.first().is_some_and(Message::is_user) {
         return Err(Error::Malformed);
     }

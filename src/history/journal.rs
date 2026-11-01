@@ -15,7 +15,7 @@ use super::{
 // A corrupt/malicious line must not allocate the size of the entire journal.
 // This bounds one record, not transcript length or the number of sessions.
 pub(super) const MAX_RECORD_BYTES: usize = 64 * 1024 * 1024;
-const VERSION: u32 = 7;
+const VERSION: u32 = 8;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -58,6 +58,14 @@ pub(super) enum Event {
         turn: u64,
         event: crate::presentation::Event,
     },
+    CompactionStarted {
+        turn: u64,
+    },
+    CompactionFinished {
+        turn: u64,
+        drop_messages: usize,
+        summary: crate::compaction::Summary,
+    },
     TurnFinished {
         turn: u64,
         outcome: Outcome,
@@ -78,6 +86,8 @@ pub(super) enum Outcome {
 /// One successful turn's changes, not another copy of its retained predecessors.
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct Context {
+    #[serde(default)]
+    safe_tools: crate::compaction::ToolText,
     drop_messages: usize,
     portable: bool,
     append: Vec<crate::llm::Message>,
@@ -145,7 +155,7 @@ fn decode(line: &[u8], seq: u64, path: &Path) -> Result<Event> {
         serde_json::from_slice(line).map_err(|_| error(path, "invalid complete journal record"))?;
     // Existing journals remain readable; older binaries reject new records by
     // version instead of interpreting an extended event contract as v1.
-    if !matches!(record.version, 1 | 2 | 3 | 4 | 5 | 6 | VERSION) {
+    if !matches!(record.version, 1 | 2 | 3 | 4 | 5 | 6 | 7 | VERSION) {
         return Err(error(
             path,
             "unsupported session history version; use a compatible Bee version",
@@ -158,6 +168,15 @@ fn decode(line: &[u8], seq: u64, path: &Path) -> Result<Event> {
     }
     let event = serde_json::from_str(record.event.get())
         .map_err(|_| error(path, "invalid journal event"))?;
+    if record.version < 8
+        && (matches!(
+            event,
+            Event::CompactionStarted { .. } | Event::CompactionFinished { .. }
+        ) || matches!(&event, Event::SessionCreated { snapshot, .. } if snapshot.summary.is_some() || !snapshot.safe_tools.is_empty())
+            || matches!(&event, Event::TurnFinished { context: Some(context), .. } if !context.safe_tools.is_empty()))
+    {
+        return Err(error(path, "compaction requires session history version 8"));
+    }
     // Old-version records cannot acquire new semantics just because this decoder knows them.
     let messages = match &event {
         Event::SessionCreated { snapshot, .. } => snapshot.messages.as_slice(),
@@ -305,6 +324,7 @@ pub(super) struct Projection {
     pub(super) created: u64,
     pub(super) plans: std::collections::BTreeMap<u64, crate::plan::Entries>,
     pub(super) presentation: crate::presentation::State,
+    pub(super) compactions: std::collections::BTreeMap<u64, crate::compaction::Display>,
 }
 
 fn portable(messages: &mut [crate::llm::Message]) {
@@ -337,6 +357,7 @@ impl Projection {
             transcript_bytes: 0,
             plans: Default::default(),
             presentation: Default::default(),
+            compactions: Default::default(),
             created,
         })
     }
@@ -344,6 +365,66 @@ impl Projection {
     fn apply(&mut self, event: &Event, path: &Path) -> Result<()> {
         let invalid = || error(path, "journal event violates session ordering");
         match event {
+            Event::CompactionStarted { turn } => {
+                if self.active != Some(*turn) || self.compactions.contains_key(turn) {
+                    return Err(invalid());
+                }
+                self.compactions.insert(
+                    *turn,
+                    crate::compaction::Display {
+                        turn: *turn,
+                        status: "in_progress".into(),
+                        summary: None,
+                    },
+                );
+                // Retire only oldest historical entities; the newest active entry stays protected.
+                while self.compactions.len() > crate::compaction::RETAINED
+                    || self
+                        .compactions
+                        .values()
+                        .map(|display| display.message().content.to_string().len() + 256)
+                        .sum::<usize>()
+                        > crate::compaction::DISPLAY_BYTES
+                {
+                    self.compactions.pop_first();
+                }
+            }
+            Event::CompactionFinished {
+                turn,
+                drop_messages,
+                summary,
+            } => {
+                if self.active != Some(*turn)
+                    || !summary.valid()
+                    || !self
+                        .compactions
+                        .get(turn)
+                        .is_some_and(|display| display.status == "in_progress")
+                {
+                    return Err(invalid());
+                }
+                crate::compaction::validate_prefix(&self.snapshot.messages, *drop_messages)
+                    .map_err(|_| invalid())?;
+                self.snapshot.messages.drain(..*drop_messages);
+                self.snapshot.summary = Some(summary.clone());
+                crate::compaction::retain_tools(
+                    &mut self.snapshot.safe_tools,
+                    &self.snapshot.messages,
+                );
+                let display = self.compactions.get_mut(turn).expect("validated entity");
+                display.status = "completed".into();
+                display.summary = Some(summary.clone());
+                while self
+                    .compactions
+                    .values()
+                    .map(|display| display.message().content.to_string().len() + 256)
+                    .sum::<usize>()
+                    > crate::compaction::DISPLAY_BYTES
+                {
+                    self.compactions.pop_first();
+                }
+                self.active = None;
+            }
             Event::SessionCreated { .. } => return Err(invalid()),
             Event::SettingsChanged {
                 provider,
@@ -455,6 +536,8 @@ impl Projection {
                     }
                     old.drain(..context.drop_messages);
                     old.extend(context.append.iter().cloned());
+                    self.snapshot.safe_tools.extend(context.safe_tools.clone());
+                    crate::compaction::retain_tools(&mut self.snapshot.safe_tools, old);
                     self.snapshot
                         .instructions
                         .apply(context.instructions.clone());
@@ -464,6 +547,15 @@ impl Projection {
                     // The terminal record atomically closes context and plan state,
                     // including interrupted recovery; no second append can be lost.
                     plan.cancel_unfinished();
+                }
+                if let Some(display) = self.compactions.get_mut(turn) {
+                    display.status = if *outcome == Outcome::Cancelled {
+                        "cancelled"
+                    } else {
+                        "failed"
+                    }
+                    .into();
+                    display.summary = None;
                 }
                 self.active = None;
                 self.presentation
@@ -479,6 +571,8 @@ impl Projection {
             || self.snapshot.turns != next.turns
             || self.snapshot.protocol != next.protocol
             || self.snapshot.instructions != next.instructions
+            || self.snapshot.summary != next.summary
+            || self.snapshot.safe_tools != next.safe_tools
         {
             return Err(error(path, "settings mutation changed committed context"));
         }
@@ -506,6 +600,7 @@ impl Projection {
             || next.provider != self.snapshot.provider
             || next.model != self.snapshot.model
             || next.selection_state != self.snapshot.selection_state
+            || next.summary != self.snapshot.summary
         {
             return Err(invalid());
         }
@@ -529,7 +624,10 @@ impl Projection {
                 return Err(invalid());
             }
         }
+        let mut safe_tools = next.safe_tools.clone();
+        crate::compaction::retain_tools(&mut safe_tools, &next.messages[start..]);
         Ok(Context {
+            safe_tools,
             drop_messages,
             portable: clear_native,
             append: next.messages[start..].to_vec(),
@@ -819,6 +917,12 @@ impl Journal {
                         });
                     }
                 }
+                Event::CompactionStarted { turn } => {
+                    // Emit the latest full snapshot at first observation, not after later messages.
+                    if let Some(display) = self.projection.compactions.get(&turn) {
+                        messages.push(display.message());
+                    }
+                }
                 _ => {}
             }
         }
@@ -848,6 +952,8 @@ mod compatibility_tests {
                     id: "saved".into(),
                     created: 1,
                     snapshot: Snapshot {
+                        safe_tools: Default::default(),
+                        summary: None,
                         selection_state: Default::default(),
                         profile: "default".into(),
                         cwd: "project".into(),
@@ -906,6 +1012,43 @@ mod compatibility_tests {
                 };
                 assert_eq!(
                     decode(&serde_json::to_vec(&record).unwrap(), 1, path).is_ok(),
+                    valid
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn compaction_semantics_require_version_eight_while_all_legacy_answers_remain_readable() {
+        for version in 1..=VERSION {
+            for (event, valid) in [
+                (
+                    serde_json::json!({"type":"assistant_delta","turn":1,"text":"answer"}),
+                    true,
+                ),
+                (
+                    serde_json::json!({"type":"compaction_started","turn":1}),
+                    version >= 8,
+                ),
+                (
+                    serde_json::json!({"type":"compaction_finished","turn":1,"drop_messages":2,"summary":"summary"}),
+                    version >= 8,
+                ),
+            ] {
+                let event = serde_json::value::to_raw_value(&event).unwrap();
+                let record = Record {
+                    version,
+                    seq: 1,
+                    checksum: checksum(version, 1, event.get()),
+                    event,
+                };
+                assert_eq!(
+                    decode(
+                        &serde_json::to_vec(&record).unwrap(),
+                        1,
+                        Path::new("journal")
+                    )
+                    .is_ok(),
                     valid
                 );
             }
@@ -1004,6 +1147,8 @@ mod compatibility_tests {
             id: "saved".into(),
             created: 1,
             snapshot: Snapshot {
+                safe_tools: Default::default(),
+                summary: None,
                 selection_state: Default::default(),
                 profile: "default".into(),
                 cwd: root.path().into(),

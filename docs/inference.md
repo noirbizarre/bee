@@ -558,6 +558,11 @@ visible history and successful model context across close/resume and process res
 not delete visible messages. Embedded runtimes default to memory storage unless history is explicitly enabled.
 See [transcript versus model context](sessions.md#transcript-versus-model-context) for retention and replay boundaries.
 
+Explicit [`/compact`](sessions.md#explicit-compaction-and-summary-retention) separately summarizes older successful
+turns using the selected model, retaining the latest complete turn unchanged. Its portable summary is counted once
+alongside native system/instructions content, including prompt-cache transformations. It is not evictable guidance
+or an extra user turn. Automatic eviction does not generate summaries or silently discard an existing summary.
+
 ### Usage and overflow reporting
 
 After a successful commit with an effective capacity, ACP receives `usage_update` before terminal idle. `used` is
@@ -568,6 +573,11 @@ A final answer can change the estimate beyond the preflight budget;
 the next request is checked again. If turns were dropped, an informational notice reports their count. These are
 live context reports, not replayed messages, billing totals or generated summaries. Unsuccessful attempts emit no
 committed-context report or truncation notice.
+
+Successful explicit compaction also reports estimated retained occupancy when capacity is known. Its
+`bee.dev/context.scope` is `retained-conversation`: it includes the new summary and retained conversation, not
+the next prompt's undiscovered tools or unprepared guidance. The next ordinary request counts those normally.
+This occupancy is distinct from the summarization request's token consumption; no billing total is inferred.
 
 Library callers can inspect `Model::context` and `agent::Outcome::context` even when capacity is unknown.
 `Model::step` checks a configured budget without modifying its input; the agent loop owns eviction. Library inputs

@@ -169,6 +169,8 @@ pub struct Listing {
 /// One atomic turn snapshot, including the execution base for native tools.
 #[derive(Clone)]
 pub(crate) struct InferenceInput {
+    pub(crate) safe_tools: crate::compaction::ToolText,
+    pub(crate) summary: Option<crate::compaction::Summary>,
     pub(crate) protocol: Option<crate::provider::Protocol>,
     pub(crate) instructions: crate::instructions::State,
     pub(crate) profile: crate::account::Account,
@@ -177,8 +179,9 @@ pub(crate) struct InferenceInput {
     pub(crate) cwd: PathBuf,
 }
 
-#[derive(Debug)]
 struct Session {
+    safe_tools: crate::compaction::ToolText,
+    summary: Option<crate::compaction::Summary>,
     durable: Option<crate::history::Handle>,
     transcript: Vec<crate::history::Message>,
     transcript_index: HashMap<(crate::history::MessageKind, String), usize>,
@@ -204,6 +207,16 @@ struct Session {
     model: Option<String>,
     selection_state: crate::selection::State,
     history: Vec<Message>,
+}
+
+impl std::fmt::Debug for Session {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Safe-to-display tool previews can still contain user secrets; never derive their Debug.
+        f.debug_struct("Session")
+            .field("open", &self.open)
+            .field("turns", &self.turns)
+            .finish_non_exhaustive()
+    }
 }
 
 struct ActiveTurn {
@@ -475,6 +488,8 @@ impl Sessions {
                 .map(|reference| reference.model.clone())
         })?;
         Some(InferenceInput {
+            safe_tools: session.safe_tools.clone(),
+            summary: session.summary.clone(),
             protocol: session.protocol,
             instructions: session.instructions.clone(),
             profile,
@@ -499,6 +514,79 @@ impl Sessions {
             session.history = history;
             session.instructions = instructions;
             session.protocol = protocol;
+        }
+    }
+
+    pub(crate) fn commit_compaction(
+        &mut self,
+        id: &str,
+        token: u64,
+        drop_messages: usize,
+        summary: crate::compaction::Summary,
+    ) {
+        if self.is_current(id, token)
+            && let Some(session) = self.by_id.get_mut(id)
+        {
+            session.history.drain(..drop_messages);
+            session.summary = Some(summary);
+            crate::compaction::retain_tools(&mut session.safe_tools, &session.history);
+        }
+    }
+
+    pub(crate) fn commit_tools(
+        &mut self,
+        id: &str,
+        token: u64,
+        tools: crate::compaction::ToolText,
+    ) {
+        if self.is_current(id, token)
+            && let Some(session) = self.by_id.get_mut(id)
+        {
+            session.safe_tools = tools;
+            crate::compaction::retain_tools(&mut session.safe_tools, &session.history);
+        }
+    }
+
+    pub(crate) fn record_compaction(&mut self, id: &str, display: crate::compaction::Display) {
+        if let Some(session) = self.by_id.get_mut(id)
+            && session.durable.is_none()
+        {
+            let message = display.message();
+            if let Some(old) = session.transcript.iter_mut().find(|old| {
+                old.kind == crate::history::MessageKind::Compaction && old.id == message.id
+            }) {
+                *old = message;
+            } else {
+                session.transcript.push(message);
+            }
+            // Rebuild indexes after removing only bounded compaction presentation, never conversation.
+            while session
+                .transcript
+                .iter()
+                .filter(|m| m.kind == crate::history::MessageKind::Compaction)
+                .count()
+                > crate::compaction::RETAINED
+                || session
+                    .transcript
+                    .iter()
+                    .filter(|m| m.kind == crate::history::MessageKind::Compaction)
+                    .map(|m| m.content.to_string().len() + 256)
+                    .sum::<usize>()
+                    > crate::compaction::DISPLAY_BYTES
+            {
+                let index = session
+                    .transcript
+                    .iter()
+                    .position(|m| m.kind == crate::history::MessageKind::Compaction)
+                    .expect("retained compaction");
+                session.transcript.remove(index);
+                session.transcript_index.clear();
+                for (index, message) in session.transcript.iter().enumerate() {
+                    session
+                        .transcript_index
+                        .insert((message.kind, message.id.clone()), index);
+                }
+            }
         }
     }
 
@@ -669,6 +757,8 @@ impl Sessions {
         self.by_id.insert(
             id.clone(),
             Session {
+                safe_tools: Default::default(),
+                summary: None,
                 durable: None,
                 transcript: Vec::new(),
                 transcript_index: HashMap::new(),
@@ -866,6 +956,8 @@ impl Sessions {
 
     pub(crate) fn snapshot(&self, id: &str) -> Option<crate::history::Snapshot> {
         self.by_id.get(id).map(|session| crate::history::Snapshot {
+            safe_tools: session.safe_tools.clone(),
+            summary: session.summary.clone(),
             profile: self.providers.profile_name().to_owned(),
             cwd: session.cwd.clone(),
             turns: session.turns,
@@ -910,6 +1002,8 @@ impl Sessions {
         self.by_id.insert(
             id,
             Session {
+                safe_tools: snapshot.safe_tools,
+                summary: snapshot.summary,
                 durable: Some(handle),
                 transcript: Vec::new(),
                 transcript_index: HashMap::new(),
@@ -939,6 +1033,8 @@ impl Sessions {
             // context or writer that could overwrite a later owner's state.
             session.durable = None;
             session.history.clear();
+            session.summary = None;
+            session.safe_tools.clear();
             session.instructions = Default::default();
         }
     }
@@ -949,6 +1045,8 @@ impl Sessions {
             session.model = snapshot.model;
             session.selection_state = snapshot.selection_state;
             session.history = snapshot.messages;
+            session.summary = snapshot.summary;
+            session.safe_tools = snapshot.safe_tools;
             session.protocol = snapshot.protocol;
             session.instructions = snapshot.instructions;
         }
@@ -1076,6 +1174,58 @@ mod tests {
             sessions.begin_turn("nope", || {}),
             Err(SessionError::Unknown("nope".into()))
         );
+    }
+
+    #[test]
+    fn retained_summary_and_tool_previews_never_appear_in_session_debug_output() {
+        let mut sessions = Sessions::new();
+        let id = sessions.create("/a");
+        let session = sessions.by_id.get_mut(&id).unwrap();
+        session.summary = Some(crate::compaction::Summary(
+            "private-summary-sentinel".into(),
+        ));
+        session
+            .safe_tools
+            .insert("key".into(), "private-tool-sentinel".into());
+        let diagnostic = format!("{sessions:?}");
+        assert!(!diagnostic.contains("private-summary-sentinel"));
+        assert!(!diagnostic.contains("private-tool-sentinel"));
+    }
+
+    #[test]
+    fn memory_summary_retention_counts_encoded_bytes_without_deleting_original_messages() {
+        let mut sessions = Sessions::new();
+        let id = sessions.create("/a");
+        sessions.record_user(
+            &id,
+            "user-1".into(),
+            serde_json::json!([{"type":"text","text":"original"}]),
+        );
+        for turn in 1..=20 {
+            sessions.record_compaction(
+                &id,
+                crate::compaction::Display {
+                    turn,
+                    status: "in_progress".into(),
+                    summary: None,
+                },
+            );
+            sessions.record_compaction(
+                &id,
+                crate::compaction::Display {
+                    turn,
+                    status: "completed".into(),
+                    summary: Some(crate::compaction::Summary(
+                        "\u{0001}".repeat(crate::compaction::SUMMARY_BYTES),
+                    )),
+                },
+            );
+        }
+        let transcript = &sessions.by_id[&id].transcript;
+        assert_eq!(transcript.len(), 3);
+        assert_eq!(transcript[0].id, "user-1");
+        assert_eq!(transcript[1].id, "compaction-19");
+        assert_eq!(transcript[2].id, "compaction-20");
     }
 
     #[test]

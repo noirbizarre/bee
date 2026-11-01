@@ -301,6 +301,7 @@ pub struct Model {
     copilot_agent: bool,
     copilot_vision: bool,
     instructions: String,
+    summary: Option<crate::compaction::Summary>,
     cache_scope: String,
     profile: Profile,
     model: String,
@@ -334,6 +335,7 @@ impl Model {
             copilot_agent: false,
             copilot_vision: false,
             instructions: String::new(),
+            summary: None,
             cache_scope: "default".into(),
             http: crate::http::InferenceHttp::new()?,
             profile,
@@ -432,6 +434,17 @@ impl Model {
 }
 
 impl Model {
+    pub(crate) fn with_summary(mut self, summary: Option<crate::compaction::Summary>) -> Self {
+        self.summary = summary;
+        self
+    }
+
+    fn context_instructions(&self) -> String {
+        match &self.summary {
+            Some(summary) => format!("{}\n\n{}", self.instructions, summary.render()),
+            None => self.instructions.clone(),
+        }
+    }
     /// Use turn-pinned renewable ADC for official Google Cloud inference.
     pub fn with_google_cloud_session(
         mut self,

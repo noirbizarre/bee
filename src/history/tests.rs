@@ -360,6 +360,8 @@ async fn plan_replay_reserves_the_entire_budget_before_delivering_messages_or_pl
 
 fn snapshot() -> Snapshot {
     Snapshot {
+        safe_tools: Default::default(),
+        summary: None,
         selection_state: Default::default(),
         profile: "default".into(),
         cwd: std::env::temp_dir(),
@@ -370,6 +372,163 @@ fn snapshot() -> Snapshot {
         messages: Vec::new(),
         instructions: Default::default(),
     }
+}
+
+#[tokio::test]
+async fn summary_only_commits_atomically_replace_context_without_erasing_visible_history() {
+    let (_root, store, id, handle) = create().await;
+    let first = finish_text(&handle, 1, "old", "old answer", snapshot()).await;
+    let before = finish_text(&handle, 2, "latest", "latest answer", first).await;
+    handle
+        .accept(3, json!([{"type":"text","text":"/compact"}]))
+        .await
+        .unwrap();
+    handle.start_compaction(3).await.unwrap();
+    handle
+        .finish_compaction(3, 2, crate::compaction::Summary("retained summary".into()))
+        .await
+        .unwrap();
+    let after = committed(&handle).await;
+    assert_eq!(after.messages, before.messages[2..]);
+    assert_eq!(after.summary.unwrap().0, "retained summary");
+    assert_eq!(after.instructions, before.instructions);
+    assert_eq!(after.protocol, before.protocol);
+    let replayed = replay(&handle).await;
+    assert_eq!(replayed.last().unwrap().kind, MessageKind::Compaction);
+    assert!(
+        replayed
+            .iter()
+            .any(|message| message.content.to_string().contains("old answer"))
+    );
+    handle.release().await.unwrap();
+    let (restored, reopened, interrupted) = store.attach(&id).await.unwrap();
+    assert!(!interrupted);
+    assert_eq!(restored.summary.unwrap().0, "retained summary");
+    assert_eq!(
+        replay(&reopened).await.last().unwrap().content["status"],
+        "completed"
+    );
+}
+
+#[tokio::test]
+async fn summary_replay_is_bounded_by_encoded_bytes_without_losing_the_current_semantic_summary() {
+    let (_root, store, id, handle) = create().await;
+    let mut state = finish_text(&handle, 1, "first", "answer", snapshot()).await;
+    for turn in 2..=21 {
+        finish_text(&handle, turn * 2, "next", "answer", state).await;
+        handle
+            .accept(turn * 2 + 1, json!([{"type":"text","text":"/compact"}]))
+            .await
+            .unwrap();
+        handle.start_compaction(turn * 2 + 1).await.unwrap();
+        handle
+            .finish_compaction(
+                turn * 2 + 1,
+                2,
+                crate::compaction::Summary("\u{0001}".repeat(crate::compaction::SUMMARY_BYTES)),
+            )
+            .await
+            .unwrap();
+        state = committed(&handle).await;
+    }
+    let messages = replay(&handle).await;
+    let retained: Vec<_> = messages
+        .iter()
+        .filter(|message| message.kind == MessageKind::Compaction)
+        .collect();
+    assert_eq!(retained.len(), 2);
+    assert!(
+        retained
+            .iter()
+            .map(|message| message.content.to_string().len() + 256)
+            .sum::<usize>()
+            <= crate::compaction::DISPLAY_BYTES
+    );
+    let emitted = Arc::new(AtomicUsize::new(0));
+    let delivered = emitted.clone();
+    assert!(
+        handle
+            .replay(
+                Arc::new(ReplayBudget::new(Settings {
+                    replay_max_bytes: 1024
+                })),
+                move |_| {
+                    delivered.fetch_add(1, Ordering::Relaxed);
+                    Ok(())
+                }
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(emitted.load(Ordering::Relaxed), 0);
+    handle.release().await.unwrap();
+    let (restored, reopened, _) = store.attach(&id).await.unwrap();
+    assert_eq!(
+        restored.summary.unwrap().0.len(),
+        crate::compaction::SUMMARY_BYTES
+    );
+    let restored = replay(&reopened).await;
+    assert_eq!(
+        restored
+            .iter()
+            .filter(|message| message.kind == MessageKind::Compaction)
+            .count(),
+        retained.len()
+    );
+}
+
+#[rstest::rstest]
+#[case::torn(Fault::PartialWrite(37), false)]
+#[case::unwritten(Fault::BeforeWrite, false)]
+#[case::ambiguous(Fault::BeforeSync, true)]
+#[tokio::test]
+async fn interrupted_summary_commits_recover_an_atomic_old_or_new_context(
+    #[case] fault: Fault,
+    #[case] committed_summary: bool,
+) {
+    let (_root, store, id, handle) = create().await;
+    let first = finish_text(&handle, 1, "old", "old answer", snapshot()).await;
+    let before = finish_text(&handle, 2, "latest", "latest answer", first).await;
+    handle
+        .accept(3, json!([{"type":"text","text":"/compact"}]))
+        .await
+        .unwrap();
+    handle.start_compaction(3).await.unwrap();
+    handle
+        .run(move |journal, _| {
+            journal.fault = Some(fault);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert!(
+        handle
+            .finish_compaction(3, 2, crate::compaction::Summary("summary".into()))
+            .await
+            .is_err()
+    );
+    handle.release().await.unwrap();
+    let (_, recovered, _) = store.attach(&id).await.unwrap();
+    recovered.recover().await.unwrap();
+    let restored = committed(&recovered).await;
+    assert_eq!(restored.summary.is_some(), committed_summary);
+    assert_eq!(
+        restored.messages,
+        if committed_summary {
+            before.messages[2..].to_vec()
+        } else {
+            before.messages
+        }
+    );
+    let replayed = replay(&recovered).await;
+    assert_eq!(
+        replayed.last().unwrap().content["status"],
+        if committed_summary {
+            "completed"
+        } else {
+            "failed"
+        }
+    );
 }
 
 #[tokio::test]
@@ -513,7 +672,7 @@ async fn incomplete_creations_are_not_published_to_the_session_listing() {
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(first["version"], 7);
+    assert_eq!(first["version"], 8);
     assert_eq!(first["seq"], 0);
     assert_eq!(first["event"]["id"], id);
 }

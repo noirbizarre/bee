@@ -137,6 +137,12 @@ impl Observer for Reply {
                         id: self.tool_id(call),
                     },
                     Observation::Finished(result) => {
+                        // Hash the observed envelope so private guidance additions cannot borrow a preview.
+                        lock(&self.safe_tools).insert(
+                            crate::compaction::tool_key(&result.output),
+                            bounded(&result.output, crate::presentation::CALL_BYTES / 4),
+                        );
+                        crate::compaction::bound_tools(&mut lock(&self.safe_tools));
                         let output = serde_json::from_str(&result.output)
                             .unwrap_or_else(|_| result.output.clone().into());
                         Event::Finished {

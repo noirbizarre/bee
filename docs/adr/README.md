@@ -57,3 +57,4 @@ by editing the old one. The history is the value.
 - [ADR-032](032-project-local-mcp.md) — Discover project MCP definitions and own direct connections per session
 - [ADR-033](033-bounded-acp-delegation.md) — Bound ACP task delegation at execution and ownership boundaries
 - [ADR-034](034-multimodal-prompt-content.md) — Gate portable multimodal prompts by model declarations and native routes
+- [ADR-035](035-explicit-context-compaction.md) — Explicit transactional summaries with bounded ACP presentation

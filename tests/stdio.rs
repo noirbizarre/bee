@@ -2098,6 +2098,292 @@ fn context_truncation_reports_committed_history_and_failures_leave_it_intact_ove
 }
 
 #[test]
+fn explicit_compaction_uses_standard_wire_entities_and_survives_process_restart() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("AGENTS.md"), "private-guidance-sentinel").unwrap();
+    let state = root.path().join("state");
+    let server = support::Server::start(vec![
+        support::Response::json(support::chat_text(&"old answer ".repeat(200))),
+        support::Response::json(support::chat_text("latest answer")),
+        support::Response::json(support::chat_text("retained summary")),
+        support::Response::json(support::chat_text("resumed answer")),
+    ]);
+    let config = format!(
+        "model='test/test'\n[accounts.test]\nprovider='custom'\nmodels=['test']\ncontext_window=100000\n[accounts.test.protocols.openai-chat]\nbase_url='{}'",
+        server.url
+    );
+    let mut agent = Agent::configured_with_state(&config, Some(&state));
+    agent.initialize(1);
+    agent
+        .send(&json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":root.path()}}));
+    let created = agent.recv();
+    assert_eq!(created["result"]["availableCommands"][0]["name"], "compact");
+    let session = created["result"]["sessionId"].clone();
+    agent.send(&json!({"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"text","text":"/compact unexpected"}]}}));
+    assert_eq!(agent.recv()["error"]["code"], -32602);
+    for (index, text) in ["old goal", "latest goal", "/compact"]
+        .into_iter()
+        .enumerate()
+    {
+        agent.send(&json!({"jsonrpc":"2.0","id":index+4,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"text","text":text}]}}));
+        let batch = agent.until_idle();
+        assert_eq!(
+            batch.last().unwrap()["params"]["update"]["stopReason"],
+            "end_turn",
+            "{batch:?}"
+        );
+        if text == "/compact" {
+            let entities: Vec<_> = batch
+                .iter()
+                .filter(|m| m["params"]["update"]["sessionUpdate"] == "compaction_update")
+                .collect();
+            assert_eq!(entities.len(), 2);
+            assert_eq!(entities[0]["params"]["update"]["status"], "in_progress");
+            assert_eq!(entities[1]["params"]["update"]["status"], "completed");
+            assert_eq!(
+                entities[1]["params"]["update"]["summary"],
+                json!([{"type":"text","text":"retained summary"}])
+            );
+            assert_eq!(entities[0]["params"]["sessionId"], session);
+            assert_eq!(
+                entities[0]["params"]["update"]["compactionId"],
+                entities[1]["params"]["update"]["compactionId"]
+            );
+        }
+    }
+    let (status, stderr) = agent.finish();
+    assert!(status.success(), "{stderr}");
+    let mut restarted = Agent::configured_with_state(&config, Some(&state));
+    restarted.initialize(1);
+    for _ in 0..2 {
+        let replay = restarted.resume(&session, root.path(), true);
+        let summaries: Vec<_> = replay
+            .iter()
+            .filter(|m| m["params"]["update"]["sessionUpdate"] == "compaction_update")
+            .collect();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0]["params"]["update"]["status"], "completed");
+        assert_eq!(
+            summaries[0]["params"]["update"]["summary"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(replay.iter().any(|m| {
+            m["params"]["update"]["content"][0]["text"]
+                .as_str()
+                .is_some_and(|text| text.starts_with("old answer"))
+        }));
+    }
+    restarted.send(&json!({"jsonrpc":"2.0","id":10,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"text","text":"next"}]}}));
+    assert_eq!(
+        restarted.until_idle().last().unwrap()["params"]["update"]["stopReason"],
+        "end_turn"
+    );
+    let first = server.request().body.to_string();
+    server.request();
+    let summary = server.request().body;
+    let next = server.request().body.to_string();
+    assert!(first.contains("private-guidance-sentinel"));
+    assert!(!summary.to_string().contains("private-guidance-sentinel"));
+    assert!(summary.get("tools").is_none());
+    assert!(next.contains("retained summary") && next.contains("latest answer"));
+    assert!(!next.contains("old answer") && !next.contains("/compact"));
+    let (status, stderr) = restarted.finish();
+    assert!(status.success(), "{stderr}");
+}
+
+#[test]
+fn an_empty_compaction_needs_no_model_and_still_uses_normal_prompt_acceptance() {
+    let mut agent = Agent::spawn();
+    agent.initialize(1);
+    let cwd = agent._isolated.path().to_owned();
+    agent.send(&json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":cwd}}));
+    let session = agent.recv()["result"]["sessionId"].clone();
+    agent.send(&json!({"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"text","text":"/compact"}]}}));
+    let messages = agent.until_idle();
+    assert!(
+        messages
+            .iter()
+            .any(|message| message["id"] == 3 && message["result"]["messageId"].is_string())
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message["params"]["update"]["sessionUpdate"] == "user_message")
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message["params"]["update"]["sessionUpdate"] == "compaction_update")
+    );
+    assert_eq!(
+        messages.last().unwrap()["params"]["update"]["stopReason"],
+        "end_turn"
+    );
+    agent.finish();
+}
+
+#[rstest::rstest]
+#[case(false)]
+#[case(true)]
+#[test]
+fn failed_or_malformed_compaction_replays_failed_status_without_changing_model_context(
+    #[case] malformed: bool,
+) {
+    let root = tempfile::tempdir().unwrap();
+    let mut failure = support::Response::json(if malformed {
+        json!({"choices":[]})
+    } else {
+        json!({"error":"private-upstream-sentinel"})
+    });
+    if !malformed {
+        failure.status = 500;
+    }
+    let server = support::Server::start(vec![
+        support::Response::json(support::chat_text(&"old answer ".repeat(200))),
+        support::Response::json(support::chat_text("latest answer")),
+        failure,
+        support::Response::json(support::chat_text("after failure")),
+    ]);
+    let mut agent = Agent::configured(&format!(
+        "model='test/test'\n[accounts.test]\nprovider='custom'\nmodels=['test']\n[accounts.test.protocols.openai-chat]\nbase_url='{}'",
+        server.url
+    ));
+    agent.initialize(1);
+    agent
+        .send(&json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":root.path()}}));
+    let session = agent.recv()["result"]["sessionId"].clone();
+    for (index, text) in ["old", "latest", "/compact"].into_iter().enumerate() {
+        agent.send(&json!({"jsonrpc":"2.0","id":index+3,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"text","text":text}]}}));
+        let batch = agent.until_idle();
+        assert!(
+            !serde_json::to_string(&batch)
+                .unwrap()
+                .contains("private-upstream-sentinel")
+        );
+        if text == "/compact" {
+            assert_eq!(
+                batch.last().unwrap()["params"]["update"]["stopReason"],
+                "error"
+            );
+            let updates: Vec<_> = batch
+                .iter()
+                .filter(|message| {
+                    message["params"]["update"]["sessionUpdate"] == "compaction_update"
+                })
+                .collect();
+            assert_eq!(updates.len(), 2);
+            assert_eq!(updates[1]["params"]["update"]["status"], "failed");
+            assert!(updates[1]["params"]["update"]["summary"].is_null());
+        }
+    }
+    let replay = agent.resume(&session, root.path(), true);
+    let failed: Vec<_> = replay
+        .iter()
+        .filter(|message| message["params"]["update"]["sessionUpdate"] == "compaction_update")
+        .collect();
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0]["params"]["update"]["status"], "failed");
+    assert!(failed[0]["params"]["update"]["summary"].is_null());
+    agent.send(&json!({"jsonrpc":"2.0","id":10,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"text","text":"after"}]}}));
+    assert_eq!(
+        agent.until_idle().last().unwrap()["params"]["update"]["stopReason"],
+        "end_turn"
+    );
+    server.request();
+    server.request();
+    server.request();
+    let after = server.request().body.to_string();
+    assert!(after.contains("old answer") && after.contains("latest answer"));
+    assert!(!after.contains("/compact"));
+    let (status, stderr) = agent.finish();
+    assert!(status.success(), "{stderr}");
+}
+
+#[rstest::rstest]
+#[case(false)]
+#[case(true)]
+#[test]
+fn cancelling_or_closing_compaction_terminalizes_it_before_idle_and_preserves_context(
+    #[case] close: bool,
+) {
+    let root = tempfile::tempdir().unwrap();
+    let (pending, release) = support::Response::json(support::chat_text("late summary")).gated();
+    let server = support::Server::start(vec![
+        support::Response::json(support::chat_text(&"old answer ".repeat(200))),
+        support::Response::json(support::chat_text("latest answer")),
+        pending,
+        support::Response::json(support::chat_text("after cancellation")),
+    ]);
+    let mut agent = Agent::configured(&format!(
+        "model='test/test'\n[accounts.test]\nprovider='custom'\nmodels=['test']\n[accounts.test.protocols.openai-chat]\nbase_url='{}'",
+        server.url
+    ));
+    agent.initialize(1);
+    agent
+        .send(&json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":root.path()}}));
+    let session = agent.recv()["result"]["sessionId"].clone();
+    for (index, text) in ["old", "latest"].into_iter().enumerate() {
+        agent.send(&json!({"jsonrpc":"2.0","id":index+3,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"text","text":text}]}}));
+        agent.until_idle();
+        server.request();
+    }
+    agent.send(&json!({"jsonrpc":"2.0","id":5,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"text","text":"/compact"}]}}));
+    loop {
+        let message = agent.recv();
+        if message["params"]["update"]["sessionUpdate"] == "compaction_update" {
+            assert_eq!(message["params"]["update"]["status"], "in_progress");
+            break;
+        }
+    }
+    server.request();
+    if close {
+        agent.send(&json!({"jsonrpc":"2.0","id":6,"method":"session/close","params":{"sessionId":session}}));
+    } else {
+        agent.send(
+            &json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":session}}),
+        );
+    }
+    let terminal = agent.until_idle();
+    assert_eq!(
+        terminal.last().unwrap()["params"]["update"]["stopReason"],
+        "cancelled"
+    );
+    assert!(
+        terminal
+            .iter()
+            .any(|m| m["params"]["update"]["status"] == "cancelled")
+    );
+    assert!(
+        !serde_json::to_string(&terminal)
+            .unwrap()
+            .contains("late summary")
+    );
+    if close {
+        assert_eq!(agent.recv()["id"], 6);
+        let replay = agent.resume(&session, root.path(), true);
+        assert!(
+            replay
+                .iter()
+                .any(|m| m["params"]["update"]["status"] == "cancelled")
+        );
+    }
+    release.send(()).unwrap();
+    agent.send(&json!({"jsonrpc":"2.0","id":7,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"text","text":"after"}]}}));
+    assert_eq!(
+        agent.until_idle().last().unwrap()["params"]["update"]["stopReason"],
+        "end_turn"
+    );
+    let after = server.request().body.to_string();
+    assert!(after.contains("old answer") && after.contains("latest answer"));
+    assert!(!after.contains("late summary") && !after.contains("/compact"));
+    let (status, stderr) = agent.finish();
+    assert!(status.success(), "{stderr}");
+}
+
+#[test]
 fn an_initialize_over_stdio_is_answered_with_the_bee_identity() {
     let mut agent = Agent::spawn();
 
