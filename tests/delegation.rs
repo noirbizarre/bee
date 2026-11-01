@@ -1,39 +1,17 @@
 //! Production parent/model/independent-child cycles and bounded ownership.
 
+#[path = "support/acp_fixture.rs"]
+mod acp_fixture;
 mod support;
 
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agent_client_protocol::{Agent, Client, Error, Responder, V2ConnectionTo, schema::v2};
 use bee::config::{Config, Environment};
 use serde_json::{Value, json};
 use support::{Response, Server};
-
-fn fixture() -> &'static Path {
-    static FIXTURE: OnceLock<PathBuf> = OnceLock::new();
-    FIXTURE.get_or_init(|| {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let target = root.join("target/acp-client-fixture");
-        let output = std::process::Command::new(env!("CARGO"))
-            .args(["build", "--offline", "--locked", "--manifest-path"])
-            .arg(root.join("tests/fixtures/acp-agent/Cargo.toml"))
-            .arg("--target-dir")
-            .arg(&target)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        target.join("debug").join(format!(
-            "bee-acp-client-fixture{}",
-            std::env::consts::EXE_SUFFIX
-        ))
-    })
-}
 
 fn config(root: &Path, text: &str) -> (Config, Environment) {
     let path = root.join("settings.toml");
@@ -46,7 +24,7 @@ fn agent(name: &str, mode: &str, root: &Path) -> String {
     let quote = |p: &Path| serde_json::to_string(&p.display().to_string()).unwrap();
     format!(
         "[agents.{name}]\ncommand={}\nargs=['{mode}']\n[agents.{name}.env]\nFIXTURE_PID={}\nFIXTURE_PROMPT={}\nFIXTURE_CLOSED={}\nFIXTURE_DEPTH={}\nFIXTURE_RELEASE={}\nBEE_DELEGATION_REMAINING_DEPTH='64'\n",
-        quote(fixture()),
+        quote(&acp_fixture::executable(root)),
         quote(&root.join(format!("{name}.pid"))),
         quote(&root.join(format!("{name}.prompt"))),
         quote(&root.join(format!("{name}.closed"))),
@@ -364,15 +342,24 @@ async fn disabled_depth_and_child_failures_are_bounded_and_actionable(
     let result = tool_result("openai-chat", &http.request().body);
     assert!(!result.to_string().contains("SECRET_"));
     if mode == "partial-hang" || mode == "ignore-close" {
-        assert_eq!(result["results"][0]["status"], "timed_out");
+        assert_eq!(
+            result["results"][0]["status"], "timed_out",
+            "unexpected child result: {result}"
+        );
         assert_eq!(
             result["results"][0]["messages"][0]["content"][0]["text"],
             "replacement"
         );
     } else if mode == "refusal" {
-        assert_eq!(result["results"][0]["status"], "refused");
+        assert_eq!(
+            result["results"][0]["status"], "refused",
+            "unexpected child result: {result}"
+        );
     } else {
-        assert_eq!(result["results"][0]["status"], "failed");
+        assert_eq!(
+            result["results"][0]["status"], "failed",
+            "unexpected child result: {result}"
+        );
     }
     if mode == "partial-eof" {
         assert_eq!(
