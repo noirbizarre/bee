@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0](https://github.com/noirbizarre/bee/compare/0.2.0..0.3.0) - 2026-11-01
+
+### 💫 Features
+
+- **acp** Support multimodal prompt content ([#132](https://github.com/noirbizarre/bee/issues/132)) - ([f4e4be0](https://github.com/noirbizarre/bee/commit/f4e4be0ec22a519eea822a1593e832c2caea7920))
+- **acp** Add bounded task delegation ([#130](https://github.com/noirbizarre/bee/issues/130)) - ([cc4127d](https://github.com/noirbizarre/bee/commit/cc4127def66a8d3e8e2912d338b4bf710e71df63))
+- **acp** Add outbound client for configured agents ([#121](https://github.com/noirbizarre/bee/issues/121)) - ([ae96cb9](https://github.com/noirbizarre/bee/commit/ae96cb9f9929a6c3c13e220cfd8e72ca2f40faa2))
+- **context** Add explicit compaction with ACP summary updates ([#133](https://github.com/noirbizarre/bee/issues/133)) - ([595eeac](https://github.com/noirbizarre/bee/commit/595eeac20c9855256e15640758df93689bf2c54c))
+- **mcp** Support project-local server configuration ([#123](https://github.com/noirbizarre/bee/issues/123)) - ([e8b2f4d](https://github.com/noirbizarre/bee/commit/e8b2f4db83bfd5695cc750e7d364420103da7a58))
+
+### 🧪 Tests
+
+- **macos** Avoid ACP fixture executable races on macOS ([#131](https://github.com/noirbizarre/bee/issues/131)) - ([72827c4](https://github.com/noirbizarre/bee/commit/72827c4e08a249d30f3af061678041d5a1831599))
+
+### 🏗️ Build
+
+- **deps** Update mise.lock and dependencies ([#124](https://github.com/noirbizarre/bee/issues/124)) - ([b212049](https://github.com/noirbizarre/bee/commit/b2120494fce81cf9c2c4e51c44a8ad8b8276e2f7))
+
 ## [0.2.0](https://github.com/noirbizarre/bee/compare/0.1.1..0.2.0) - 2026-10-29
 
 ### 💫 Features
