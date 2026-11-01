@@ -35,8 +35,9 @@ selected endpoint. Turns can be cancelled or closed, and another prompt is refus
 durably retained, with oldest-whole-turn truncation for explicit or opted-in catalog context windows; provider
 context overflow fails explicitly. Sessions survive process restart, and start resume restores the visible transcript
 through normal ACP updates. See [session history](docs/sessions.md) for storage, retention and client restoration.
-Prompts accept text and resource links (references
-only, never fetched). The SDK-free loop supports injected function executors; production ACP executes native
+Prompts accept text, supplied embedded context and [declared image/audio/PDF inputs](docs/inference.md#images-audio-and-embedded-resources).
+Resource links remain references, never fetched. The SDK-free loop supports injected function executors;
+production ACP executes native
 `bash`, `read`, `glob`, `grep`, `list`, `write`, `edit`, `delete`, `move`, and `copy` tools in each session's working directory.
 Standard ACP tool cards, committed file/directory diffs, and agent-owned Bash terminal output are retained for replay.
 It also discovers and invokes client-hosted MCP tools through ACPv2's `session.mcp.acp` transport, alongside native

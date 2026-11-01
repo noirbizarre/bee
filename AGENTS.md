@@ -32,9 +32,12 @@ task/context is prompted; bounded ordered results preserve useful partials witho
 
 Bee serves ACPv2 over stdio and implements the baseline session lifecycle
 (new, list, resume, close, prompt, cancel) with streaming Chat Completions, Responses
-and Anthropic Messages inference. Production sessions and successful context are durable, with explicit model-aware
-context windows, approximate token accounting and transactional oldest-whole-turn truncation; failed/cancelled/refused
-turns are excluded from model context. Separate visible history retains unsuccessful partials; start resume replays
+and Anthropic Messages inference. Ordered image/audio/PDF prompt inputs are gated by effective input modalities and
+implemented native routes, with inline durable context and original ACP content replay (ADR-034). Supplied embedded text
+is model context; resource URIs are never fetched. Production sessions and successful context are durable, with explicit
+model-aware context windows, approximate token accounting and transactional oldest-whole-turn truncation;
+failed/cancelled/refused turns are excluded from model context. Separate visible history retains unsuccessful partials;
+start resume replays
 full message upserts before current state. Private per-session JSONL journals and exclusive OS locks preserve identity
 across restarts without replaying execution. Embedded runtimes default to isolated memory storage. The SDK-free bounded
 loop supports configurable turn limits and injected tool executors; production ACP

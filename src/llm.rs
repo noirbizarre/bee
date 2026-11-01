@@ -2,6 +2,8 @@
 
 pub mod anthropic;
 mod cache;
+pub mod content;
+pub use content::UserPart;
 pub mod chat;
 pub mod responses;
 mod usage;
@@ -19,6 +21,10 @@ use crate::provider::Protocol;
 /// A normalized, safe-to-display inference failure. Never stores wire values.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, miette::Diagnostic)]
 pub enum Error {
+    /// Safe input guidance without attachment contents.
+    #[error("invalid prompt content: {0}")]
+    #[diagnostic(code(bee::llm::content))]
+    Content(&'static str),
     /// Conversation identity must come from operating-system entropy.
     #[error("cannot generate a conversation identity; check operating-system randomness and retry")]
     #[diagnostic(code(bee::llm::randomness))]
@@ -173,6 +179,8 @@ pub struct Native {
 pub enum Message {
     /// User text, including explicitly described resource links.
     User(String),
+    /// Ordered portable multimodal input, still a single turn boundary.
+    UserParts(Vec<UserPart>),
     /// A complete model step.
     Assistant {
         /// Text also used for portable history.
@@ -198,10 +206,17 @@ pub enum Message {
 impl fmt::Debug for Message {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::User(_) => "User([redacted])",
+            Self::User(_) | Self::UserParts(_) => "User([redacted])",
             Self::Assistant { .. } => "Assistant([redacted])",
             Self::Tool { .. } => "Tool([redacted])",
         })
+    }
+}
+
+impl Message {
+    /// Both text and multipart input begin one indivisible user turn.
+    pub fn is_user(&self) -> bool {
+        matches!(self, Self::User(_) | Self::UserParts(_))
     }
 }
 
@@ -284,6 +299,7 @@ pub struct Model {
     conversation_id: String,
     runtime: Option<std::sync::Arc<dyn crate::provider::runtime::Prepared>>,
     copilot_agent: bool,
+    copilot_vision: bool,
     instructions: String,
     cache_scope: String,
     profile: Profile,
@@ -316,6 +332,7 @@ impl Model {
             conversation_id: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(identity),
             runtime: None,
             copilot_agent: false,
+            copilot_vision: false,
             instructions: String::new(),
             cache_scope: "default".into(),
             http: crate::http::InferenceHttp::new()?,
@@ -373,7 +390,13 @@ impl Model {
                 .credential(&self.profile, self.credential.as_ref())
                 .await?;
             // Classify semantic tool continuations before a wire adapter changes their role.
-            prepared.copilot_agent = !matches!(messages.last(), Some(Message::User(_)));
+            prepared.copilot_agent = !messages.last().is_some_and(Message::is_user);
+            prepared.copilot_vision = messages.iter().any(|message| match message {
+                Message::UserParts(parts) => {
+                    parts.iter().any(|part| part.modality() == Some("image"))
+                }
+                _ => false,
+            });
             &prepared
         } else {
             if let Some(error) = self.profile.missing_runtime() {
@@ -468,6 +491,7 @@ impl Model {
         messages: &[Message],
         tools: &[Tool],
     ) -> Result<crate::context::Report, Error> {
+        content::validate(self, messages)?;
         let body = match self.endpoint().protocol() {
             Protocol::OpenAiChat => chat::request(self, messages, tools)?,
             Protocol::OpenAiResponses => responses::request(self, messages, tools)?,
@@ -516,6 +540,13 @@ impl Model {
         }
         if let Some(runtime) = &self.runtime {
             runtime.headers(&mut headers, self.copilot_agent)?;
+            // The reserved vision signal covers historical images too, including tool continuations.
+            if self.profile.is_copilot() && self.copilot_vision {
+                headers.insert(
+                    "copilot-vision-request",
+                    reqwest::header::HeaderValue::from_static("true"),
+                );
+            }
         }
         Ok(headers)
     }

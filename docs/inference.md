@@ -1,6 +1,6 @@
 # Inference and smoke tests
 
-Bee implements text and function-calling Chat Completions, Responses and Anthropic Messages.
+Bee implements text, supported inline media inputs and function-calling Chat Completions, Responses and Anthropic Messages.
 An account's exact `model_protocols` mapping wins, followed by Copilot native endpoint declarations when available,
 explicitly enabled catalog hints, then its preferred
 protocol; failures never trigger
@@ -31,12 +31,12 @@ identical raw model ID. See [model availability](models.md#account-model-availab
 - Configured base paths are preserved. Chat appends `/chat/completions` to its base URL.
 - Responses appends `/responses` and uses `max_output_tokens`. It uses stateless, client-managed continuation
   (`store = false`) with native output items and encrypted reasoning state. Function outputs correlate by call ID,
-  not output-item ID. Built-in server tools and non-text message content are unsupported. Streams require item completion
+  not output-item ID. Built-in server tools and generated non-text content are unsupported. Streams require item completion
   followed by a completed/incomplete response; usage and final objects never duplicate streamed text.
 - Anthropic appends `/v1/messages`, normally presents credentials with `x-api-key`, and sends `anthropic-version` from
   `options.version` or the default `2023-06-01`. Its `max_tokens` comes from `options.max_tokens` if present, else the
   common `max_output_tokens`. Native text/tool-use blocks and grouped user tool-result blocks retain their order and
-  error flags. Displayable thinking is supported as described below; multimodal blocks, server tools and pause-turn
+  error flags. Displayable thinking is supported as described below; generated media, server tools and pause-turn
   continuation are explicitly unsupported.
 - Text, streamed function calls, optional usage, and ordinary JSON answers are supported. Chat requests streamed usage
   with `stream_options.include_usage`; compatible servers may omit the counters. Chat supports one choice,
@@ -401,7 +401,7 @@ These turn budgets are separate from per-request timeouts, token limits and resp
 
 Successful conversation context is durably retained across close/resume and production process restarts. Cancelled,
 failed and refused turns may already have visible text but are excluded from future context. Changing account/model
-preserves portable text and drops protocol-specific continuation. Explicit or opted-in catalog context windows bound
+preserves portable input and drops protocol-specific continuation. Explicit or opted-in catalog context windows bound
 history as described below. A separate visible transcript retains accepted user messages and assistant partials,
 even from unsuccessful turns, independently of context eviction. See [session history and replay](sessions.md).
 
@@ -438,9 +438,10 @@ Library callers can use `agent::run_with_limits` for explicit policy or `acp::Ru
 
 ## Conversation context and token budgets
 
-Each accepted ACP prompt projects to one model user message: text blocks and resource-link descriptions are joined in order
-with newlines. Links are represented as `[Resource link, contents not fetched: URI]`; Bee does not fetch their contents.
-Known but unadvertised image, audio and embedded-resource blocks are rejected before the turn starts. Schema-valid
+Each accepted ACP prompt projects to one model user message. Text-only blocks and resource-link descriptions join in order
+with newlines; mixed media preserves ordered native parts within that single message.
+Links are represented as `[Resource link, contents not fetched: URI]`; Bee does not fetch their contents.
+Known but unadvertised content is rejected before the turn starts. Schema-valid
 unknown/custom envelopes are accepted, echoed and retained opaquely in visible history, including durable replay,
 without sending their payloads to the model. Mixed prompts project only understood blocks; unknown-only prompts use
 the fixed marker `[Prompt contains content Bee does not understand; its contents were not sent to the model.]`.
@@ -448,6 +449,62 @@ See the [content compatibility contract](compatibility.md#content-blocks).
 Successful history includes assistant text, complete
 function calls, their correlated results and any protocol-native continuation. Output-limited answers are retained;
 failed, cancelled, refused and context-exhausted turns are not.
+
+### Images, audio and embedded resources
+
+Production ACP advertises `capabilities.session.prompt.embeddedContext` for supplied text resources, and `image`/`audio`
+when an active configured route implements that transport. These are connection-wide possibilities, not promises about
+every selectable model. Deterministic injected turn bodies do not advertise media support.
+
+The selected model must declare the matching `input_modalities`, resolved using
+[metadata precedence](models.md#associate-and-override-metadata). Unknown means text only; an explicit empty list grants
+no binary inputs. The declaration is intersected with Bee's implemented route support and frozen after authentication
+and availability checks. It cannot add models or override route restrictions.
+
+| Input | Chat Completions | Responses | Anthropic Messages |
+| --- | --- | --- | --- |
+| PNG, JPEG, GIF, WebP (`image`) | Inline `image_url` | Inline `input_image` | Base64 image source |
+| WAV, MP3 (`audio`) | `input_audio` | Unsupported | Unsupported |
+| PDF (`pdf`) | Inline `file` | Inline `input_file` | Base64 document source |
+| Embedded text resource | User text with resource identity | Same | Same |
+
+For example, declare an exact model's support using its raw ID:
+
+```toml
+[accounts.work]
+provider = "openai"
+discovery = false
+models = ["vision-model"]
+model_metadata = { "vision-model" = { input_modalities = ["text", "image", "pdf"] } }
+```
+
+ChatGPT-plan and Copilot routes permit images only; Copilot generates its reserved vision header whenever the outgoing
+history contains images, including during tool continuations. Cloudflare REST and Google Cloud Vertex media contracts
+are not enabled by the generic adapters. Mistral PDF input is unsupported until its native document mapping is implemented.
+Other compatible routes still require accurate model declarations and may
+reject unsupported endpoint/model combinations. No media-triggered protocol fallback occurs.
+
+An ACP image/audio block supplies standard padded base64 and a matching MIME type. Accepted image types are
+`image/png`, `image/jpeg`, `image/gif`, `image/webp`; audio types are `audio/wav`, `audio/x-wav`, `audio/mpeg`, `audio/mp3`.
+Embedded resources use their supplied `text`, or `blob` with one of those MIME types or `application/pdf`.
+PDF requires `pdf` permission explicitly; `image` alone does not authorize it. Binary MIME types are required.
+URIs are never read, fetched or used as local filenames. Unknown payloads, annotations and `_meta` do not become instructions.
+Bee validates base64 and the supported envelope, not the full media file format; providers validate the file contents.
+
+Limits are 32 binary parts, 8 MiB decoded per part, 16 MiB decoded total per user prompt, and 24 MiB serialized for
+a prompt containing media/resources, including text, opaque siblings and metadata. Anthropic images have an additional
+5 MiB encoded limit. Limits leave room within the independent 64 MiB journal-record cap; a combined successful-context
+record that exceeds that cap still fails transactionally. Media remains inline in private session journals.
+
+Format/size/capability failures and definitive configured model/route incompatibilities return `-32602` before insertion.
+Facts requiring authentication/discovery are checked after acceptance and fail through normal error/idle updates.
+Retained successful attachments must also be compatible with the selected model; changing to an incompatible model
+fails explicitly. Select a compatible model or start a new session. Visible replay does not require model media support.
+Text-only `Message::User(String)` remains available to library callers; ordered input uses `Message::UserParts` and
+`UserPart`, with the same model-boundary validation. Explicit conversation caching marks eligible trailing text parts;
+binary-only turns skip unsupported cache boundaries while retaining instruction caching.
+
+### Capacity and accounting
 
 Context capacity is explicit configuration by default, never inferred from a model name:
 
@@ -481,7 +538,9 @@ estimated input tokens + reserved output tokens <= effective context window
 Input is estimated from the UTF-8 byte lengths of compact JSON for the selected protocol's conversation and tool
 definitions: sum those lengths, divide by three rounding up, then add 256 tokens for framing. This includes tool
 schemas, descriptions, call IDs, arguments and results. Native items are counted instead of their portable replacement,
-not in addition to it. The estimate is approximate, especially for multilingual text, JSON and encrypted reasoning;
+not in addition to it. Inline base64 media is included in this byte-based estimate; it can substantially overestimate
+media token usage and reject larger attachments earlier than necessary. It is not a media-token upper bound.
+The estimate is approximate, especially for multilingual text, JSON and encrypted reasoning;
 it is not a tokenizer guarantee. Output reservation uses the actual request limit, including Anthropic's
 `options.max_tokens` override. Bee does not silently lower output limits to make a request fit.
 

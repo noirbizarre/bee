@@ -241,7 +241,7 @@ async fn initialize(
     let capabilities = serde_json::to_value(response.capabilities).unwrap();
     assert_eq!(
         capabilities,
-        json!({"session":{"mcp":{"acp":{},"stdio":{},"http":{}}}})
+        json!({"session":{"prompt":{"image":{},"audio":{},"embeddedContext":{}},"mcp":{"acp":{},"stdio":{},"http":{}}}})
     );
     Ok(())
 }

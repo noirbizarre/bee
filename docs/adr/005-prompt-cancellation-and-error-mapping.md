@@ -3,6 +3,7 @@
 ## Status
 
 Accepted. Supersedes parts of [ADR-004](004-session-and-prompt-lifecycle.md).
+The prompt-content restrictions are superseded by [ADR-034](034-multimodal-prompt-content.md).
 
 ## Context
 

@@ -203,13 +203,13 @@ All update names below are values of agent → client `session/update.sessionUpd
 | --- | --- | --- |
 | Incoming `text` | Implemented and supported | Multiple blocks flatten to newline-separated model input; original accepted blocks remain visible history. [Prompt handling][acp-code], [wire context tests][test-stdio]. |
 | Incoming `resource_link` | Partially supported | Accepted/echoed/retained; the model gets an explicit URI reference saying contents were not fetched. No resource retrieval claim. `a_prompt_with_a_resource_link_is_accepted` in [tests/cancel.rs][test-cancel]. |
-| Incoming `image` / `session.prompt.image` | Planned | Known unadvertised content is rejected before a turn starts. [#22](https://github.com/noirbizarre/bee/issues/22), [rejection tests][test-cancel]. |
-| Incoming `audio` / `session.prompt.audio` | Planned | Not advertised or passed to providers. [#22](https://github.com/noirbizarre/bee/issues/22), [content validation][acp-code]. |
-| Incoming embedded `resource` / `session.prompt.embeddedContext` | Planned | Text/blob embedded resources are not accepted as prompt context. [#22](https://github.com/noirbizarre/bee/issues/22), [content validation][acp-code]. |
+| Incoming `image` / `session.prompt.image` | Implemented and supported | Inline PNG/JPEG/GIF/WebP, gated by effective model modalities and implemented route support. [Format/limit contract](inference.md#images-audio-and-embedded-resources), native request tests in `tests/media.rs`, restart coverage in [wire tests][test-stdio]. |
+| Incoming `audio` / `session.prompt.audio` | Partially supported | WAV/MP3 input through Chat on compatible declared models; Responses and Messages remain unsupported. Connection advertisement reflects configured transport support, with selected-model validation. `audio_uses_chat_input_audio_without_enabling_audio_output` in `tests/media.rs`. |
+| Incoming embedded `resource` / `session.prompt.embeddedContext` | Implemented and supported | Supplied text and supported image/audio/PDF blobs; binary MIME and modality support required. No URI fetching. [Input contract](inference.md#images-audio-and-embedded-resources), `media_prompts_replay_after_restart_and_remain_native_model_context` in [wire tests][test-stdio]. |
 | Outgoing `text` | Implemented and supported | Live assistant chunks and full replay messages; streaming is observed before provider completion. [Subprocess tests][test-e2e], [session tests][test-session]. |
 | Outgoing `image`, `audio`, embedded `resource` | Planned | Non-text MCP results inside JSON tool envelopes are not native ACP multimodal output. [#81](https://github.com/noirbizarre/bee/issues/81). |
 | Outgoing `resource_link`, annotations and rich metadata | Partially supported | Original user links and their content-block metadata survive echo/replay; assistant live output is text, not rich links. Metadata does not imply model understanding. [History contract](sessions.md#transcript-versus-model-context), [prompt handling][acp-code]. |
-| Unknown/custom content | Implemented and supported | Opaque envelopes survive live echo, memory replay and durable restart replay as JSON values, without custom semantic support. Mixed prompts send only understood text/link projections to providers; unknown-only prompts use a fixed generic marker with no payload or discriminator. `opaque_prompt_blocks_survive_memory_echo_and_repeated_start_replay` in [session tests][test-session] and `opaque_prompts_replay_after_restart_without_entering_current_or_later_model_input` in [wire tests][test-stdio]. |
+| Unknown/custom content | Implemented and supported | Opaque envelopes survive live echo, memory replay and durable restart replay as JSON values, without custom semantic support. Mixed prompts send only understood input projections to providers; unknown-only prompts use a fixed generic marker with no payload or discriminator. `opaque_prompt_blocks_survive_memory_echo_and_repeated_start_replay` in [session tests][test-session] and `opaque_prompts_replay_after_restart_without_entering_current_or_later_model_input` in [wire tests][test-stdio]. |
 
 ### Messages and foreground state
 
@@ -334,7 +334,7 @@ the following v1 surfaces available. V2 support described above applies only to 
 | `terminal/create`, `terminal/output`, `terminal/wait_for_exit`, `terminal/kill`, `terminal/release`; client `terminal` | Not planned | No delegated terminal execution; removed from v2. Implemented v2 terminal updates are display-only. |
 | `session/request_permission`; `elicitation/create`, `elicitation/complete` | Not planned | No v1 interaction boundary. V2 command subjects and negotiated elicitation use the v2 schemas. |
 | `$/cancel_request`, JSON-RPC error/transport behavior on v1 | Not planned | Shared SDK machinery does not establish a tested Bee v1 endpoint. V2 request cancellation is assessed separately. |
-| `promptCapabilities`: image/audio/embeddedContext; text/resource links | Not planned | No v1 prompt ingestion. Planned #22 is for Bee's v2 prompt boundary. |
+| `promptCapabilities`: image/audio/embeddedContext; text/resource links | Not planned | No v1 prompt ingestion. Media input uses Bee's v2 `session.prompt` capabilities. |
 | `mcpCapabilities`: stdio/http/sse; experimental acp | Not planned | No v1 MCP attachment support; legacy SSE is absent from v2. V2 supports the documented direct stdio/Streamable HTTP subset. |
 | `user_message_chunk`, `agent_message_chunk`, `agent_thought_chunk` | Not planned | No v1 message/thought emission; v2 adds full message upserts and changed lifecycle semantics. |
 | `tool_call`, `tool_call_update`; content/diff/terminal references | Not planned | No v1 tool presentation. V2 uses upserts/chunks and different structured diff/terminal shapes. |
@@ -591,7 +591,7 @@ its implemented MCP transports and baseline lifecycle, without v1 `loadSession` 
 - **MCP interaction:** client-hosted MCP denials are ordinary tool errors; they are not
   ACP permission outcomes. MCP `input_required` and task continuations are rejected.
   Direct stdio/Streamable HTTP MCP uses separate connection/tool consent; OAuth and legacy SSE remain unsupported.
-- **Other optional surfaces:** image/audio/embedded prompt context, session deletion,
+- **Other optional surfaces:** session deletion,
   forks and additional directories are not advertised. Resource links are references
   only and are never fetched.
 

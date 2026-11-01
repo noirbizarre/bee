@@ -387,10 +387,7 @@ pub(crate) async fn run_observed(
     let mut model = model.clone();
     let mut usage = Usage::default();
     // ACP adds exactly one user message per turn; no user means nothing is evictable.
-    let mut active = messages
-        .iter()
-        .rposition(|message| matches!(message, Message::User(_)))
-        .unwrap_or(0);
+    let mut active = messages.iter().rposition(Message::is_user).unwrap_or(0);
     let mut removed_turns = 0;
     let mut input_steps = 0;
     let mut output_steps = 0;

@@ -35,6 +35,51 @@ fn tools() -> Vec<Tool> {
 }
 
 #[test]
+fn multipart_cache_boundaries_preserve_media_and_allow_media_only_turns() {
+    for protocol in [Protocol::OpenAiChat, Protocol::OpenAiResponses] {
+        let model = model(
+            protocol,
+            OPENAI,
+            "gpt-5.6",
+            "prompt_cache_options={enabled=true,mode='explicit',breakpoints='instructions-and-conversation'}",
+        );
+        let image = crate::llm::UserPart::media("image/png".into(), "aGk=".into()).unwrap();
+        for trailing_text in [false, true] {
+            let mut parts = vec![image.clone()];
+            if trailing_text {
+                parts.push(crate::llm::UserPart::Text("describe".into()));
+            }
+            let body = request(&model, &[Message::UserParts(parts)], &[]).unwrap();
+            let field = if protocol == Protocol::OpenAiChat {
+                "messages"
+            } else {
+                "input"
+            };
+            let user = body[field]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["role"] == "user")
+                .unwrap();
+            assert_eq!(
+                user["content"][0]["type"],
+                if protocol == Protocol::OpenAiChat {
+                    "image_url"
+                } else {
+                    "input_image"
+                }
+            );
+            assert!(user["content"][0].get("prompt_cache_breakpoint").is_none());
+            assert_eq!(
+                marked_texts(&body, protocol).contains(&"describe".into()),
+                trailing_text
+            );
+            assert!(marked_texts(&body, protocol).contains(&"Stable instructions".into()));
+        }
+    }
+}
+
+#[test]
 fn automatic_keys_survive_model_reconstruction_and_ignore_credentials_and_instructions() {
     for protocol in [Protocol::OpenAiChat, Protocol::OpenAiResponses] {
         let first = model(protocol, OPENAI, "gpt-4.1", "");

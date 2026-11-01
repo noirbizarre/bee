@@ -39,6 +39,7 @@ pub(super) fn request(model: &Model, messages: &[Message], tools: &[Tool]) -> Re
     for message in messages {
         match message {
             Message::User(text) => input.push(json!({"role":"user","content":text})),
+            Message::UserParts(parts) => input.push(json!({"role":"user","content":parts.iter().map(|part| part.wire(crate::provider::Protocol::OpenAiResponses)).collect::<Result<Vec<_>, _>>()?})),
             Message::Assistant {
                 text,
                 calls,
@@ -126,6 +127,7 @@ pub(super) fn request(model: &Model, messages: &[Message], tools: &[Tool]) -> Re
     }
     if boundaries.conversation() {
         let mut blocks = Vec::new();
+        let mut multipart = false;
         let mut items = body["input"]
             .as_array_mut()
             .expect("input array")
@@ -139,6 +141,19 @@ pub(super) fn request(model: &Model, messages: &[Message], tools: &[Tool]) -> Re
             } else {
                 continue;
             };
+            // Binary parts retain their native representation without speculative cache markers.
+            if item[field].is_array() {
+                multipart = true;
+                if let Some(last) = item[field]
+                    .as_array_mut()
+                    .and_then(|parts| parts.last_mut())
+                    && last["type"] == "input_text"
+                    && last["text"].as_str().is_some_and(|text| !text.is_empty())
+                {
+                    blocks.push(last);
+                }
+                continue;
+            }
             let text = item[field].as_str().ok_or(Error::Malformed)?;
             if text.is_empty() {
                 continue;
@@ -155,7 +170,9 @@ pub(super) fn request(model: &Model, messages: &[Message], tools: &[Tool]) -> Re
                 blocks.push(&mut item[field][0]);
             }
         }
-        super::cache::mark_conversation(blocks, &cache.options)?;
+        if !multipart || !blocks.is_empty() {
+            super::cache::mark_conversation(blocks, &cache.options)?;
+        }
     }
     Ok(body)
 }

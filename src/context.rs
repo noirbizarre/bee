@@ -75,7 +75,7 @@ pub(crate) fn fit(
             .iter()
             .enumerate()
             .skip(1)
-            .find_map(|(index, message)| matches!(message, Message::User(_)).then_some(index))
+            .find_map(|(index, message)| message.is_user().then_some(index))
             .ok_or(Error::Malformed)?;
         if end > *active {
             return Err(Error::ContextLimit);
@@ -89,7 +89,7 @@ pub(crate) fn fit(
 }
 
 fn validate_turn(messages: &[Message]) -> Result<(), Error> {
-    if !matches!(messages.first(), Some(Message::User(_))) {
+    if !messages.first().is_some_and(Message::is_user) {
         return Err(Error::Malformed);
     }
     let mut pending = HashSet::new();

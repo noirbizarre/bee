@@ -513,7 +513,7 @@ async fn incomplete_creations_are_not_published_to_the_session_listing() {
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(first["version"], 6);
+    assert_eq!(first["version"], 7);
     assert_eq!(first["seq"], 0);
     assert_eq!(first["event"]["id"], id);
 }
