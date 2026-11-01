@@ -365,6 +365,7 @@ dependencies = [
  "agent-client-protocol",
  "agent-client-protocol-rmcp",
  "assert_cmd",
+ "async-process",
  "base64 0.23.1",
  "clap",
  "fs2",

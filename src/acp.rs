@@ -24,6 +24,7 @@ use crate::session::{SessionError, Sessions, Settings};
 use crate::{Error, Result};
 
 pub mod client;
+mod delegation;
 mod interactions;
 mod mcp;
 mod plans;
@@ -152,9 +153,20 @@ pub struct Runtime {
     preferences: crate::selection::Store,
     project_mcp: Option<crate::config::Environment>,
     direct_mcp: Arc<crate::mcp::runtime::Manager>,
+    delegation: Arc<delegation::Manager>,
 }
 
 impl Runtime {
+    /// Enable explicitly configured delegates; constructing policy never launches them.
+    #[must_use]
+    pub fn with_delegation(
+        mut self,
+        agents: client::config::Agents,
+        settings: crate::delegation::Settings,
+    ) -> Self {
+        self.delegation = Arc::new(delegation::Manager::new(agents, settings));
+        self
+    }
     /// Enable project-local MCP discovery with explicit environment sources.
     #[must_use]
     pub fn with_project_mcp(mut self, environment: crate::config::Environment) -> Self {
@@ -191,6 +203,7 @@ impl Runtime {
             preferences: Default::default(),
             project_mcp: None,
             direct_mcp: Arc::default(),
+            delegation: Arc::default(),
         }
     }
 
@@ -297,6 +310,7 @@ pub struct Reply {
     mcp: Arc<Mutex<mcp::Bindings>>,
     servers: Vec<mcp::Server>,
     interactions: Arc<Mutex<interactions::State>>,
+    delegation: Arc<delegation::Manager>,
 }
 
 impl Reply {
@@ -640,10 +654,10 @@ async fn inference(reply: Reply, runtime: Arc<Runtime>) -> std::result::Result<(
     if runtime
         .tools
         .definitions()
-        .any(|tool| matches!(tool.name.as_str(), "ask_user" | "update_plan"))
+        .any(|tool| matches!(tool.name.as_str(), "ask_user" | "update_plan" | "delegate"))
     {
         return Err(TurnFailure::new(
-            "ask_user and update_plan are reserved ACP tools; rename the custom tool",
+            "ask_user, update_plan and delegate are reserved ACP tools; rename the custom tool",
         ));
     }
     let native = interactions::Native {
@@ -727,6 +741,7 @@ pub async fn serve_with_runtime(
     // `agent()` is `ConnectTo<Client>`, and the transport is the client's end,
     // so it is the transport that the agent connects to.
     let manager = runtime.direct_mcp.clone();
+    let delegates = runtime.delegation.clone();
     let result = agent_with_runtime(providers, runtime)
         .connect_to(transport)
         .await
@@ -735,6 +750,7 @@ pub async fn serve_with_runtime(
             reason: error.to_string(),
         });
     manager.shutdown().await;
+    delegates.shutdown().await;
     result
 }
 
@@ -837,6 +853,7 @@ pub fn agent_with_runtime(providers: Providers, runtime: Runtime) -> impl Connec
             history_settings,
             preferences: runtime.preferences.clone(),
             direct_mcp: runtime.direct_mcp.clone(),
+            delegation: runtime.delegation.clone(),
             project_mcp: runtime.project_mcp.clone(),
         },
         // Provider/tool futures can be large in instrumented debug builds. The
@@ -889,6 +906,7 @@ struct ConnectionState {
     history_settings: crate::history::Settings,
     preferences: crate::selection::Store,
     direct_mcp: Arc<crate::mcp::runtime::Manager>,
+    delegation: Arc<delegation::Manager>,
     project_mcp: Option<crate::config::Environment>,
 }
 
@@ -908,6 +926,7 @@ where
         history_settings,
         preferences,
         direct_mcp,
+        delegation,
         project_mcp,
     } = state;
     let body = Arc::new(body);
@@ -938,7 +957,8 @@ where
         .name("bee")
         .on_close({
             let manager = lock(&mcp).direct.clone();
-            async move |_connection| { manager.shutdown().await; Ok(()) }
+            let delegates = delegation.clone();
+            async move |_connection| { tokio::join!(manager.shutdown(), delegates.shutdown()); Ok(()) }
         })
         .on_receive_request(
             {
@@ -1444,6 +1464,7 @@ where
                 let interactions = Arc::clone(&interactions);
                 let gates = Arc::clone(&gates);
                 let preferences = preferences.clone();
+                let delegation = delegation.clone();
                 async move |request: v2::PromptRequest,
                             responder: Responder<v2::PromptResponse>,
                             connection: V2ConnectionTo<Client>| {
@@ -1492,6 +1513,7 @@ where
 
                     let (finished, completion) = oneshot::channel();
                     lock(&tasks).insert(id.clone(), async move { let _ = completion.await; }.boxed().shared());
+                    let delegation = delegation.clone();
                     let sessions = Arc::clone(&sessions);
                     let tasks = Arc::clone(&tasks);
                     let mcp = Arc::clone(&mcp);
@@ -1586,6 +1608,7 @@ where
                         mcp: Arc::clone(&mcp),
                         servers,
                         interactions: Arc::clone(&interactions),
+                        delegation,
                     };
                     // Continue off dispatch in the task that persisted prompt
                     // acceptance, so cancellation and close remain serviceable.
@@ -1812,6 +1835,7 @@ where
     let grouping_profile = lock(&sessions).profile_name().to_owned();
     let interactions = Arc::clone(&reply.interactions);
     let mcp_manager = lock(&reply.mcp).direct.clone();
+    let delegates = reply.delegation.clone();
     let history = lock(&sessions).history(&id);
 
     // `catch_unwind` so a panicking turn ends as a failed turn and not as a
@@ -1850,6 +1874,7 @@ where
     // Inference drop revokes callers; the external owner must finish transport
     // and process teardown before history finalization can publish terminal idle.
     mcp_manager.finish(&id, mcp_manager.is_closing(&id)).await;
+    delegates.finish(&id, token).await;
 
     // Finalization was claimed before transport/disk waits: a later cancel
     // cannot invalidate the successful context being made durable.
@@ -1947,7 +1972,7 @@ where
         ) {
             let _ = send_update(&connection, &session_id, update);
         }
-        lock(&interactions).waiting.remove(&id);
+        lock(&interactions).finish(&id, token);
         if let Some(plan) = lock(&plan).as_mut()
             && plan.cancel_unfinished()
         {

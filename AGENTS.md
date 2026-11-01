@@ -23,6 +23,12 @@ the pinned SDK client/process APIs, scoped ownership, bounded prompt results and
 Configuration loading never launches delegates. Outbound diagnostics exclude executable settings and child stderr.
 The client requires wire-v2 sessions, negotiates form/URL modes from installed handlers, and waits for both prompt
 acceptance and foreground idle. Normal shutdown closes sessions; future-drop cleanup uses SDK process guards.
+Opt-in `delegate` batches run independent child sessions with per-turn child counts, connection-wide concurrency,
+queue-inclusive deadlines and a default maximum depth of one. Runtime-owned `BEE_DELEGATION_REMAINING_DEPTH`
+overrides configured child env and clamps Bee authority after configuration. Connection-owned supervision drains
+children before parent idle/close; delegated SDK raw-process launches explicitly await reaping. Structured child
+permissions/forms/URLs retain parent-client policy, unique URL IDs and scoped aggregate waiting leases. Only explicit
+task/context is prompted; bounded ordered results preserve useful partials without forwarding child entity namespaces.
 
 Bee serves ACPv2 over stdio and implements the baseline session lifecycle
 (new, list, resume, close, prompt, cancel) with streaming Chat Completions, Responses

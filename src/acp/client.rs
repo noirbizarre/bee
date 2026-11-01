@@ -6,6 +6,7 @@
 
 pub mod config;
 mod interactions;
+mod process;
 
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
@@ -185,6 +186,7 @@ struct Inbox {
     active: bool,
     idle: Option<v2::IdleStateUpdate>,
     error: Option<Error>,
+    capture: Option<Capture>,
 }
 
 struct Shared {
@@ -224,10 +226,13 @@ impl Shared {
             v2::SessionUpdate::StateUpdate(v2::StateUpdate::Idle(idle)) if inbox.active => {
                 inbox.active = false;
                 inbox.idle = Some(idle.clone());
+                if let Some(capture) = &inbox.capture {
+                    lock(&capture.0).idle = Some(idle.clone());
+                }
             }
             _ => {}
         }
-        if inbox.collecting {
+        if inbox.collecting && inbox.error.is_none() {
             let bytes = serde_json::to_vec(&update).map_or(usize::MAX, |v| v.len());
             if inbox.queue.len() >= self.options.max_updates
                 || bytes > self.options.max_bytes.saturating_sub(inbox.bytes)
@@ -235,9 +240,23 @@ impl Shared {
                 inbox.error.get_or_insert(Error::Limit {
                     resource: "progress queue",
                 });
+                if let Some(capture) = &inbox.capture {
+                    lock(&capture.0).truncated = true;
+                }
             } else {
-                inbox.bytes += bytes;
-                inbox.queue.push_back((update, bytes));
+                // Capture at ingress: EOF can drop a callback before it drains admitted updates.
+                let reduced = inbox.capture.as_ref().map_or(Ok(()), |capture| {
+                    capture.reduce(&update.update, self.options.max_bytes)
+                });
+                match reduced {
+                    Ok(()) => {
+                        inbox.bytes += bytes;
+                        inbox.queue.push_back((update, bytes));
+                    }
+                    Err(error) => {
+                        inbox.error = Some(error);
+                    }
+                }
             }
         }
         // Control state stays independent of queue capacity so cancellation can still progress.
@@ -270,9 +289,32 @@ pub async fn connect_with<T: Send, F>(
 where
     F: for<'a> FnOnce(&'a mut Connection) -> BoxFuture<'a, Result<T>> + Send,
 {
+    connect_with_overlay(definition, handlers, options, cancellation, None, run).await
+}
+
+// Runtime authority overrides configured environment without mutating the host.
+pub(crate) async fn connect_with_overlay<T: Send, F>(
+    definition: &config::Definition,
+    handlers: HostHandlers,
+    options: ClientOptions,
+    cancellation: CancellationToken,
+    remaining_depth: Option<usize>,
+    run: F,
+) -> Result<T>
+where
+    F: for<'a> FnOnce(&'a mut Connection) -> BoxFuture<'a, Result<T>> + Send,
+{
+    let mut environment = definition.env.clone();
+    if let Some(depth) = remaining_depth {
+        environment.insert(crate::delegation::REMAINING_DEPTH.into(), depth.to_string());
+    }
     let process = AcpAgentConfig::new(&definition.command)
         .args(definition.args.clone())
-        .envs(definition.env.clone());
+        .envs(environment);
+    if remaining_depth.is_some() {
+        return process::connect(AcpAgent::new(process), handlers, options, cancellation, run)
+            .await;
+    }
     connect_transport(AcpAgent::new(process), handlers, options, cancellation, run).await
 }
 
@@ -505,9 +547,11 @@ impl Connection {
                 });
             }
         }
+        let capture = Capture::default();
         {
             let mut inbox = lock(&self.shared.inbox);
             inbox.collecting = true;
+            inbox.capture = Some(capture.clone());
             inbox.queue.clear();
             inbox.bytes = 0;
             inbox.idle = None;
@@ -525,8 +569,7 @@ impl Connection {
             client: self,
             cancellation,
             started: tokio::time::Instant::now(),
-            messages: HashMap::new(),
-            order: Vec::new(),
+            capture,
             done: false,
         })
     }
@@ -602,6 +645,91 @@ pub struct PromptResult {
     pub messages: Vec<v2::AgentMessage>,
 }
 
+/// Bounded prompt state retained independently of the callback's lifetime.
+#[derive(Clone, Default)]
+pub(crate) struct Capture(Arc<Mutex<Reduced>>);
+
+#[derive(Default)]
+struct Reduced {
+    messages: HashMap<v2::MessageId, v2::AgentMessage>,
+    order: Vec<v2::MessageId>,
+    idle: Option<v2::IdleStateUpdate>,
+    truncated: bool,
+}
+
+#[derive(Default)]
+pub(crate) struct Captured {
+    pub messages: Vec<v2::AgentMessage>,
+    pub idle: Option<v2::IdleStateUpdate>,
+    pub truncated: bool,
+}
+
+impl Capture {
+    pub(crate) fn take(&self) -> Captured {
+        let mut reduced = std::mem::take(&mut *lock(&self.0));
+        Captured {
+            messages: reduced
+                .order
+                .iter()
+                .filter_map(|id| reduced.messages.remove(id))
+                .collect(),
+            idle: reduced.idle,
+            truncated: reduced.truncated,
+        }
+    }
+
+    fn messages(&self) -> Vec<v2::AgentMessage> {
+        let reduced = lock(&self.0);
+        reduced
+            .order
+            .iter()
+            .filter_map(|id| reduced.messages.get(id).cloned())
+            .collect()
+    }
+
+    fn reduce(&self, update: &v2::SessionUpdate, max_bytes: usize) -> Result<()> {
+        let (id, snapshot, chunk) = match update {
+            v2::SessionUpdate::AgentMessage(message) => {
+                (message.message_id.clone(), Some(message), None)
+            }
+            v2::SessionUpdate::AgentMessageChunk(chunk) => {
+                (chunk.message_id.clone(), None, Some(&chunk.content))
+            }
+            _ => return Ok(()),
+        };
+        let mut reduced = lock(&self.0);
+        // Stage updates so overflow retains the last valid partial result.
+        let mut messages = reduced.messages.clone();
+        let message = messages
+            .entry(id.clone())
+            .or_insert_with(|| v2::AgentMessage::new(id.clone()));
+        if let Some(snapshot) = snapshot {
+            // Content replaces as a whole; metadata instead patches by top-level key.
+            if !matches!(snapshot.content, MaybeUndefined::Undefined) {
+                message.content = snapshot.content.clone();
+            }
+            v2::apply_meta_update(&mut message.meta, snapshot.meta.clone());
+        }
+        if let Some(chunk) = chunk {
+            match &mut message.content {
+                MaybeUndefined::Value(content) => content.push(chunk.clone()),
+                content => *content = MaybeUndefined::Value(vec![chunk.clone()]),
+            }
+        }
+        if serde_json::to_vec(&messages).map_or(usize::MAX, |v| v.len()) > max_bytes {
+            reduced.truncated = true;
+            return Err(Error::Limit {
+                resource: "result messages",
+            });
+        }
+        if !reduced.messages.contains_key(&id) {
+            reduced.order.push(id);
+        }
+        reduced.messages = messages;
+        Ok(())
+    }
+}
+
 /// Borrowed foreground operation. Dropping unfinished work cancels and prevents reuse.
 pub struct Prompt<'a> {
     client: &'a mut Connection,
@@ -611,12 +739,14 @@ pub struct Prompt<'a> {
     accepted: Option<v2::PromptResponse>,
     cancellation: CancellationToken,
     started: tokio::time::Instant,
-    messages: HashMap<v2::MessageId, v2::AgentMessage>,
-    order: Vec<v2::MessageId>,
+    capture: Capture,
     done: bool,
 }
 
 impl Prompt<'_> {
+    pub(crate) fn capture(&self) -> Capture {
+        self.capture.clone()
+    }
     /// Request session cancellation; the operation remains locally cancelled even if idle races.
     pub fn cancel(&self) {
         self.cancellation.cancel();
@@ -654,14 +784,12 @@ impl Prompt<'_> {
             if self.cancellation.is_cancelled() || self.client.cancellation.is_cancelled() {
                 return Err(Error::Cancelled);
             }
-            if shared.closed.is_cancelled() {
-                return Err(Error::Connection {
-                    stage: "prompt completion",
-                });
-            }
             let next = {
                 let mut inbox = lock(&shared.inbox);
-                if let Some(error) = &inbox.error {
+                // Preserve the admitted prefix on EOF/overflow before reporting failure.
+                if inbox.queue.is_empty()
+                    && let Some(error) = &inbox.error
+                {
                     return Err(error.clone());
                 }
                 let next = inbox.queue.pop_front();
@@ -671,8 +799,12 @@ impl Prompt<'_> {
                 next.map(|(update, _)| update)
             };
             if let Some(update) = next {
-                self.reduce(&update.update)?;
                 return Ok(Some(update));
+            }
+            if shared.closed.is_cancelled() {
+                return Err(Error::Connection {
+                    stage: "prompt completion",
+                });
             }
             if self.accepted.is_some() && lock(&shared.inbox).idle.is_some() {
                 return Ok(None);
@@ -703,45 +835,6 @@ impl Prompt<'_> {
         }
     }
 
-    fn reduce(&mut self, update: &v2::SessionUpdate) -> Result<()> {
-        let (id, snapshot, chunk) = match update {
-            v2::SessionUpdate::AgentMessage(message) => {
-                (message.message_id.clone(), Some(message), None)
-            }
-            v2::SessionUpdate::AgentMessageChunk(chunk) => {
-                (chunk.message_id.clone(), None, Some(&chunk.content))
-            }
-            _ => return Ok(()),
-        };
-        if !self.messages.contains_key(&id) {
-            self.order.push(id.clone());
-        }
-        let message = self
-            .messages
-            .entry(id.clone())
-            .or_insert_with(|| v2::AgentMessage::new(id));
-        if let Some(snapshot) = snapshot {
-            // Content replaces as a whole; metadata instead patches by top-level key.
-            if !matches!(snapshot.content, MaybeUndefined::Undefined) {
-                message.content = snapshot.content.clone();
-            }
-            v2::apply_meta_update(&mut message.meta, snapshot.meta.clone());
-        }
-        if let Some(chunk) = chunk {
-            match &mut message.content {
-                MaybeUndefined::Value(content) => content.push(chunk.clone()),
-                content => *content = MaybeUndefined::Value(vec![chunk.clone()]),
-            }
-        }
-        let bytes = serde_json::to_vec(&self.messages).map_or(usize::MAX, |v| v.len());
-        if bytes > self.client.shared.options.max_bytes {
-            return Err(Error::Limit {
-                resource: "result messages",
-            });
-        }
-        Ok(())
-    }
-
     /// Drain progress and return the bounded structured result after terminal idle.
     ///
     /// # Errors
@@ -762,11 +855,7 @@ impl Prompt<'_> {
                 .take()
                 .expect("completion requires acceptance"),
             idle,
-            messages: self
-                .order
-                .iter()
-                .filter_map(|id| self.messages.remove(id))
-                .collect(),
+            messages: self.capture.messages(),
         })
     }
 }

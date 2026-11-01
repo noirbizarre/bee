@@ -205,6 +205,14 @@ impl Environment {
         self
     }
 
+    /// Presence-aware lookup for inherited authority; malformed values must not become absent.
+    pub(crate) fn raw_variable(&self, name: &str) -> Option<std::ffi::OsString> {
+        match &self.variables {
+            Variables::Process => std::env::var_os(name),
+            Variables::Fixed(map) => map.get(name).map(std::ffi::OsString::from),
+        }
+    }
+
     /// The value of the variable `name`, if set and not empty.
     ///
     /// An empty variable counts as unset: `export KEY=` is what a shell

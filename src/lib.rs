@@ -17,6 +17,7 @@ pub mod agent;
 pub mod auth;
 pub mod config;
 pub mod context;
+pub mod delegation;
 pub mod error;
 pub mod history;
 pub mod http;
@@ -59,6 +60,7 @@ mod test_support;
 /// profile is invalid, [`Error::AgentSetting`] if turn limits are invalid,
 /// [`Error::BashSetting`] if Bash policy is invalid,
 /// [`Error::AcpClient`] if a named delegate definition is invalid,
+/// [`Error::DelegationSetting`] if delegation policy or inherited authority is invalid,
 /// [`Error::History`] if private durable session storage is unavailable,
 /// [`Error::Tool`] if the shipped catalog cannot register, [`Error::Io`] if the working
 /// directory cannot be determined, and [`Error::Connection`] if the connection
@@ -75,7 +77,8 @@ pub fn run() -> Result<()> {
     let environment = config::Environment::from_process();
     let config = config::Config::load(&environment, &project_dir)?;
     // Validate unused delegates too, without granting configuration a launch side effect.
-    let _agents = acp::client::config::Agents::from_config(&config)?;
+    let agents = acp::client::config::Agents::from_config(&config)?;
+    let delegation = delegation::Settings::from_config(&config)?.with_environment(&environment)?;
     // Validated here for the same reason: a typo in a base URL must stop the
     // launch, not surface as a connection error on the first prompt (ADR-007).
     let providers = account::Accounts::from_config(&config)?;
@@ -87,6 +90,7 @@ pub fn run() -> Result<()> {
     let history = history::Store::from_environment(&environment)?;
     let preferences = selection::Store::open(&history)?;
     let runtime_options = acp::Runtime::new(agent::Limits::from_config(&config)?, tools)
+        .with_delegation(agents, delegation)
         .with_project_mcp(environment.clone())
         .with_permissions(permissions::Settings::from_config(&config, &environment)?)
         .with_history(history)

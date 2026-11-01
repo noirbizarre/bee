@@ -106,6 +106,16 @@ fn main() {
                 }
             }
             Some("session/prompt") => {
+                if let Some(path) = std::env::var_os("FIXTURE_REQUIRE_CLOSED") {
+                    let observed = std::path::Path::new(&path).exists();
+                    std::fs::write(std::env::var_os("FIXTURE_ORDER").unwrap(), observed.to_string()).unwrap();
+                }
+                if let Some(path) = std::env::var_os("FIXTURE_PROMPT") {
+                    std::fs::write(path, request["params"].to_string()).unwrap();
+                }
+                if let Some(path) = std::env::var_os("FIXTURE_DEPTH") {
+                    std::fs::write(path, std::env::var("BEE_DELEGATION_REMAINING_DEPTH").unwrap_or_default()).unwrap();
+                }
                 state("idle");
                 if mode == "eof" {
                     return;
@@ -142,6 +152,33 @@ fn main() {
                     continue;
                 }
                 state("running");
+                if mode == "barrier" {
+                    reply(id, json!({"messageId":"u"}));
+                    let release = std::env::var_os("FIXTURE_RELEASE").unwrap();
+                    std::thread::spawn(move || {
+                        while !std::path::Path::new(&release).exists() {
+                            std::thread::sleep(std::time::Duration::from_millis(5));
+                        }
+                        output();
+                        update(json!({"sessionUpdate":"state_update","state":"idle","stopReason":"end_turn"}));
+                    });
+                    continue;
+                }
+                if mode == "partial-hang" || mode == "partial-eof" || mode == "remote-error" || mode == "refusal" || mode == "large" {
+                    reply(id, json!({"messageId":"u"}));
+                    output();
+                    match mode.as_str() {
+                        "partial-eof" => return,
+                        "remote-error" => update(json!({"sessionUpdate":"state_update","state":"idle","stopReason":"error","error":{"code":-32603,"message":"SECRET_CHILD_FAILURE"}})),
+                        "refusal" => update(json!({"sessionUpdate":"state_update","state":"idle","stopReason":"refusal"})),
+                        "large" => {
+                            update(json!({"sessionUpdate":"agent_message","messageId":"m","content":[{"type":"text","text":"\"\\\n".repeat(100_000)}]}));
+                            state("idle");
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
                 if mode == "projection" {
                     reply(id, json!({"messageId":"u"}));
                     output();

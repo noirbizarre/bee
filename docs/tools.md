@@ -51,6 +51,16 @@ ordinary Bash-result contract. Cleanup without an observed exit uses an unknown-
 exit object, never a fabricated exit code or signal. Terminal cleanup and pending updates
 precede idle and direct-close responses. See [retention and replay](sessions.md#tool-and-terminal-retention).
 
+## Task delegation
+
+Opt-in [`delegate`](delegation.md) runs a bounded batch of focused tasks through
+configured ACPv2 agents and returns ordered structured results for synthesis.
+It defaults disabled, with per-turn child counts, connection-wide concurrency,
+queue-inclusive deadlines and a default maximum depth of 1. Launch permission
+defaults to ask; child permission/form/URL requests remain client-owned.
+The tool name is reserved. Children have independent sessions and supervised
+cleanup before parent idle; their entity IDs are not forwarded into parent history.
+
 ## Execution plans
 
 Every ACP runtime also offers the turn-owned `update_plan` operation. Models use
