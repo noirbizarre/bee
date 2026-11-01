@@ -15,6 +15,7 @@ pub mod account;
 pub mod acp;
 pub mod agent;
 pub mod auth;
+mod compaction;
 pub mod config;
 pub mod context;
 pub mod delegation;

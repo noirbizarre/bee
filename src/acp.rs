@@ -24,6 +24,7 @@ use crate::session::{SessionError, Sessions, Settings};
 use crate::{Error, Result};
 
 pub mod client;
+mod compaction;
 mod delegation;
 mod interactions;
 mod mcp;
@@ -292,6 +293,10 @@ impl TurnFailure {
 #[doc(hidden)]
 #[derive(Clone)]
 pub struct Reply {
+    safe_tools: Arc<Mutex<crate::compaction::ToolText>>,
+    compact: bool,
+    compacted: Arc<Mutex<Option<compaction::Completed>>>,
+    compaction_started: Arc<Mutex<bool>>,
     sessions: Arc<Mutex<Sessions>>,
     connection: V2ConnectionTo<Client>,
     id: String,
@@ -406,6 +411,38 @@ impl Reply {
 
 /// Credentials are resolved at request time, not while loading configuration.
 async fn inference(reply: Reply, runtime: Arc<Runtime>) -> std::result::Result<(), TurnFailure> {
+    if reply.compact
+        && match &reply.input {
+            Some(input) => crate::compaction::candidate(
+                &input.messages,
+                input.summary.as_ref(),
+                &input.safe_tools,
+            )
+            .map_err(TurnFailure::new)?
+            .is_none(),
+            // A no-op needs no model authority; never start authentication just to report empty context.
+            None => lock(&reply.sessions)
+                .snapshot(&reply.id)
+                .is_some_and(|snapshot| {
+                    snapshot
+                        .messages
+                        .iter()
+                        .filter(|message| message.is_user())
+                        .count()
+                        < 2
+                }),
+        }
+    {
+        let _ = send_update(
+            &reply.connection,
+            &reply.session_id,
+            v2::SessionUpdate::Notice(v2::Notice::new(
+                v2::NoticeSeverity::Info,
+                "Nothing to compact; the latest completed turn is retained",
+            )),
+        );
+        return Ok(());
+    }
     let profile = reply
         .input
         .as_ref()
@@ -512,6 +549,8 @@ async fn inference(reply: Reply, runtime: Arc<Runtime>) -> std::result::Result<(
         cwd,
         instructions,
         protocol,
+        summary,
+        safe_tools: _,
     } = reply.input.clone().ok_or_else(|| {
         TurnFailure::new("choose an available account-qualified model over ACP before prompting")
     })?;
@@ -621,6 +660,19 @@ async fn inference(reply: Reply, runtime: Arc<Runtime>) -> std::result::Result<(
     if let Some(http) = &runtime.inference_http {
         model = model.with_test_http(http.clone());
     }
+    if reply.compact {
+        return compaction::generate(&reply, &model, &messages)
+            .await
+            .inspect_err(|_| {
+                if *lock(&reply.selection_failure)
+                    == Some(crate::selection::Reason::CredentialsUnavailable)
+                    && let Some(discovery) = &runtime.discovery
+                {
+                    discovery.invalidate_account(&observed_profile, observed_credential.as_ref());
+                }
+            });
+    }
+    model = model.with_summary(summary);
     let guidance = if let Some(sources) = &runtime.instructions {
         Some(
             sources
@@ -1111,7 +1163,7 @@ where
                                 profile: lock(&sessions).profile_name().to_owned(),
                                 cwd: request.cwd.into_inner(), turns: 0, provider, model,
                                 selection_state,
-                                protocol: None, messages: Vec::new(), instructions: Default::default(),
+                                protocol: None, messages: Vec::new(), instructions: Default::default(), summary: None, safe_tools: Default::default(),
                             };
                             let (id, handle) = match store.create(snapshot.clone()).await {
                                 Ok(created) => created,
@@ -1130,7 +1182,7 @@ where
                             let options = config_options(lock(&sessions).settings(&id).ok().flatten());
                             selection_notice(&sessions, &updates, &id);
                             drop(_gate);
-                            responder.respond(v2::NewSessionResponse::new(id).config_options(options))
+                             responder.respond(v2::NewSessionResponse::new(id).config_options(options).available_commands(compaction::commands()))
                         });
                     }
                     // One guard, so the options describe the session just made.
@@ -1139,7 +1191,7 @@ where
                     lock(&mcp).sessions.insert(id.clone(), servers);
                     let options = config_options(sessions.settings(&id).ok().flatten());
                     if let Some(reason) = sessions.selection_notice(&id) { send_selection_notice(&connection, &id, reason); }
-                    responder.respond(v2::NewSessionResponse::new(id).config_options(options))
+                    responder.respond(v2::NewSessionResponse::new(id).config_options(options).available_commands(compaction::commands()))
                 }
             },
             agent_client_protocol::on_receive_request!(),
@@ -1303,7 +1355,7 @@ where
                                 // awaiting continuation may not be scheduled yet.
                                 drop(_gate);
                                 let _ = send_update(&updates, &request.session_id, state);
-                                let _ = responder.respond(v2::ResumeSessionResponse::new().config_options(options));
+                                let _ = responder.respond(v2::ResumeSessionResponse::new().config_options(options).available_commands(compaction::commands()));
                             }).await;
                             Ok(())
                         });
@@ -1376,7 +1428,7 @@ where
                     // The protocol requires a current-state snapshot before the
                     // response: the response alone does not imply idle.
                     drop(gate);
-                    responder.respond(v2::ResumeSessionResponse::new().config_options(options))
+                    responder.respond(v2::ResumeSessionResponse::new().config_options(options).available_commands(compaction::commands()))
                     })
                 }
             },
@@ -1494,6 +1546,10 @@ where
                     // Before anything is inserted: a prompt that carries content
                     // Bee recognizes but did not advertise support for is a bad
                     // request. Opaque future content is retained, not interpreted.
+                    let compact = match compaction::recognize(&request.prompt) {
+                        Ok(compact) => compact,
+                        Err(reason) => return responder.respond_with_error(invalid_params(reason)),
+                    };
                     let normalized = match prompt_message(&request.prompt, prompt_support) {
                         Ok(message) => message,
                         Err(reason) => return responder.respond_with_error(invalid_params(reason)),
@@ -1548,7 +1604,7 @@ where
                     };
                     // Session lock precedes MCP lock everywhere; snapshot before accepting changes.
                     let servers = lock(&mcp).sessions.get(&id).cloned().unwrap_or_default();
-                    if let Some(input) = &mut input {
+                    if !compact && let Some(input) = &mut input {
                         input.messages.push(normalized);
                     }
                     let durable = registry.history(&id);
@@ -1639,6 +1695,10 @@ where
                     let retained_presentation = lock(&sessions).presentation(&id);
                     let presentation_history = lock(&sessions).history(&id);
                     let reply = Reply {
+                        safe_tools: Arc::new(Mutex::new(input.as_ref().map(|input| input.safe_tools.clone()).unwrap_or_default())),
+                        compact,
+                        compacted: Arc::new(Mutex::new(None)),
+                        compaction_started: Arc::new(Mutex::new(false)),
                         sessions: Arc::clone(&sessions),
                         connection: connection.clone(),
                         id: id.clone(),
@@ -1875,6 +1935,9 @@ where
     let session_id = reply.session_id.clone();
     let token = reply.token;
     let completed = Arc::clone(&reply.completed);
+    let safe_tools = Arc::clone(&reply.safe_tools);
+    let compacted = Arc::clone(&reply.compacted);
+    let compaction_started = Arc::clone(&reply.compaction_started);
     let plan = Arc::clone(&reply.plan);
     let presentation = Arc::clone(&reply.presentation);
     let selected_protocol = Arc::clone(&reply.protocol);
@@ -1928,6 +1991,9 @@ where
     // Finalization was claimed before transport/disk waits: a later cancel
     // cannot invalidate the successful context being made durable.
     let mut outcome = lock(&completed).take();
+    let mut compacted = lock(&compacted)
+        .take()
+        .filter(|_| matches!(stop_reason, v2::StopReason::EndTurn));
     let protocol = *lock(&selected_protocol);
     if let Some(history) = &history {
         let snapshot = {
@@ -1945,6 +2011,8 @@ where
                 outcome.as_ref().and_then(|outcome| {
                     let mut snapshot = sessions.snapshot(&id)?;
                     snapshot.messages = outcome.messages.clone();
+                    snapshot.safe_tools = lock(&safe_tools).clone();
+                    crate::compaction::retain_tools(&mut snapshot.safe_tools, &snapshot.messages);
                     snapshot.instructions = outcome.instructions.clone();
                     snapshot.protocol = protocol;
                     Some(snapshot)
@@ -1959,9 +2027,17 @@ where
             v2::StopReason::Refusal => "refusal",
             _ => "completed",
         };
-        if let Err(error) = history.finish(token, terminal, snapshot).await {
+        let stored = if let Some(candidate) = &compacted {
+            history
+                .finish_compaction(token, candidate.drop_messages, candidate.summary.clone())
+                .await
+        } else {
+            history.finish(token, terminal, snapshot).await
+        };
+        if let Err(error) = stored {
             stop_reason = failed(&error.to_string());
             outcome = None;
+            compacted = None;
         }
     }
     let durable = history.is_some();
@@ -2014,6 +2090,43 @@ where
     }
     let publish = move || {
         let mut sessions = lock(&sessions);
+        if *lock(&compaction_started) {
+            let mut usage = None;
+            let mut display = crate::compaction::Display {
+                turn: token,
+                status: if matches!(stop_reason, v2::StopReason::Cancelled) {
+                    "cancelled"
+                } else {
+                    "failed"
+                }
+                .into(),
+                summary: None,
+            };
+            if let Some(candidate) = compacted
+                && sessions.is_current(&id, token)
+            {
+                sessions.commit_compaction(
+                    &id,
+                    token,
+                    candidate.drop_messages,
+                    candidate.summary.clone(),
+                );
+                display.status = "completed".into();
+                display.summary = Some(candidate.summary);
+                if let Some(window) = candidate.context.window {
+                    // The local command does not prepare the next prompt's tool/guidance payload.
+                    usage = Some(v2::SessionUpdate::UsageUpdate(
+                        v2::UsageUpdate::new(candidate.context.estimated_input, u64::from(window))
+                            .meta(serde_json::json!({"bee.dev/context":{"estimated":true,"method":"utf8-json-bytes/3+256","scope":"retained-conversation","reservedOutput":candidate.context.reserved_output,"window":candidate.context.window_fact}}).as_object().cloned().unwrap_or_default())
+                    ));
+                }
+            }
+            sessions.record_compaction(&id, display.clone());
+            let _ = send_update(&connection, &session_id, compaction::update(&display));
+            if let Some(usage) = usage {
+                let _ = send_update(&connection, &session_id, usage);
+            }
+        }
         for update in presentation::finish(
             &presentation,
             token,
@@ -2038,6 +2151,7 @@ where
             && sessions.is_current(&id, token)
         {
             sessions.commit(&id, token, outcome.messages, outcome.instructions, protocol);
+            sessions.commit_tools(&id, token, lock(&safe_tools).clone());
             // Report only committed context, under the same lock as cancellation/idle.
             if let Some(window) = outcome.context.window {
                 let meta = serde_json::json!({"bee.dev/context": {"estimated":true,"method":"utf8-json-bytes/3+256","reservedOutput":outcome.context.reserved_output,"window":outcome.context.window_fact}});
@@ -2111,6 +2225,10 @@ fn replay_message(
         reason: "cannot restore conversation message",
         help: "check the stored history version and reconnect with a compatible client",
     };
+    if message.kind == crate::history::MessageKind::Compaction {
+        let display = serde_json::from_value(message.content).map_err(|_| failure())?;
+        return send_update(connection, id, compaction::update(&display)).map_err(|_| failure());
+    }
     let content: Vec<v2::ContentBlock> =
         serde_json::from_value(message.content).map_err(|_| failure())?;
     let update = match message.kind {
@@ -2123,6 +2241,7 @@ fn replay_message(
         crate::history::MessageKind::Thought => {
             v2::SessionUpdate::AgentThought(v2::AgentThought::new(message.id).content(content))
         }
+        crate::history::MessageKind::Compaction => unreachable!("handled before content parsing"),
     };
     send_update(connection, id, update).map_err(|_| failure())
 }
@@ -2436,6 +2555,8 @@ mod gate_tests {
             Sessions::with_accounts(providers).with_discovery(Some(discovery)),
         ));
         let snapshot = crate::history::Snapshot {
+            safe_tools: Default::default(),
+            summary: None,
             selection_state: Default::default(),
             profile: "default".into(),
             cwd: root.path().into(),

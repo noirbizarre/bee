@@ -87,8 +87,9 @@ pub(super) fn request(model: &Model, messages: &[Message], tools: &[Tool]) -> Re
             .expect("request object")
             .remove("max_output_tokens");
     }
-    if !model.instructions.is_empty() {
-        body["instructions"] = model.instructions.clone().into();
+    let instructions = model.context_instructions();
+    if !instructions.is_empty() {
+        body["instructions"] = instructions.clone().into();
     }
     if !tools.is_empty() {
         // Responses defaults strictness differently from Chat; explicitly opt
@@ -116,7 +117,7 @@ pub(super) fn request(model: &Model, messages: &[Message], tools: &[Tool]) -> Re
     }
     let boundaries = super::cache::openai(model, &mut body, cache)?;
     if boundaries.instructions() {
-        let block = super::cache::marked_text("input_text", &model.instructions)?;
+        let block = super::cache::marked_text("input_text", &instructions)?;
         body.as_object_mut()
             .expect("request object")
             .remove("instructions");

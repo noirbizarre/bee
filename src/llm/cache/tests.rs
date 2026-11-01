@@ -35,6 +35,56 @@ fn tools() -> Vec<Tool> {
 }
 
 #[test]
+fn retained_summaries_survive_cache_transformations_and_are_counted_exactly_once() {
+    for protocol in [
+        Protocol::OpenAiChat,
+        Protocol::OpenAiResponses,
+        Protocol::AnthropicMessages,
+    ] {
+        for instructions in ["", "private stable guidance"] {
+            let (url, options) = if protocol == Protocol::AnthropicMessages {
+                (
+                    "https://api.anthropic.com",
+                    "cache_control={policy='stable-prefix',ttl='5m'}",
+                )
+            } else {
+                (
+                    OPENAI,
+                    "prompt_cache_options={enabled=true,mode='explicit',breakpoints='instructions-and-conversation'}",
+                )
+            };
+            let name = if protocol == Protocol::AnthropicMessages {
+                "claude-sonnet-4-6"
+            } else {
+                "gpt-5.6"
+            };
+            let mut model = model(protocol, url, name, options)
+                .with_instructions(instructions.into())
+                .with_summary(Some(crate::compaction::Summary(
+                    "retained-summary-sentinel".into(),
+                )));
+            let messages = [Message::User("latest question".into())];
+            let body = request(&model, &messages, &tools()).unwrap();
+            assert_eq!(
+                body.to_string()
+                    .matches("retained-summary-sentinel")
+                    .count(),
+                1
+            );
+            assert!(body.to_string().contains("untrusted data"));
+            let report = model.context(&messages, &tools()).unwrap();
+            let expected = crate::context::estimate(&body, report.window);
+            assert_eq!(report.estimated_input, expected.estimated_input);
+            let exact = u32::try_from(report.estimated_input + report.reserved_output).unwrap();
+            model.selection.window = Some(exact);
+            assert!(model.context(&messages, &tools()).unwrap().check().is_ok());
+            model.selection.window = Some(exact - 1);
+            assert!(model.context(&messages, &tools()).unwrap().check().is_err());
+        }
+    }
+}
+
+#[test]
 fn multipart_cache_boundaries_preserve_media_and_allow_media_only_turns() {
     for protocol in [Protocol::OpenAiChat, Protocol::OpenAiResponses] {
         let model = model(

@@ -46,6 +46,11 @@ were rechecked against official main `2325f30bff20e7133d626a47d005d922f84ca8e1` 
 interleaving, first-observation ordering and full-snapshot replay clarifications are compatible with the pinned
 append/replacement contract. No thought-specific capability flag or newer initialization behavior is introduced.
 
+The #75 compaction implementation also retains this revision. Compaction definitions were rechecked against
+official main `b4c72a80f32f4c61d87270d90891c7ce14511b9a` on 2026-11-01: payload shapes are unchanged, and its
+summary-disclosure and full-replay clarifications are compatible. Bee uses full summary replacements with stable
+session-local IDs. It does not adopt unrelated newer initialization, queueing or background-work behavior.
+
 The three official tags `v1.12.0`, `schema-v1.26.0` and `schema-v2.0.0-alpha.9` resolve to
 the specification commit above. These are independent version namespaces: schema crate `1.12.0`
 does not mean wire version 1, and SDK `3.5.0` does not mean wire version 3.
@@ -240,13 +245,15 @@ All update names below are values of agent → client `session/update.sessionUpd
 
 | Feature | Status | Behavior, limitation and evidence / tracking |
 | --- | --- | --- |
-| `available_commands_update`, response `availableCommands` | Planned | No advertised command set or command handling contract yet. [#73](https://github.com/noirbizarre/bee/issues/73). |
+| Response `availableCommands` | Partially supported | Static no-argument `compact` on new/resume; local `/compact` through ordinary prompt acceptance and foreground lifecycle. Invalid arguments/mixed content are rejected before acceptance. Evidence: `tests/compaction.rs`, `explicit_compaction_uses_standard_wire_entities_and_survives_process_restart` in `tests/stdio.rs`. Broader command contract: [#73](https://github.com/noirbizarre/bee/issues/73). |
+| `available_commands_update` | Planned | No dynamic command inventory; the supported command is static. [#73](https://github.com/noirbizarre/bee/issues/73). |
 | `config_option_update` | Implemented and supported | Optional model discovery publishes current select options; does not update closed sessions. [Model discovery tests][test-models], [configuration](models.md#acp-and-cli). |
 | `session_info_update` | Planned | No live title/timestamp/custom metadata patch updates. [#74](https://github.com/noirbizarre/bee/issues/74). |
 | `usage_update`: context `used` / `size` | Partially supported | Estimated committed occupancy only when effective capacity is known; `bee.dev/context` labels method/provenance/output reservation. Not token billing. [Context wire tests][test-stdio], [usage contract](inference.md#usage-and-overflow-reporting). |
 | `usage_update.cost` | Planned | No monetary cost reporting. [#80](https://github.com/noirbizarre/bee/issues/80). |
 | `notice` | Implemented and supported | Truncation/interruption, skill-discovery, automatic-selection and preference-write diagnostics; not conversation history or replayed accounting. No client capability required in v2. [Wire tests][test-stdio], [selection tests][test-selection], [emission code][acp-code]. |
-| `compaction_update`, `compaction_summary_chunk` | Planned | Whole-turn eviction/notices are not summary compaction or retained-summary streaming. [#75](https://github.com/noirbizarre/bee/issues/75). |
+| `compaction_update` | Implemented and supported | Explicit `/compact`, selected-model tool-free generation, in_progress → completed/failed/cancelled, full text summary on committed success. No v2 capability gate or compact RPC. Atomic summary/prefix replacement preserves latest complete turn and original visible history. Bounded presentation, ordered full-upsert replay, interrupted recovery and cancellation before idle/close. [Compaction contract](sessions.md#explicit-compaction-and-summary-retention). Evidence: `tests/compaction.rs`, compaction wire tests in `tests/stdio.rs`, summary transaction/recovery tests in `src/history/tests.rs`. |
+| `compaction_summary_chunk` | Not implemented | Optional streaming is omitted: generation is buffered within bounds, and complete summaries are full replacements. Repeated replay does not append duplicate chunks. |
 
 ## Permissions, input requests and authentication
 

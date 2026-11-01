@@ -254,9 +254,9 @@ pub(super) fn anthropic(
         settings.policy,
         AnthropicPolicy::StablePrefix | AnthropicPolicy::StablePrefixAndAutomatic
     ) {
-        if !model.instructions.is_empty() {
-            body["system"] =
-                json!([{"type":"text","text":model.instructions,"cache_control":marker}]);
+        let instructions = model.context_instructions();
+        if !instructions.is_empty() {
+            body["system"] = json!([{"type":"text","text":instructions,"cache_control":marker}]);
         } else if let Some(tool) = body
             .get_mut("tools")
             .and_then(Value::as_array_mut)

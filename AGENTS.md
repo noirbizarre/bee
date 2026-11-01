@@ -37,6 +37,9 @@ implemented native routes, with inline durable context and original ACP content 
 is model context; resource URIs are never fetched. Production sessions and successful context are durable, with explicit
 model-aware context windows, approximate token accounting and transactional oldest-whole-turn truncation;
 failed/cancelled/refused turns are excluded from model context. Separate visible history retains unsuccessful partials;
+Explicit `/compact` uses the selected model without tools to replace older successful turns with a bounded portable
+summary while preserving the latest complete turn and original visible history. Summary-only commits are atomic;
+standard full compaction updates terminate before idle and replay in first-observation order (ADR-035).
 start resume replays
 full message upserts before current state. Private per-session JSONL journals and exclusive OS locks preserve identity
 across restarts without replaying execution. Embedded runtimes default to isolated memory storage. The SDK-free bounded
@@ -146,6 +149,7 @@ src/
 ├── llm/        native wire adapters
 ├── agent.rs    bounded model/tool loop with an injected executor
 ├── context.rs  SDK-free context estimates, explicit budgets and whole-turn eviction
+├── compaction.rs SDK-free bounded historical summaries and display-safe source projection
 ├── plan.rs     SDK-free bounded plan snapshots and unfinished-entry reconciliation
 ├── presentation.rs SDK-free bounded tool/terminal snapshots, committed changes and replay reduction
 ├── instructions.rs scoped AGENTS.md, persistent payloads and transactional guidance

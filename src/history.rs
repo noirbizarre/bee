@@ -173,6 +173,10 @@ pub(crate) struct Snapshot {
     pub(crate) protocol: Option<crate::provider::Protocol>,
     pub(crate) messages: Vec<crate::llm::Message>,
     pub(crate) instructions: crate::instructions::State,
+    #[serde(default)]
+    pub(crate) summary: Option<crate::compaction::Summary>,
+    #[serde(default)]
+    pub(crate) safe_tools: crate::compaction::ToolText,
 }
 
 fn default_profile() -> String {
@@ -185,6 +189,7 @@ pub(crate) enum MessageKind {
     User,
     Answer,
     Thought,
+    Compaction,
 }
 
 /// Bounded local coordinates cannot carry opaque provider identifiers into visible history.
@@ -1013,6 +1018,31 @@ impl Handle {
                 turn,
                 outcome,
                 context,
+            })
+        })
+        .await
+        .inspect_err(|failure| self.fail(failure.clone()))
+    }
+
+    pub(crate) async fn start_compaction(&self, turn: u64) -> Result<()> {
+        self.healthy()?;
+        self.run(move |journal, _| journal.append(Event::CompactionStarted { turn }))
+            .await
+            .inspect_err(|failure| self.fail(failure.clone()))
+    }
+
+    pub(crate) async fn finish_compaction(
+        &self,
+        turn: u64,
+        drop_messages: usize,
+        summary: crate::compaction::Summary,
+    ) -> Result<()> {
+        self.healthy()?;
+        self.run(move |journal, _| {
+            journal.append(Event::CompactionFinished {
+                turn,
+                drop_messages,
+                summary,
             })
         })
         .await

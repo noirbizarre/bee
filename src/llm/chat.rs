@@ -45,8 +45,9 @@ pub(super) fn request(model: &Model, messages: &[Message], tools: &[Tool]) -> Re
             }
         })
         .collect::<Result<Vec<_>, Error>>()?;
-    if !model.instructions.is_empty() {
-        messages.insert(0, json!({"role":"system","content":model.instructions}));
+    let instructions = model.context_instructions();
+    if !instructions.is_empty() {
+        messages.insert(0, json!({"role":"system","content":instructions}));
     }
     let mut body = json!({"model":model.model,"messages":messages,"stream":true,"stream_options":{"include_usage":true}});
     let field = match model.endpoint().options() {
@@ -65,7 +66,7 @@ pub(super) fn request(model: &Model, messages: &[Message], tools: &[Tool]) -> Re
     };
     let boundaries = super::cache::openai(model, &mut body, cache)?;
     if boundaries.instructions() {
-        let block = super::cache::marked_text("text", &model.instructions)?;
+        let block = super::cache::marked_text("text", &instructions)?;
         body["messages"][0]["content"] = json!([block]);
     }
     if boundaries.conversation() {

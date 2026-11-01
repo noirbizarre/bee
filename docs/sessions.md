@@ -148,17 +148,59 @@ The visible transcript preserves original accepted user blocks, including resour
 assistant answer/thought text already emitted. It also retains partial text from cancelled, failed and refused turns.
 Prompt acceptance follows durable user-message insertion; live text follows durable delta commits.
 
-The successful model-context projection is separate. Only successful, non-refused inference advances it; cancelled,
-failed and refused inference never enters later model context. Whole-turn context eviction can remove old inference
+The successful model-context projection is separate. Successful, non-refused inference and explicit committed compaction
+advance it. Cancelled, failed and refused inference never enters later model context. Eviction can remove old inference
 messages while leaving their visible transcript intact. Successful native tool-call/result continuation and
 committed guidance snapshots survive restart. Provider/model selection survives; provider configuration and
 credentials are resolved from current configuration when inference next runs.
 
-Replay sends historical user/assistant/thought messages, latest execution-plan snapshots, and retained tool/terminal snapshots.
+Replay sends historical user/assistant/thought messages and retained compaction snapshots in first-observation order,
+then latest execution-plan snapshots and retained tool/terminal snapshots.
 It does not execute tools, query providers, request
 permissions, reopen login flows or restore previous MCP authority. Tool calls/results retained for model
 continuation are data, not executable restoration instructions. Legacy journals without tool observations
 do not acquire invented historical tool events.
+
+## Explicit compaction and summary retention
+
+Submit `/compact` as one text block, with no arguments or attachments. Bee advertises `compact` in new/resume
+responses. The command is accepted and echoed like other prompts and follows running → idle, but is not model
+conversation input. With fewer than two retained successful turns it reports a no-op without contacting a model.
+
+Compaction uses the selected account/model, its authenticated native route and existing generation controls.
+One tool-free request summarizes older retained successful turns and any previous summary; the latest completed
+turn remains unchanged, including its tool-result correlations and native continuation. Source text includes user
+text, assistant answers and content-matched bounded tool display previews. It excludes thoughts, private native
+continuation, raw tool arguments, hidden guidance and unsuccessful turns. Unavailable legacy tool previews are
+explicitly omitted, never recovered from private full results. Media in the compacted prefix is unsupported; media
+in the latest retained turn stays intact. Resource URIs are never fetched.
+
+The request must fit without source eviction. Serialized source is bounded to 256 KiB, retained summary to 16 KiB
+UTF-8, generation to one request and 120 seconds. The prompt targets 2,048 output tokens while configured native
+output/reasoning controls remain authoritative. Refusal, truncation, unexpected tool calls, empty/oversized output,
+malformed results and non-shrinking summaries fail without semantic changes. No retries or automatic summarization
+are performed. Normal automatic whole-turn eviction remains available, counting the retained summary once.
+
+An actual attempt reports standard `compaction_update` with `in_progress`, followed by `completed`, `failed` or
+`cancelled` before terminal idle/direct-close completion. Successful summary replacement, exact prefix removal and
+terminal presentation are a single durable transaction. Guidance snapshots, model recency and surviving native
+continuation do not advance. Interrupted attempts recover as failed; no partial summary becomes model context.
+As with other journal commits, an ambiguous synchronization error can recover an atomic old or new state.
+
+Summary text is separately stored historical data, not an ordinary fabricated user turn or additional guidance.
+Native requests label/escape it as untrusted historical context. ACP receives the full user-displayable retained
+summary only after commit; no answer/thought message or optional `compaction_summary_chunk` is produced for it.
+Failed/cancelled snapshots explicitly clear summary content. Start replay uses full replacements at the original
+first-observed position, so repeated replay cannot append duplicate summary text. State-only resume emits none.
+
+Retained compaction presentation has both a 16-entity limit and a 256 KiB encoded aggregate limit, including
+framing allowance; oldest entities are removed first using the same reducer policy live and on recovery. Current
+semantic summary survives presentation eviction. Safe tool preview sidecars are bounded to 256 KiB text and pruned
+with successful context. These bounds do not delete original conversation messages or rewrite the append-only
+physical journal. Full replay reserves summary bytes within the cumulative connection replay budget before output.
+Journal version 8 remains able to read versions 1–7; older binaries reject new records rather than ignoring summaries.
+
+See [ADR-035](adr/035-explicit-context-compaction.md) for the transaction and disclosure decision.
 
 ## Thought retention and identity
 
