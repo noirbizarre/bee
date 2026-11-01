@@ -1,7 +1,10 @@
 //! Public outbound API against an independent deterministic stdio peer.
 
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+#[path = "support/acp_fixture.rs"]
+mod acp_fixture;
+
+use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use bee::acp::client::{
@@ -10,45 +13,24 @@ use bee::acp::client::{
 use bee::config::{Config, Environment};
 use tokio_util::sync::CancellationToken;
 
-fn fixture() -> &'static Path {
-    static FIXTURE: OnceLock<PathBuf> = OnceLock::new();
-    FIXTURE.get_or_init(|| {
-        let manifest =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/acp-agent/Cargo.toml");
-        let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/acp-client-fixture");
-        // A separate target avoids a nested Cargo invocation waiting on the parent test build.
-        let output = std::process::Command::new(env!("CARGO"))
-            .args(["build", "--offline", "--locked", "--manifest-path"])
-            .arg(manifest)
-            .arg("--target-dir")
-            .arg(&target)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        target.join("debug").join(format!(
-            "bee-acp-client-fixture{}",
-            std::env::consts::EXE_SUFFIX
-        ))
-    })
-}
-
 fn configuration(text: &str) -> (tempfile::TempDir, Config) {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("config.toml");
-    std::fs::write(&path, text).unwrap();
-    let config = Config::load(&Environment::new(None, None, Some(path)), dir.path()).unwrap();
+    let config = configuration_in(dir.path(), text);
     (dir, config)
 }
 
+fn configuration_in(root: &Path, text: &str) -> Config {
+    let path = root.join("config.toml");
+    std::fs::write(&path, text).unwrap();
+    Config::load(&Environment::new(None, None, Some(path)), root).unwrap()
+}
+
 fn agents(mode: &str, env: &[(&str, &Path)]) -> (tempfile::TempDir, Agents) {
+    let dir = tempfile::tempdir().unwrap();
     // toml's parser-only feature cannot serialize; JSON strings are valid TOML basic strings.
     let mut text = format!(
         "[agents.test]\ncommand = {}\nargs = [{}]\n",
-        serde_json::to_string(&fixture().display().to_string()).unwrap(),
+        serde_json::to_string(&acp_fixture::executable(dir.path()).display().to_string()).unwrap(),
         serde_json::to_string(mode).unwrap()
     );
     text.push_str("[agents.test.env]\n");
@@ -58,7 +40,7 @@ fn agents(mode: &str, env: &[(&str, &Path)]) -> (tempfile::TempDir, Agents) {
             serde_json::to_string(&path.display().to_string()).unwrap()
         ));
     }
-    let (dir, config) = configuration(&text);
+    let config = configuration_in(dir.path(), &text);
     (dir, Agents::from_config(&config).unwrap())
 }
 
