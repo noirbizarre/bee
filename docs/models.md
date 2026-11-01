@@ -167,6 +167,12 @@ inherited values. Metadata cannot add wire features or availability, nor automat
 carry source, declared/inferred confidence, fetch time and stale status. Catalog modalities do not extend Bee's subset.
 `inference_succeeded_at` records successful account inference observations without promising permanent access.
 
+`input_modalities` gates implemented binary prompt inputs: `image`, `audio` and `pdf`. Effective metadata is intersected
+with provider/route support and frozen per turn; missing/unknown modalities authorize text only. Lists replace inherited
+lists, including `[]` to disable binary inputs. `pdf` must be explicit, not inferred from image support. Output modalities
+remain informational. This changes input declarations from display-only facts into an operational gate without adding
+availability, selecting a route, or enabling unimplemented wire features. See [media input](inference.md#images-audio-and-embedded-resources).
+
 ## Optional protocol hints and context budgets
 
 With `catalog_protocol_hints = true`, resolution is exact configured `model_protocols` → Copilot exact native

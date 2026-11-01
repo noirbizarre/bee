@@ -20,7 +20,8 @@ Cancellation and close interrupt pending inference. Production sessions retain s
 context across close/resume and process restart. Start resume replays the separate visible transcript before current
 state. See [session history](sessions.md) for storage, retention and client restoration.
 Cancelled, failed and refused turns do not enter model context.
-Prompts accept text and resource links, represented as references without fetching their contents.
+Prompts accept text, supplied embedded context and [declared media inputs](inference.md#images-audio-and-embedded-resources).
+Resource links remain references without fetching their contents.
 
 The bounded SDK-free loop supports injected function executors. Normal ACP sessions advertise and execute the native
 `bash`, `read`, `glob`, `grep`, `list`, `write`, `edit`, `delete`, `move`, and `copy` tools across all three backends,

@@ -37,6 +37,13 @@ pub(super) fn request(model: &Model, messages: &[Message], tools: &[Tool]) -> Re
     for message in messages {
         let (role, blocks) = match message {
             Message::User(text) => ("user", vec![json!({"type":"text","text":text})]),
+            Message::UserParts(parts) => (
+                "user",
+                parts
+                    .iter()
+                    .map(|part| part.wire(crate::provider::Protocol::AnthropicMessages))
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
             Message::Assistant {
                 text,
                 calls,

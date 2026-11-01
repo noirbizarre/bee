@@ -511,7 +511,13 @@ impl Snapshot {
             .and_then(|entry| entry.context_window)
             .filter(|_| profile.is_copilot());
         let window = explicit.or(native_window).or(catalog);
+        let input_modalities_fact = self.input_modalities_fact(profile, model);
         let mut selection = Selection {
+            input_modalities: input_modalities_fact
+                .as_ref()
+                .and_then(|fact| serde_json::from_value(fact.value.clone()).ok())
+                .unwrap_or_default(),
+            input_modalities_fact,
             protocol: endpoint.protocol(),
             window,
             protocol_fact: self.fact(
@@ -551,6 +557,34 @@ impl Snapshot {
             }
         }
         selection
+    }
+
+    fn input_modalities_fact(&self, profile: &Profile, model: &str) -> Option<Fact> {
+        // Lists replace rather than union: an explicit empty list must revoke inherited support.
+        if let Some(values) = profile
+            .model_metadata(model)
+            .and_then(|metadata| metadata.input_modalities.as_ref())
+            .or(profile.metadata().input_modalities.as_ref())
+        {
+            return Some(self.fact(serde_json::json!(values), "configuration", "declared"));
+        }
+        if let Some(listing) = self.endpoints.get(profile.name())
+            && let Some(values) = listing
+                .entries
+                .get(model)
+                .and_then(|entry| entry.metadata.input_modalities.as_ref())
+        {
+            return Some(Fact {
+                value: serde_json::json!(values),
+                source: listing.provenance,
+                confidence: "declared",
+                stale: listing.stale,
+                fetched_at: listing.fetched_at,
+            });
+        }
+        self.entry(profile, model)
+            .and_then(|(_, entry)| entry.metadata.input_modalities.as_ref())
+            .map(|values| self.fact(serde_json::json!(values), "models.dev", "declared"))
     }
 
     /// A known native restriction must not silently become a fallback protocol.
@@ -684,6 +718,9 @@ impl Snapshot {
             );
         }
         let selection = self.resolve(profile, model);
+        if let Some(fact) = selection.input_modalities_fact {
+            facts.insert("input_modalities".into(), fact);
+        }
         facts.insert("protocol".into(), selection.protocol_fact);
         if let Some(window) = selection.window_fact {
             facts.insert("effective_context_window".into(), window);
@@ -775,6 +812,10 @@ impl Snapshot {
 /// Selected protocol and budget are frozen for the entire model/tool loop.
 #[derive(Clone)]
 pub struct Selection {
+    /// Effective declared input modalities; unknown never grants binary input.
+    pub input_modalities: Vec<String>,
+    /// Provenance frozen with the operational modality decision.
+    pub input_modalities_fact: Option<Fact>,
     /// Always one of the profile's configured protocols.
     pub protocol: Protocol,
     /// Explicit or opted-in catalog capacity, unknown otherwise.

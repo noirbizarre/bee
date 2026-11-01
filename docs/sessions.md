@@ -63,7 +63,9 @@ Version 2 adds `plan_updated` events. Version 3 makes profile ownership explicit
 snapshot. Version 4 adds account-bound automatic-selection state and explicit-selection-required guards to creation and
 settings records. Version 5 adds `presentation` delta events for tool/terminal observations and receipt-space reservations.
 Version 6 adds `thought_delta` events with Bee-owned step/item/part coordinates and display text.
-Writers emit version 6; readers also accept versions 1–5, whose missing selection state means the
+Version 7 adds ordered multipart user context, retaining inline media across successful turns and restarts.
+Original ACP media blocks remain visible independently of successful model context. Existing text serialization is unchanged.
+Writers emit version 7; readers also accept versions 1–6, whose missing selection state means the
 original explicit/default behavior and whose missing profile means `default`. New records can append to legacy journals
 without rewriting their prefix. Older binaries reject newer versions rather than ignoring profile ownership or guards.
 

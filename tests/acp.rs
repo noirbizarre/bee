@@ -45,7 +45,10 @@ async fn the_bee_agent_advertises_all_implemented_mcp_transports() -> Result<(),
                 .capabilities
                 .session
                 .expect("the session lifecycle is implemented");
-            assert!(session.prompt.is_none());
+            let prompt = session.prompt.unwrap();
+            assert!(prompt.embedded_context.is_some());
+            assert!(prompt.image.is_none());
+            assert!(prompt.audio.is_none());
             let mcp = serde_json::to_value(session.mcp.expect("MCP is implemented")).unwrap();
             assert!(mcp.get("acp").is_some());
             assert!(mcp.get("http").is_some());

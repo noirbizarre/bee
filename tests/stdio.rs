@@ -556,6 +556,178 @@ fn opaque_prompts_replay_after_restart_without_entering_current_or_later_model_i
     assert!(second.finish().0.success());
 }
 
+#[rstest::rstest]
+#[case("openai-chat")]
+#[case("openai-responses")]
+#[case("anthropic-messages")]
+fn media_prompts_replay_after_restart_and_remain_native_model_context(#[case] protocol: &str) {
+    let root = tempfile::tempdir().unwrap();
+    let state = root.path().join("state");
+    let answer = match protocol {
+        "openai-chat" => support::chat_text("answer"),
+        "openai-responses" => {
+            json!({"status":"completed","output":[{"id":"m1","type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}]}]})
+        }
+        _ => {
+            json!({"type":"message","role":"assistant","content":[{"type":"text","text":"answer"}],"stop_reason":"end_turn"})
+        }
+    };
+    let server = support::Server::start(vec![
+        support::Response::json(answer.clone()),
+        support::Response::json(answer),
+    ]);
+    let config = format!(
+        "model='test/test'\n[accounts.test]\nprovider='custom'\nmodels=['test']\nmetadata={{input_modalities=['text','image','audio','pdf']}}\nprotocols={{{protocol}={{base_url='{}'}}}}",
+        server.url
+    );
+    let mut prompt = json!([
+        {"type":"text","text":"before"},
+        {"type":"image","mimeType":"image/png","data":"aGk=","uri":"https://not-fetched.invalid","_meta":{"private":"not-forwarded"}},
+        {"type":"resource","resource":{"uri":"file:///not-read.txt","text":"supplied text"}},
+        {"type":"resource","resource":{"uri":"file:///not-read.pdf","blob":"aGk=","mimeType":"application/pdf"}},
+        {"type":"text","text":"after"}
+    ]);
+    if protocol == "openai-chat" {
+        // Exercise audio through the ACP boundary and durable replay, not only direct Model input.
+        prompt.as_array_mut().unwrap().insert(
+            2,
+            json!({"type":"audio","mimeType":"audio/wav","data":"UklGRg=="}),
+        );
+    }
+    let mut first = Agent::configured_with_state(&config, Some(&state));
+    let initialized = first.initialize(1);
+    assert_eq!(
+        initialized["result"]["capabilities"]["session"]["prompt"]["image"],
+        json!({})
+    );
+    assert_eq!(
+        initialized["result"]["capabilities"]["session"]["prompt"]["embeddedContext"],
+        json!({})
+    );
+    assert_eq!(
+        initialized["result"]["capabilities"]["session"]["prompt"]["audio"].is_object(),
+        protocol == "openai-chat"
+    );
+    first
+        .send(&json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":root.path()}}));
+    let session = first.recv()["result"]["sessionId"].clone();
+    first.send(&json!({"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"image","mimeType":"image/png","data":"invalid-private-input"}]}}));
+    let rejected = first.recv();
+    assert_eq!(rejected["error"]["code"], -32602);
+    assert!(!rejected.to_string().contains("invalid-private-input"));
+    first.send(&json!({"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"sessionId":session,"prompt":prompt}}));
+    let messages = first.until_idle();
+    assert_eq!(messages[0]["result"]["messageId"], "user-1");
+    assert_eq!(
+        messages.last().unwrap()["params"]["update"]["stopReason"],
+        "end_turn"
+    );
+    let original = server.request().body;
+    if protocol == "openai-chat" {
+        assert!(original.to_string().contains("input_audio"));
+        assert!(original.to_string().contains("UklGRg=="));
+    }
+    assert!(!original.to_string().contains("not-forwarded"));
+    assert!(!original.to_string().contains("not-fetched.invalid"));
+    let (status, stderr) = first.finish();
+    assert!(status.success());
+    assert_eq!(stderr, "");
+
+    if protocol == "openai-chat" {
+        // Display replay is still valid after a metadata change, but retained media cannot be silently dropped.
+        let incompatible = config.replace("['text','image','audio','pdf']", "['text']");
+        let mut changed = Agent::configured_with_state(&incompatible, Some(&state));
+        changed.initialize(1);
+        changed.resume(&session, root.path(), true);
+        changed.send(&json!({"jsonrpc":"2.0","id":6,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"text","text":"incompatible failed turn"}]}}));
+        assert_eq!(
+            changed.until_idle().last().unwrap()["params"]["update"]["stopReason"],
+            "error"
+        );
+        server.assert_no_more_requests();
+        assert!(changed.finish().0.success());
+    }
+
+    let mut second = Agent::configured_with_state(&config, Some(&state));
+    second.initialize(1);
+    let replay = second.resume(&session, root.path(), true);
+    let user = replay
+        .iter()
+        .find(|message| message["params"]["update"]["sessionUpdate"] == "user_message")
+        .unwrap();
+    assert_eq!(user["params"]["update"]["content"], prompt);
+    server.assert_no_more_requests();
+    second.send(&json!({"jsonrpc":"2.0","id":5,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"text","text":"continue"}]}}));
+    assert_eq!(
+        second.until_idle().last().unwrap()["params"]["update"]["stopReason"],
+        "end_turn"
+    );
+    let restored = server.request().body;
+    let field = if protocol == "openai-responses" {
+        "input"
+    } else {
+        "messages"
+    };
+    let first_user = |body: &Value| {
+        body[field]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["role"] == "user")
+            .unwrap()["content"]
+            .clone()
+    };
+    assert_eq!(first_user(&original), first_user(&restored));
+    let (status, stderr) = second.finish();
+    assert!(status.success());
+    assert_eq!(stderr, "");
+}
+
+#[rstest::rstest]
+#[case::failed(false)]
+#[case::refused(true)]
+fn failed_media_is_visible_but_does_not_enter_later_successful_context(#[case] refused: bool) {
+    let root = tempfile::tempdir().unwrap();
+    let mut failure = support::Response::json(if refused {
+        json!({"choices":[{"index":0,"message":{"refusal":"declined"},"finish_reason":"stop"}]})
+    } else {
+        json!({"error":"private-upstream"})
+    });
+    failure.status = if refused { 200 } else { 500 };
+    let server = support::Server::start(vec![
+        failure,
+        support::Response::json(support::chat_text("ok")),
+    ]);
+    let config = format!(
+        "model='test/test'\n[accounts.test]\nprovider='custom'\nmodels=['test']\nmetadata={{input_modalities=['image']}}\nprotocols={{openai-chat={{base_url='{}'}}}}",
+        server.url
+    );
+    let mut agent = Agent::configured(&config);
+    agent.initialize(1);
+    agent
+        .send(&json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":root.path()}}));
+    let session = agent.recv()["result"]["sessionId"].clone();
+    let media = json!([{"type":"image","mimeType":"image/png","data":"aGk="}]);
+    agent.send(&json!({"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":session,"prompt":media}}));
+    let failed = agent.until_idle();
+    assert_ne!(
+        failed.last().unwrap()["params"]["update"]["stopReason"],
+        "end_turn"
+    );
+    server.request();
+    agent.send(&json!({"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"text","text":"retry"}]}}));
+    agent.until_idle();
+    let request = server.request().body;
+    assert!(!request.to_string().contains("image_url"));
+    let replay = agent.resume(&session, root.path(), true);
+    assert!(
+        replay
+            .iter()
+            .any(|message| message["params"]["update"]["content"] == media)
+    );
+    assert!(agent.finish().0.success());
+}
+
 #[test]
 fn profile_ownership_isolates_history_and_models_across_process_restarts() {
     let root = tempfile::tempdir().unwrap();
@@ -1332,7 +1504,10 @@ fn display_thoughts_use_standard_wire_entities_and_survive_terminal_outcomes_and
 #[rstest::rstest]
 #[case::cancel(false)]
 #[case::close(true)]
-fn pending_inference_can_be_stopped_over_stdio_and_the_session_recovers(#[case] close: bool) {
+fn pending_inference_can_be_stopped_over_stdio_and_the_session_recovers(
+    #[case] close: bool,
+    #[values(false, true)] media: bool,
+) {
     let root = tempfile::tempdir().unwrap();
     let (pending, release) = support::Response::json(support::chat_text("late answer")).gated();
     let http = support::Server::start(vec![
@@ -1340,7 +1515,7 @@ fn pending_inference_can_be_stopped_over_stdio_and_the_session_recovers(#[case] 
         support::Response::json(support::chat_text("recovered")),
     ]);
     let mut agent = Agent::configured(&format!(
-        "model='test/test'\n[accounts.test]\nprovider='custom'\nmodels=['test']\n[accounts.test.protocols.openai-chat]\nbase_url='{}'",
+        "model='test/test'\n[accounts.test]\nprovider='custom'\nmodels=['test']\nmetadata={{input_modalities=['image']}}\n[accounts.test.protocols.openai-chat]\nbase_url='{}'",
         http.url
     ));
     // Client interaction support does not trigger a form or login by itself:
@@ -1354,12 +1529,16 @@ fn pending_inference_can_be_stopped_over_stdio_and_the_session_recovers(#[case] 
     let initialized = agent.recv();
     assert_eq!(
         initialized["result"]["capabilities"],
-        json!({"session":{"mcp":{"acp":{},"stdio":{},"http":{}}}})
+        json!({"session":{"prompt":{"image":{},"audio":{},"embeddedContext":{}},"mcp":{"acp":{},"stdio":{},"http":{}}}})
     );
     agent
         .send(&json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":root.path()}}));
     let session = agent.recv()["result"]["sessionId"].clone();
-    agent.send(&json!({"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"text","text":"cancelled-question"}]}}));
+    let mut prompt = vec![json!({"type":"text","text":"cancelled-question"})];
+    if media {
+        prompt.push(json!({"type":"image","mimeType":"image/png","data":"aGk="}));
+    }
+    agent.send(&json!({"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":session,"prompt":prompt}}));
     assert_eq!(agent.recv()["id"], 3);
     http.request();
     if close {
@@ -1411,6 +1590,7 @@ fn pending_inference_can_be_stopped_over_stdio_and_the_session_recovers(#[case] 
     let recovered = http.request().body.to_string();
     assert!(!recovered.contains("cancelled-question"));
     assert!(!recovered.contains("late answer"));
+    assert!(!recovered.contains("image_url"));
     agent.send(&json!({"jsonrpc":"2.0","id":8,"method":"session/list","params":{}}));
     let listed = agent.recv();
     assert_eq!(
@@ -1938,7 +2118,7 @@ fn the_initialize_response_advertises_all_implemented_mcp_transports() {
     // Capabilities promise implemented behavior, including the exact MCP transport.
     assert_eq!(
         response["result"]["capabilities"]["session"],
-        json!({"mcp":{"acp":{},"http":{},"stdio":{}}})
+        json!({"prompt":{"embeddedContext":{}},"mcp":{"acp":{},"http":{},"stdio":{}}})
     );
     agent.finish();
 }
@@ -2173,7 +2353,6 @@ fn invalid_and_unadvertised_content_is_rejected_before_insertion() {
         json!({"type":"resource","resource":7}),
         json!({"type":"image","data":"aGk=","mimeType":"image/png"}),
         json!({"type":"audio","data":"aGk=","mimeType":"audio/wav"}),
-        json!({"type":"resource","resource":{"uri":"file:///x","text":"hello"}}),
         json!({"type":"resource","resource":{"uri":"file:///x","blob":"aGk="}}),
     ] {
         // A valid sibling must not let a malformed or unsupported block be skipped.
@@ -2192,6 +2371,81 @@ fn invalid_and_unadvertised_content_is_rejected_before_insertion() {
     assert_eq!(messages[0]["result"]["messageId"], "user-1");
     assert_eq!(
         messages[1]["params"]["update"]["content"],
+        json!([{"type":"text","text":"valid"}])
+    );
+    assert!(agent.finish().0.success());
+}
+
+#[test]
+fn model_modalities_reject_images_before_insertion_but_allow_supplied_text_resources() {
+    let server = support::Server::start(vec![support::Response::json(support::chat_text("ok"))]);
+    let config = format!(
+        "model='test/text'\n[accounts.test]\nprovider='custom'\nmodels=['text']\nmetadata={{input_modalities=[]}}\nprotocols={{openai-chat={{base_url='{}'}}}}",
+        server.url
+    );
+    let mut agent = Agent::configured(&config);
+    let initialized = agent.initialize(1);
+    assert!(initialized["result"]["capabilities"]["session"]["prompt"]["image"].is_object());
+    let session = new_session(&mut agent, 2);
+    agent.send(&json!({"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"image","mimeType":"image/png","data":"aGk="}]}}));
+    assert_eq!(agent.recv()["error"]["code"], -32602);
+    agent.send(&json!({"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"resource","resource":{"uri":"https://not-fetched.invalid","text":"supplied context"}}]}}));
+    let messages = agent.until_idle();
+    assert_eq!(messages[0]["result"]["messageId"], "user-1");
+    assert_eq!(
+        messages.last().unwrap()["params"]["update"]["stopReason"],
+        "end_turn"
+    );
+    let request = server.request();
+    let users: Vec<_> = request.body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|message| message["role"] == "user")
+        .collect();
+    assert_eq!(users.len(), 1);
+    assert_eq!(
+        users[0]["content"],
+        "[Embedded resource: https://not-fetched.invalid]\nsupplied context"
+    );
+    assert!(agent.finish().0.success());
+}
+
+#[test]
+fn known_anthropic_image_limits_are_rejected_before_insertion() {
+    use base64::Engine;
+
+    let server = support::Server::start(vec![support::Response::json(
+        json!({"type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn"}),
+    )]);
+    let config = format!(
+        "model='test/vision'\n[accounts.test]\nprovider='custom'\nmodels=['vision']\nmetadata={{input_modalities=['image']}}\nprotocols={{anthropic-messages={{base_url='{}'}}}}",
+        server.url
+    );
+    let mut agent = Agent::configured(&config);
+    agent.initialize(1);
+    let session = new_session(&mut agent, 2);
+    // Four decoded MiB fits the generic envelope but exceeds Anthropic's encoded image limit.
+    let data = base64::engine::general_purpose::STANDARD.encode(vec![0; 4 * 1024 * 1024]);
+    agent.send(&json!({"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"image","mimeType":"image/png","data":data}]}}));
+    let rejected = agent.recv();
+    assert_eq!(rejected["error"]["code"], -32602);
+    assert!(
+        rejected["error"]["data"]
+            .as_str()
+            .unwrap()
+            .contains("5 MiB")
+    );
+    agent.send(&json!({"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"sessionId":session,"prompt":[{"type":"text","text":"valid"}]}}));
+    let messages = agent.until_idle();
+    assert_eq!(messages[0]["result"]["messageId"], "user-1");
+    assert_eq!(
+        messages.last().unwrap()["params"]["update"]["stopReason"],
+        "end_turn"
+    );
+    let body = server.request().body;
+    assert_eq!(
+        body["messages"][0]["content"],
         json!([{"type":"text","text":"valid"}])
     );
     assert!(agent.finish().0.success());

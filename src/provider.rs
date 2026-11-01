@@ -2,6 +2,7 @@
 
 pub use crate::account::cache;
 pub(crate) mod cloudflare;
+pub(crate) mod content;
 pub mod registry;
 pub mod runtime;
 pub(crate) mod scaleway;

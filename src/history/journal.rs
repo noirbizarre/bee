@@ -15,7 +15,7 @@ use super::{
 // A corrupt/malicious line must not allocate the size of the entire journal.
 // This bounds one record, not transcript length or the number of sessions.
 pub(super) const MAX_RECORD_BYTES: usize = 64 * 1024 * 1024;
-const VERSION: u32 = 6;
+const VERSION: u32 = 7;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -145,7 +145,7 @@ fn decode(line: &[u8], seq: u64, path: &Path) -> Result<Event> {
         serde_json::from_slice(line).map_err(|_| error(path, "invalid complete journal record"))?;
     // Existing journals remain readable; older binaries reject new records by
     // version instead of interpreting an extended event contract as v1.
-    if !matches!(record.version, 1 | 2 | 3 | 4 | 5 | VERSION) {
+    if !matches!(record.version, 1 | 2 | 3 | 4 | 5 | 6 | VERSION) {
         return Err(error(
             path,
             "unsupported session history version; use a compatible Bee version",
@@ -158,6 +158,35 @@ fn decode(line: &[u8], seq: u64, path: &Path) -> Result<Event> {
     }
     let event = serde_json::from_str(record.event.get())
         .map_err(|_| error(path, "invalid journal event"))?;
+    // Old-version records cannot acquire new semantics just because this decoder knows them.
+    let messages = match &event {
+        Event::SessionCreated { snapshot, .. } => snapshot.messages.as_slice(),
+        Event::TurnFinished {
+            context: Some(context),
+            ..
+        } => context.append.as_slice(),
+        _ => &[],
+    };
+    if record.version < 7
+        && messages
+            .iter()
+            .any(|message| matches!(message, crate::llm::Message::UserParts(_)))
+    {
+        return Err(error(
+            path,
+            "multipart context requires session history version 7",
+        ));
+    }
+    for message in messages {
+        if let crate::llm::Message::UserParts(parts) = message {
+            crate::llm::content::validate_parts(parts).map_err(|_| {
+                error(
+                    path,
+                    "invalid multipart session context; restore compatible session history",
+                )
+            })?;
+        }
+    }
     if let Event::ThoughtDelta { id, .. } = &event
         && (record.version < 6 || !id.valid())
     {
@@ -408,13 +437,16 @@ impl Projection {
                     let old = &mut self.snapshot.messages;
                     if context.drop_messages > old.len()
                         || (context.drop_messages < old.len()
-                            && !matches!(old[context.drop_messages], crate::llm::Message::User(_)))
-                        || !matches!(context.append.first(), Some(crate::llm::Message::User(_)))
+                            && !old[context.drop_messages].is_user())
+                        || !context
+                            .append
+                            .first()
+                            .is_some_and(crate::llm::Message::is_user)
                         || context
                             .append
                             .iter()
                             .skip(1)
-                            .any(|message| matches!(message, crate::llm::Message::User(_)))
+                            .any(crate::llm::Message::is_user)
                     {
                         return Err(invalid());
                     }
@@ -480,7 +512,7 @@ impl Projection {
         let start = next
             .messages
             .iter()
-            .rposition(|message| matches!(message, crate::llm::Message::User(_)))
+            .rposition(crate::llm::Message::is_user)
             .ok_or_else(invalid)?;
         let drop_messages = self
             .snapshot
@@ -800,6 +832,52 @@ impl Journal {
 #[cfg(test)]
 mod compatibility_tests {
     use super::*;
+
+    #[test]
+    fn legacy_text_loads_but_multipart_context_requires_version_seven() {
+        for version in [6, 7] {
+            for multipart in [false, true] {
+                let message = if multipart {
+                    crate::llm::Message::UserParts(vec![
+                        crate::llm::UserPart::media("image/png".into(), "aGk=".into()).unwrap(),
+                    ])
+                } else {
+                    crate::llm::Message::User("legacy text".into())
+                };
+                let event = Event::SessionCreated {
+                    id: "saved".into(),
+                    created: 1,
+                    snapshot: Snapshot {
+                        selection_state: Default::default(),
+                        profile: "default".into(),
+                        cwd: "project".into(),
+                        turns: 0,
+                        provider: None,
+                        model: None,
+                        protocol: None,
+                        messages: vec![message],
+                        instructions: Default::default(),
+                    },
+                };
+                let event = serde_json::value::to_raw_value(&event).unwrap();
+                let record = Record {
+                    version,
+                    seq: 0,
+                    checksum: checksum(version, 0, event.get()),
+                    event,
+                };
+                assert_eq!(
+                    decode(
+                        &serde_json::to_vec(&record).unwrap(),
+                        0,
+                        Path::new("journal")
+                    )
+                    .is_ok(),
+                    version == 7 || !multipart
+                );
+            }
+        }
+    }
 
     #[test]
     fn legacy_answer_records_remain_readable_but_thoughts_require_version_six() {

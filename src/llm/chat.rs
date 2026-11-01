@@ -34,6 +34,7 @@ pub(super) fn request(model: &Model, messages: &[Message], tools: &[Tool]) -> Re
         .iter()
         .map(|message| match message {
             Message::User(text) => Ok(json!({"role":"user", "content":text})),
+            Message::UserParts(parts) => Ok(json!({"role":"user", "content":parts.iter().map(|part| part.wire(crate::provider::Protocol::OpenAiChat)).collect::<Result<Vec<_>, _>>()?})),
             Message::Assistant {
                 text,
                 calls,
@@ -69,6 +70,7 @@ pub(super) fn request(model: &Model, messages: &[Message], tools: &[Tool]) -> Re
     }
     if boundaries.conversation() {
         let mut blocks = Vec::new();
+        let mut multipart = false;
         let mut items = body["messages"]
             .as_array_mut()
             .expect("messages array")
@@ -76,6 +78,20 @@ pub(super) fn request(model: &Model, messages: &[Message], tools: &[Tool]) -> Re
             .peekable();
         while let Some(item) = items.next() {
             if item["role"] != "user" && item["role"] != "tool" {
+                continue;
+            }
+            // Multipart input already has its native shape; media is never rewritten as text.
+            if item["content"].is_array() {
+                multipart = true;
+                // Only a trailing text part is a documented reusable boundary here.
+                if let Some(last) = item["content"]
+                    .as_array_mut()
+                    .and_then(|parts| parts.last_mut())
+                    && last["type"] == "text"
+                    && last["text"].as_str().is_some_and(|text| !text.is_empty())
+                {
+                    blocks.push(last);
+                }
                 continue;
             }
             let text = item["content"].as_str().ok_or(Error::Malformed)?;
@@ -90,7 +106,10 @@ pub(super) fn request(model: &Model, messages: &[Message], tools: &[Tool]) -> Re
                 blocks.push(&mut item["content"][0]);
             }
         }
-        super::cache::mark_conversation(blocks, &cache.options)?;
+        // Media-only turns have no eligible text boundary, but instruction caching still applies.
+        if !multipart || !blocks.is_empty() {
+            super::cache::mark_conversation(blocks, &cache.options)?;
+        }
     }
     Ok(body)
 }

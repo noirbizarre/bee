@@ -849,6 +849,7 @@ pub fn agent_with_runtime(providers: Providers, runtime: Runtime) -> impl Connec
         discovery,
         environment,
         ConnectionState {
+            inference: true,
             history,
             history_settings,
             preferences: runtime.preferences.clone(),
@@ -902,6 +903,7 @@ where
 
 #[derive(Default)]
 struct ConnectionState {
+    inference: bool,
     history: Option<crate::history::Store>,
     history_settings: crate::history::Settings,
     preferences: crate::selection::Store,
@@ -922,6 +924,7 @@ where
     Fut: Future<Output = std::result::Result<(), TurnFailure>> + Send + 'static,
 {
     let ConnectionState {
+        inference,
         history,
         history_settings,
         preferences,
@@ -930,6 +933,18 @@ where
         project_mcp,
     } = state;
     let body = Arc::new(body);
+    // Initialization precedes model discovery: advertise transport support, not a guessed default model.
+    let mut prompt_support = [false, false, inference];
+    if inference {
+        for account in providers.names().filter_map(|name| providers.get(name)) {
+            for endpoint in account.endpoints() {
+                prompt_support[0] |=
+                    crate::llm::content::route_supports(account, endpoint.protocol(), "image");
+                prompt_support[1] |=
+                    crate::llm::content::route_supports(account, endpoint.protocol(), "audio");
+            }
+        }
+    }
     let endpoint_profiles: Vec<_> = providers
         .names()
         .filter_map(|name| providers.get(name))
@@ -990,6 +1005,17 @@ where
                             .as_ref()
                             .is_some_and(v2::ElicitationCapabilities::supports_url);
                     }
+                    let mut session_capabilities = v2::SessionCapabilities::new().mcp(
+                        v2::McpCapabilities::new().acp(v2::McpAcpCapabilities::new())
+                            .stdio(v2::McpStdioCapabilities::new()).http(v2::McpHttpCapabilities::new()),
+                    );
+                    if prompt_support.iter().any(|supported| *supported) {
+                        let mut prompt = v2::PromptCapabilities::new();
+                        if prompt_support[0] { prompt = prompt.image(v2::PromptImageCapabilities::new()); }
+                        if prompt_support[1] { prompt = prompt.audio(v2::PromptAudioCapabilities::new()); }
+                        if prompt_support[2] { prompt = prompt.embedded_context(v2::PromptEmbeddedContextCapabilities::new()); }
+                        session_capabilities = session_capabilities.prompt(prompt);
+                    }
                     // All advertised transports share the bounded catalog and lifecycle.
                     responder.respond(
                         v2::InitializeResponse::new(
@@ -1001,10 +1027,7 @@ where
                         )
                         .capabilities(
                             v2::AgentCapabilities::new().session(
-                                v2::SessionCapabilities::new().mcp(
-                                    v2::McpCapabilities::new().acp(v2::McpAcpCapabilities::new())
-                                        .stdio(v2::McpStdioCapabilities::new()).http(v2::McpHttpCapabilities::new()),
-                                ),
+                                session_capabilities,
                             ),
                         ),
                     )?;
@@ -1471,9 +1494,10 @@ where
                     // Before anything is inserted: a prompt that carries content
                     // Bee recognizes but did not advertise support for is a bad
                     // request. Opaque future content is retained, not interpreted.
-                    if let Some(reason) = unsupported_content(&request.prompt) {
-                        return responder.respond_with_error(invalid_params(reason));
-                    }
+                    let normalized = match prompt_message(&request.prompt, prompt_support) {
+                        Ok(message) => message,
+                        Err(reason) => return responder.respond_with_error(invalid_params(reason)),
+                    };
 
                     // Registered here, in the handler, and not in the spawned
                     // task: the SDK dispatches a `session/cancel` as soon as this
@@ -1489,18 +1513,43 @@ where
                     if lock(&tasks).contains_key(&id) {
                         return responder.respond_with_error(session_error(SessionError::Busy(id)));
                     }
+                    // Reuse one snapshot: inline retained attachments must not be cloned for each preflight check.
+                    let mut input = registry.inference(&id);
+                    if let Some(input) = &input
+                        && let crate::llm::Message::UserParts(parts) = &normalized
+                        && (input.profile.endpoints().len() == 1 || input.profile.has_model_protocol(&input.model)) {
+                        // An explicit route cannot be expanded by later discovery or by another account's capability.
+                        let selection = crate::models::Snapshot::default().resolve(&input.profile, &input.model);
+                        for part in parts {
+                            if let Err(error) = part.check_route(selection.protocol) {
+                                return responder.respond_with_error(invalid_params(error.to_string()));
+                            }
+                        }
+                        if parts.iter().filter_map(crate::llm::UserPart::modality)
+                            .any(|modality| !crate::llm::content::route_supports(&input.profile, selection.protocol, modality)) {
+                            return responder.respond_with_error(invalid_params("selected provider route cannot consume this media; select a compatible model and route"));
+                        }
+                    }
+                    // Explicit declarations are definitive even before asynchronous native discovery.
+                    if let Some(input) = &input
+                        && let crate::llm::Message::UserParts(parts) = &normalized
+                        && let Some(modalities) = input.profile.model_metadata(&input.model)
+                            .and_then(|metadata| metadata.input_modalities.as_ref())
+                            .or(input.profile.metadata().input_modalities.as_ref())
+                        && parts.iter().filter_map(crate::llm::UserPart::modality)
+                            .any(|modality| !modalities.iter().any(|value| value == modality)) {
+                        return responder.respond_with_error(invalid_params("selected model does not declare this input modality; configure input_modalities or select a compatible model"));
+                    }
                     let turn = match registry.begin_turn(&id, move || abort.abort()) {
                         Ok(turn) => turn,
                         // A prompt refused before insertion is an error
                         // response, not an idle update: no turn ever started.
                         Err(error) => return responder.respond_with_error(session_error(error)),
                     };
-                    let mut input = registry.inference(&id);
                     // Session lock precedes MCP lock everywhere; snapshot before accepting changes.
                     let servers = lock(&mcp).sessions.get(&id).cloned().unwrap_or_default();
                     if let Some(input) = &mut input {
-                        let content = prompt_text(&request.prompt);
-                        input.messages.push(crate::llm::Message::User(content));
+                        input.messages.push(normalized);
                     }
                     let durable = registry.history(&id);
                     if let Some(history) = &durable
@@ -2082,23 +2131,111 @@ fn replay_message(
 ///
 /// Known operational content requires an advertised capability. The open union's
 /// opaque fallback instead requires preservation, without claiming understanding.
-fn unsupported_content(prompt: &[v2::ContentBlock]) -> Option<String> {
-    prompt.iter().find_map(|block| {
-        let kind = match block {
+fn prompt_message(
+    prompt: &[v2::ContentBlock],
+    support: [bool; 3],
+) -> std::result::Result<crate::llm::Message, String> {
+    use crate::llm::{Message, UserPart};
+    // Preserve the legacy text projection without allocating and discarding another full prompt copy.
+    if prompt.iter().all(|block| {
+        matches!(
+            block,
+            v2::ContentBlock::Text(_)
+                | v2::ContentBlock::ResourceLink(_)
+                | v2::ContentBlock::Other(_)
+        )
+    }) {
+        return Ok(Message::User(prompt_text(prompt)));
+    }
+    let has_resources = prompt.iter().any(|block| {
+        matches!(
+            block,
+            v2::ContentBlock::Image(_) | v2::ContentBlock::Audio(_) | v2::ContentBlock::Resource(_)
+        )
+    });
+    // Check the complete display envelope before duplicating any media into model context.
+    if has_resources {
+        crate::llm::content::check_envelope(prompt).map_err(|error| error.to_string())?;
+    }
+    let mut parts = Vec::new();
+    for block in prompt {
+        let capability = match block {
+            v2::ContentBlock::Image(_) => Some(0),
+            v2::ContentBlock::Audio(_) => Some(1),
+            v2::ContentBlock::Resource(_) => Some(2),
             v2::ContentBlock::Text(_)
             | v2::ContentBlock::ResourceLink(_)
-            | v2::ContentBlock::Other(_) => return None,
-            v2::ContentBlock::Image(_) => "image",
-            v2::ContentBlock::Audio(_) => "audio",
-            v2::ContentBlock::Resource(_) => "resource",
-            // A new typed SDK variant needs review; unknown wire types use Other.
-            _ => "unrecognized",
+            | v2::ContentBlock::Other(_) => None,
+            _ => {
+                return Err(
+                    "unrecognized typed prompt content; use a supported content block".into(),
+                );
+            }
         };
-        Some(format!(
-            "`{kind}` prompt content is not supported: Bee does not advertise that prompt \
-             capability; send `text` or `resource_link` blocks instead"
+        if capability.is_some_and(|index| !support[index]) {
+            let kind = ["image", "audio", "resource"][capability.expect("checked capability")];
+            return Err(format!(
+                "`{kind}` prompt content is not supported: Bee does not advertise that prompt capability; send text or resource_link blocks instead"
+            ));
+        }
+        let part = match block {
+            v2::ContentBlock::Text(text) => UserPart::Text(text.text.clone()),
+            v2::ContentBlock::ResourceLink(link) => UserPart::Text(format!(
+                "[Resource link, contents not fetched: {}]",
+                link.uri
+            )),
+            v2::ContentBlock::Image(image) => {
+                UserPart::media(image.mime_type.to_string(), image.data.clone())
+                    .map_err(|error| error.to_string())?
+            }
+            v2::ContentBlock::Audio(audio) => {
+                UserPart::media(audio.mime_type.to_string(), audio.data.clone())
+                    .map_err(|error| error.to_string())?
+            }
+            v2::ContentBlock::Resource(resource) => match &resource.resource {
+                v2::EmbeddedResourceResource::TextResourceContents(text) => {
+                    UserPart::Text(format!("[Embedded resource: {}]\n{}", text.uri, text.text))
+                }
+                v2::EmbeddedResourceResource::BlobResourceContents(blob) => UserPart::media(
+                    blob.mime_type
+                        .as_ref()
+                        .ok_or("binary embedded resources require a MIME type")?
+                        .to_string(),
+                    blob.blob.clone(),
+                )
+                .map_err(|error| error.to_string())?,
+                _ => return Err("unsupported embedded resource payload".into()),
+            },
+            _ => continue,
+        };
+        if capability == Some(0) && part.modality() != Some("image")
+            || capability == Some(1) && part.modality() != Some("audio")
+        {
+            return Err("media MIME type does not match the prompt block type".into());
+        }
+        // Embedded binary content requires both the resource and underlying media transport.
+        if part.modality() == Some("image") && !support[0]
+            || part.modality() == Some("audio") && !support[1]
+        {
+            return Err("embedded media is unsupported by the configured routes".into());
+        }
+        parts.push(part);
+    }
+    crate::llm::content::validate_parts(&parts).map_err(|error| error.to_string())?;
+    if parts.iter().all(|part| matches!(part, UserPart::Text(_))) {
+        Ok(Message::User(
+            parts
+                .into_iter()
+                .filter_map(|part| match part {
+                    UserPart::Text(text) => Some(text),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
         ))
-    })
+    } else {
+        Ok(Message::UserParts(parts))
+    }
 }
 
 const UNKNOWN_PROMPT: &str =
@@ -2131,8 +2268,56 @@ fn prompt_text(prompt: &[v2::ContentBlock]) -> String {
 
 #[cfg(test)]
 mod content_tests {
-    use super::{UNKNOWN_PROMPT, prompt_text};
+    use super::{UNKNOWN_PROMPT, prompt_message, prompt_text};
     use serde_json::json;
+
+    #[test]
+    fn supplied_resources_normalize_in_order_without_forwarding_opaque_metadata() {
+        let blocks: Vec<super::v2::ContentBlock> = serde_json::from_value(json!([
+            {"type":"text","text":"before"},
+            {"type":"resource","resource":{"uri":"file:///not-read","text":"supplied","_meta":{"secret":"never-forward"}}},
+            {"type":"image","mimeType":"image/png","data":"aGk=","uri":"https://not-fetched.invalid","_meta":{"secret":"never-forward"}},
+            {"type":"_opaque","text":"never-forward"},
+            {"type":"resource","resource":{"uri":"file:///not-read.pdf","mimeType":"application/pdf","blob":"aGk="}},
+            {"type":"text","text":"after"}
+        ])).unwrap();
+        let message = prompt_message(&blocks, [true, true, true]).unwrap();
+        let crate::llm::Message::UserParts(parts) = message else {
+            panic!("multipart input expected")
+        };
+        assert_eq!(parts.len(), 5);
+        assert_eq!(
+            parts[1],
+            crate::llm::UserPart::Text("[Embedded resource: file:///not-read]\nsupplied".into())
+        );
+        assert_eq!(parts[2].modality(), Some("image"));
+        assert_eq!(parts[3].modality(), Some("pdf"));
+        assert!(
+            !serde_json::to_string(&parts)
+                .unwrap()
+                .contains("never-forward")
+        );
+    }
+
+    #[test]
+    fn invalid_media_never_falls_back_to_text_or_opaque_content() {
+        for block in [
+            json!({"type":"image","mimeType":"image/png","data":"private-invalid-base64"}),
+            json!({"type":"image","mimeType":"audio/wav","data":"aGk="}),
+            json!({"type":"audio","mimeType":"image/png","data":"aGk="}),
+            json!({"type":"image","mimeType":"image/png","data":""}),
+            json!({"type":"resource","resource":{"uri":"file:///x","blob":"aGk="}}),
+            json!({"type":"resource","resource":{"uri":"file:///x","mimeType":"application/octet-stream","blob":"aGk="}}),
+        ] {
+            let blocks: Vec<super::v2::ContentBlock> =
+                serde_json::from_value(json!([{"type":"text","text":"valid sibling"},block]))
+                    .unwrap();
+            let error = prompt_message(&blocks, [true, true, true]).unwrap_err();
+            assert!(!error.contains("private-"));
+        }
+        let blocks: Vec<super::v2::ContentBlock> = serde_json::from_value(json!([{"type":"resource","resource":{"uri":"file:///x","mimeType":"image/png","blob":"aGk="}}])).unwrap();
+        assert!(prompt_message(&blocks, [false, false, true]).is_err());
+    }
 
     #[test]
     fn unknown_content_uses_a_fixed_marker_only_without_recognized_blocks() {

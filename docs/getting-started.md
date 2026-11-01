@@ -71,7 +71,8 @@ this exercises a deterministic protocol scenario, not provider inference. See [s
 ## Known limitations
 
 - Bee supports the documented draft wire-v2 subset, not wire-v1 or every proposed ACP feature. See [compatibility](compatibility.md).
-- Inference supports text and function tools. Resource links remain references, not fetched content; see
+- Inference supports text, [declared media inputs](inference.md#images-audio-and-embedded-resources) and function tools.
+  Resource links remain references, not fetched content; see
   [unsupported inference features](inference.md).
 - Native tools run on the host with Bee's privileges; there is no sandbox. Bash must be installed for the Bash tool.
   Review [tool execution and permissions](tools.md) for defaults and bounds.

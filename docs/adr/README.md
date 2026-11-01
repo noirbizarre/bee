@@ -56,3 +56,4 @@ by editing the old one. The history is the value.
 - [ADR-031](031-displayable-provider-thoughts.md) — Separate displayable thoughts from private native continuation
 - [ADR-032](032-project-local-mcp.md) — Discover project MCP definitions and own direct connections per session
 - [ADR-033](033-bounded-acp-delegation.md) — Bound ACP task delegation at execution and ownership boundaries
+- [ADR-034](034-multimodal-prompt-content.md) — Gate portable multimodal prompts by model declarations and native routes
