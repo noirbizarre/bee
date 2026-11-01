@@ -97,6 +97,13 @@ elicitation is usable only after initialization, as enforced by the SDK. See
 Independent stdio-peer coverage lives in `tests/acp_client.rs`; the matrix below
 continues to describe Bee's agent/server role.
 
+Opt-in [task delegation](delegation.md) uses that same generic wire-v2 session
+contract, with one child session/process per task and structured results for parent
+synthesis. It forwards negotiated child interactions and enforces local child,
+concurrency, deadline and depth limits. Remaining-depth propagation is a documented
+Bee-specific environment contract; other agents need not implement it.
+Production integration evidence lives in `tests/delegation.rs`.
+
 ### Deterministic test-agent coverage
 
 `bee --scenario <name>` is a shipped, stdio-based deterministic test-agent mode using the same ACP boundary and
@@ -302,7 +309,7 @@ while client-hosted ACP servers retain client-owned policy. This implements the 
 | `providers/list`, `providers/set`, `providers/disable` / root `providers` | Not planned | No management handlers or capability. The qualified model selector does not permit endpoint/credential editing. [Handler/option code][acp-code]. |
 | Markdown and file-backed `plan_update` representations | Not planned | Only item plans produced; no `markdown` or `file` representation. [Plan implementation][plan-code]. |
 | `plan_removed` | Not planned | No removal notifications; clearing item entries uses an empty full snapshot. [Plan tests][test-plans]. |
-| `subagent_update`, child mutation/cancel capabilities | Not planned | No standard child-session exposure. Outbound client/delegation issues [#20](https://github.com/noirbizarre/bee/issues/20)/[#21](https://github.com/noirbizarre/bee/issues/21) are not commitments to this experimental representation. |
+| `subagent_update`, child mutation/cancel capabilities | Not planned | Bounded delegation uses ordinary tool presentation and generic outbound ACPv2 sessions, without this experimental child-session representation. |
 | `session_message`, `session_message_chunk`, session-directed prompts | Not planned | No standard inter-session message presentation/routing. [Current session handlers][acp-code]. |
 | End-of-work `idle.usage` token totals | Not planned | No total/input/output/thought/cache token counters on terminal state. Distinct from supported estimated `usage_update` and planned monetary cost. [Finalization][acp-code]. |
 | `state_update.state: unknown` | Partially supported | Schema can represent it, but Bee always supplies a known running/requires_action/idle snapshot; it does not need the unknown-state producer fallback. [Resume/finalization][acp-code]. |

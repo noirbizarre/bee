@@ -5,6 +5,12 @@ discover an existing native session ID and restore its conversation without keep
 
 ## Storage and retention
 
+[Delegated tasks](delegation.md) use independent child ACP sessions. Their owners
+survive parent inference cancellation and drain before parent terminal idle or
+direct-close responses. Bounded delegation presentation/results use ordinary
+history retention and replay; restoring history never launches child processes.
+Child Bee instances may independently persist sessions in their own state directory.
+
 Each session belongs to the [profile](profiles.md) selected when it was created. Listing returns only that profile's
 sessions. Resume under another profile fails before recovery or replay, even if both reference the same account.
 An explicitly selected account that has since been removed from the owning profile also prevents resume, rather

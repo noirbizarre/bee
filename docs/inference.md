@@ -412,6 +412,10 @@ Normal ACP sessions advertise and execute the shipped `bash`, `read`, `glob`, `g
 `write`, `edit`, `delete`, `move`, and `copy` tools
 through this
 same interface.
+Opt-in [`delegate`](delegation.md) joins the catalog through this ACP boundary,
+with named-agent selection and bounded structured child results in the next model
+request. A batch is one parent tool call; its independent children share separate
+per-turn child and connection-wide concurrency limits. Native calls remain sequential.
 The boundary also supplies [`update_plan`](tools.md#execution-plans) to publish
 structured turn plans across all three provider protocols. Its definition and
 correlated call/results count toward model context and normal turn limits;

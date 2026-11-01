@@ -33,6 +33,7 @@ nav = [
   { "Model availability and discovery" = "models.md" },
   { "ACP / ACPv2 compatibility" = "compatibility.md" },
   { "Outbound ACP client" = "acp-client.md" },
+  { "Task delegation" = "delegation.md" },
   { "Test-agent scenarios" = "scenarios.md" },
   { "Instructions and skills" = "instructions.md" },
   { "About" = [

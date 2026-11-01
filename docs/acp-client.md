@@ -47,6 +47,14 @@ environment, then adds configured environment overrides. A session's absolute
 
 ## Library usage
 
+Production model sessions can opt into [bounded task delegation](delegation.md).
+That layer uses fresh child sessions, default-ask launch authorization, structured
+interaction forwarding and a turn-owned result projection. It applies the documented
+`BEE_DELEGATION_REMAINING_DEPTH` overlay after configured environment settings.
+Delegated launches use the SDK's raw process API plus its byte-stream transport,
+discard stderr and explicitly await process termination before parent idle; the
+public scoped library API below retains its SDK-managed process/drop contract.
+
 The host supplies a Tokio runtime with timers enabled:
 
 ```rust,no_run

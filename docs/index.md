@@ -42,6 +42,8 @@ supported subsets, planned and not-planned features, implementation evidence and
 
 The Rust library also provides an [outbound ACPv2 client](acp-client.md) for explicitly selected named local agents,
 with scoped stdio process ownership and structured host permission/elicitation handlers.
+Opt-in [bounded task delegation](delegation.md) exposes these named agents to the model
+through a batch-capable `delegate` tool, with enforced child, concurrency, depth and timeout limits.
 
 Bee loads project and nested `AGENTS.md` instructions, additive `~/.agents/AGENTS.md`, and standard Agent Skills from
 project/user `.agents/skills` directories. Additional skill roots use `[skills] extra_roots = ["/opt/team/skills"]` in the
@@ -110,6 +112,8 @@ max_tool_calls = 64   # individual tool calls across all batches in a turn
 Both settings are positive integers and merge independently across configuration layers.
 Tools execute sequentially; a batch exceeding a budget is rejected before execution.
 See [turn execution limits](inference.md#turn-execution-limits) for boundary behavior.
+`enabled = true` under `[delegation]` separately enables [delegation](delegation.md#configuration-and-permission);
+it defaults to four children per turn, two concurrent children per ACP connection, depth one and a 600-second deadline.
 
 ### Providers and models
 

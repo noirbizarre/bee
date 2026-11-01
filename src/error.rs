@@ -147,6 +147,22 @@ pub enum Error {
         instruction: &'static str,
     },
 
+    /// Invalid delegation authority or resource limits, without setting values.
+    #[error("delegation setting `{key}` in `{path}` {reason}")]
+    #[diagnostic(
+        code(bee::delegation::setting),
+        help(
+            "use documented [delegation] settings and a nonnegative BEE_DELEGATION_REMAINING_DEPTH"
+        )
+    )]
+    DelegationSetting {
+        /// Known setting name; unknown user-supplied keys are never echoed.
+        key: &'static str,
+        /// Source path, never configuration contents.
+        path: String,
+        /// Fixed safe classification.
+        reason: &'static str,
+    },
     /// Native catalog or execution context construction failed.
     #[error(transparent)]
     #[diagnostic(transparent)]
