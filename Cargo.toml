@@ -106,7 +106,7 @@ clap = { version = "4", features = ["derive", "env", "wrap_help"] }
 #
 # `stdio` is the SDK's native stdin/stdout transport (ADR-003).
 # `process` owns local outbound delegates, including child guards and stderr draining.
-agent-client-protocol = { version = "=3.5.0", features = ["stdio", "process", "unstable_protocol_v2", "unstable_mcp_over_acp"] }
+agent-client-protocol = { version = "=3.6.0", features = ["stdio", "process", "unstable_protocol_v2", "unstable_mcp_over_acp"] }
 # Delegated tasks use the SDK's raw process API to await reaping before parent idle.
 async-process = "2.5"
 # Direct MCP shares the pinned SDK lifecycle, with a raw ingress adapter so typed
