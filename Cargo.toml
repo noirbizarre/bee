@@ -111,7 +111,7 @@ agent-client-protocol = { version = "=3.5.0", features = ["stdio", "process", "u
 async-process = "2.5"
 # Direct MCP shares the pinned SDK lifecycle, with a raw ingress adapter so typed
 # decoding cannot discard tool-result extensions or error data.
-rmcp = { version = "=3.8.0", default-features = false, features = ["client", "transport-async-rw", "transport-streamable-http-client"] }
+rmcp = { version = "=3.9.0", default-features = false, features = ["client", "transport-async-rw", "transport-streamable-http-client"] }
 sse-stream = "0.2"
 http = "1"
 # Process groups / Windows jobs keep descendants inside direct MCP ownership.
